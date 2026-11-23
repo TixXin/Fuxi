@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import subprocess
 import threading
 import time
@@ -31,7 +32,10 @@ class Sender:
 
     # ---- 底层 ----
     def _run(self, *args: str, stdin: bytes | None = None) -> str:
-        r = subprocess.run(args, input=stdin, env=self.env, capture_output=True, timeout=15)
+        try:
+            r = subprocess.run(args, input=stdin, env=self.env, capture_output=True, timeout=15)
+        except subprocess.TimeoutExpired as e:
+            raise SendError(f"{args[0]} 超时") from e
         if r.returncode != 0:
             raise SendError(f"{args[0]} 失败: {r.stderr.decode(errors='replace').strip()}")
         return r.stdout.decode(errors="replace").strip()
@@ -58,23 +62,46 @@ class Sender:
         with open(path, "rb") as f:
             self._xclip(f.read(), "-t", mime)
 
-    def window(self) -> str:
-        """微信主窗口 id（可见、面积最大的那个）。"""
-        out = self._run("xdotool", "search", "--onlyvisible", "--class", "wechat")
-        ids = [w for w in out.split() if w]
-        if not ids:
-            raise SendError("找不到微信窗口（未登录或未启动？）")
-        best, area = ids[0], -1
-        for w in ids:
+    def _windows(self) -> list[tuple[str, int, int]]:
+        try:
+            out = self._run("xdotool", "search", "--onlyvisible", "--class", "wechat")
+        except SendError:
+            return []
+        res = []
+        for w in out.split():
             try:
                 geo = self._run("xdotool", "getwindowgeometry", w)
-                wh = geo.rsplit("Geometry:", 1)[1].strip().split("x")
-                a = int(wh[0]) * int(wh[1])
+                ww, hh = geo.rsplit("Geometry:", 1)[1].strip().split("x")
+                res.append((w, int(ww), int(hh)))
             except (SendError, IndexError, ValueError):
                 continue
-            if a > area:
-                best, area = w, a
-        return best
+        return res
+
+    def window(self) -> str:
+        """微信主窗口 id。主窗口被隐藏到托盘时，点托盘图标恢复一次。"""
+        for attempt in range(2):
+            wins = self._windows()
+            main = [w for w in wins if w[1] >= 1000]
+            if main:
+                return max(main, key=lambda w: w[1] * w[2])[0]
+            tray = [w for w in wins if w[1] <= 64 and w[2] <= 64]
+            if attempt == 0 and tray:
+                log.warning("微信主窗口不可见，点击托盘图标恢复")
+                self._run("xdotool", "mousemove", "--window", tray[0][0], "12", "12", "click", "1")
+                time.sleep(1.5)
+                continue
+            break
+        raise SendError("找不到微信主窗口（未登录、待确认或已退出）")
+
+    def window_state(self) -> str:
+        """ok = 主窗口可见；login = 只有登录/确认小窗；tray = 主窗口被隐藏到托盘；
+        missing = 没有微信窗口。只读，不抢焦点。"""
+        widths = [w[1] for w in self._windows()]
+        if any(x >= 1000 for x in widths):
+            return "ok"
+        if any(x >= 300 for x in widths):
+            return "login"
+        return "tray" if widths else "missing"
 
     def _activate(self) -> str:
         w = self.window()
@@ -119,7 +146,23 @@ class Sender:
         x, y = hit
         self._run("xdotool", "mousemove", "--window", w, str(x), str(y), "click", "1")
         time.sleep(0.6)
+        # 粘贴前再核对一次：OCR 识别聊天标题，与目标名一致才继续
+        title = self.read_title(w)
+        if not title_matches(name, title):
+            # 注意：此时焦点在聊天里，按 Escape 会把整个主窗口隐藏到托盘，所以什么都不按
+            raise SendError(f"打开的会话标题是「{title}」，与目标「{name}」不符，放弃发送")
         self._current_chat = name
+
+    def read_title(self, w: str | None = None) -> str:
+        """OCR 当前聊天标题（RapidOCR / PP-OCR，对生僻字比 tesseract 准得多）。"""
+        w = w or self.window()
+        img = self._capture(w).title_bgr()
+        try:
+            res, _ = _ocr()(img)
+        except Exception as e:
+            raise SendError(f"OCR 失败：{e}") from e
+        boxes = sorted(res or [], key=lambda r: r[0][0][0])  # 按左上角 x 排序
+        return "   ".join(b[1] for b in boxes).strip()
 
     # ---- 对外 ----
     def send_text(self, chat: str, text: str) -> None:
@@ -146,6 +189,45 @@ class Sender:
             r = subprocess.run(["xwd", "-id", w, "-silent"], env=self.env, stdout=f, timeout=15)
         if r.returncode != 0:
             raise SendError("xwd 截图失败")
+
+
+_OCR = None
+
+
+def _ocr():
+    """RapidOCR 引擎单例（首次加载约 1 秒）。"""
+    global _OCR
+    if _OCR is None:
+        from rapidocr_onnxruntime import RapidOCR
+
+        _OCR = RapidOCR()
+    return _OCR
+
+
+_NON_WORD = re.compile(r"[^0-9A-Za-z\u4e00-\u9fff]+")
+_MEMBER_COUNT = re.compile(r"[(（]\s*\d+\s*[)）]")
+
+
+def _norm(s: str) -> str:
+    return _NON_WORD.sub("", s).lower()
+
+
+def title_matches(target: str, ocr: str) -> bool:
+    """OCR 出的聊天标题是否就是目标会话。
+
+    标题右侧图标会被识别成噪声，先按 3 个以上空格切掉；群标题带「(成员数)」，去掉；
+    只比较汉字/字母/数字（表情符号 OCR 不出来）。过长被截断（以 … 结尾）时按前缀比较。
+    宁可误拒（不发），不可误放。
+    """
+    head = re.split(r"\s{3,}", ocr.strip())[0] if ocr.strip() else ""
+    truncated = head.rstrip().endswith(("…", "..."))
+    head = _MEMBER_COUNT.sub("", head)
+    t, h = _norm(target), _norm(head)
+    if not t or not h:
+        return False
+    if t == h:
+        return True
+    return truncated and len(h) >= 4 and t.startswith(h)
 
 
 class _Shot:
@@ -179,6 +261,21 @@ class _Shot:
     @staticmethod
     def _near(p, q, tol=6) -> bool:
         return all(abs(a - c) <= tol for a, c in zip(p, q))
+
+    TITLE_BOX = (610, 80, 1400, 150)  # 聊天标题栏（窗口坐标，2 倍缩放）
+
+    def title_bgr(self):
+        """把聊天标题栏裁成 BGR 数组（numpy），喂给 OCR。"""
+        import numpy as np
+
+        x0, y0, x1, y1 = self.TITLE_BOX
+        x1, y1 = min(x1, self.w), min(y1, self.h)
+        rows = []
+        for y in range(y0, y1):
+            start = self.off + y * self.bpl + x0 * self.step
+            rows.append(self.raw[start:start + (x1 - x0) * self.step])
+        a = np.frombuffer(b"".join(rows), dtype=np.uint8).reshape(y1 - y0, x1 - x0, self.step)
+        return np.ascontiguousarray(a[:, :, :3])  # xwd 小端即 B,G,R(,X)
 
     def dropdown_bottom(self) -> int:
         white = (250, 250, 250)

@@ -12,6 +12,8 @@
   FUXI_SETTLE_MS                  同一会话连发合并窗口，默认 1500
   FUXI_STALE_SEC                  早于此秒数的消息不回复，默认 120
   FUXI_REPLY_SELF                 1 = 文件传输助手里自己的消息也交给内核（自测）
+  FUXI_RATE_CHAT / FUXI_RATE_GLOBAL  自动回复每会话 / 全局每分钟上限，默认 6 / 20
+  FUXI_QUIET                      夜间静默时段，如 00:30-07:30（期间不自动回复）
   FUXI_ALLOW                      初始白名单（chat_id，逗号分隔），仅在 /state/allow.txt 不存在时使用
 """
 
@@ -23,6 +25,7 @@ import hashlib
 import logging
 import os
 import queue
+import random
 import threading
 import time
 from dataclasses import dataclass, field
@@ -40,10 +43,19 @@ def _h(text: str) -> str:
     return hashlib.sha1(text.strip().encode()).hexdigest()
 
 
+def _brief(text: str) -> str:
+    """日志里不记消息正文，只记长度和指纹（排障时可与数据库比对）。
+    FUXI_LOG_TEXT=1 时记录前 60 字，仅限调试。"""
+    if os.environ.get("FUXI_LOG_TEXT") == "1":
+        return repr(text[:60])
+    return f"<{len(text)}字 #{_h(text)[:8]}>"
+
+
 @dataclass
 class SendJob:
     chat: str               # username
     text: str | None = None
+    source: str = "bot"     # bot（自动回复，受限速）| reminder | api
     image: str | None = None
     verify: bool = True
     done: threading.Event = field(default_factory=threading.Event)
@@ -68,6 +80,11 @@ class Bridge:
         self.settle = int(env.get("FUXI_SETTLE_MS", "1500")) / 1000
         self.stale = int(env.get("FUXI_STALE_SEC", "120"))
         self.reply_self = env.get("FUXI_REPLY_SELF") == "1"
+        # 防封节奏：自动回复每会话/全局每分钟上限、打字延迟、夜间静默（如 00:30-07:30）
+        self.rate_chat = int(env.get("FUXI_RATE_CHAT", "6"))
+        self.rate_global = int(env.get("FUXI_RATE_GLOBAL", "20"))
+        self.quiet = env.get("FUXI_QUIET", "").strip()
+        self.sent_times: collections.deque[tuple[float, str]] = collections.deque(maxlen=1000)
         self.extra_names = [n.strip() for n in env.get("FUXI_SELF_NAMES", "").split(",") if n.strip()]
         self.interval = float(env.get("FUXI_POLL_INTERVAL", "0.5"))
         # 白名单：/state/allow.txt 热加载；FUXI_ALLOW 只在文件不存在时用作初始值
@@ -86,6 +103,10 @@ class Bridge:
         self.last_send_ok = True
         # 熔断：发送后核对失败（疑似发错会话）就停止一切发送，直到人工 POST /resume 或重启
         self.halted: str = ""
+        # 健康状态（/healthz 汇总，宿主侧看门狗据此推送 Kuma 告警）
+        self.last_poll_ok_at = 0.0
+        self.kernel_ok_at = 0.0
+        self.last_abort: tuple[float, str] | None = None  # 最近一次发送前拦截
 
     # ---------- 名字 ----------
     def name_of(self, username: str) -> str:
@@ -95,6 +116,28 @@ class Bridge:
 
     def self_names(self) -> list[str]:
         return list(dict.fromkeys(self.extra_names + self.reader.self_names()))
+
+    # ---------- 节奏 ----------
+    def in_quiet_hours(self, now: float | None = None) -> bool:
+        if not self.quiet or "-" not in self.quiet:
+            return False
+        try:
+            a, b = (int(x[:2]) * 60 + int(x[3:5]) for x in self.quiet.split("-", 1))
+        except ValueError:
+            return False
+        t = time.localtime(now or time.time())
+        m = t.tm_hour * 60 + t.tm_min
+        return a <= m < b if a <= b else (m >= a or m < b)
+
+    def rate_ok(self, chat: str) -> bool:
+        cut = time.time() - 60
+        recent = [c for t, c in self.sent_times if t >= cut]
+        return len(recent) < self.rate_global and recent.count(chat) < self.rate_chat
+
+    @staticmethod
+    def typing_delay(text: str) -> float:
+        """模拟打字：约每秒 6 字，0.8~6 秒，加随机抖动。"""
+        return min(6.0, 0.8 + len(text) / 6) + random.uniform(0, 0.8)
 
     # ---------- 发送（单线程串行） ----------
     def send(self, job: SendJob, timeout: float = 90) -> SendJob:
@@ -132,6 +175,8 @@ class Bridge:
                 if "放弃发送" not in str(e):
                     self.halted = f"{time.strftime('%H:%M:%S')} 发往「{job.chat}」时出错：{e}"
                     log.critical("已熔断：%s", self.halted)
+                else:
+                    self.last_abort = (time.time(), str(e))
                 self.last_send_ok = False
                 log.error("发送到 %s 失败：%s", job.chat, e)
             finally:
@@ -164,7 +209,8 @@ class Bridge:
         for s in self.reader.sessions(300):
             u, ts = s["username"], s["last_timestamp"] or 0
             if self.session_seen.get(u) != ts:
-                if u in self.session_seen or self.session_seen.get("__init__"):
+                # 启动后新出现的会话、或启动时就在过期窗口内有新动静的会话（停机补偿）
+                if u in self.session_seen or self.session_seen.get("__init__") or ts >= time.time() - self.stale:
                     out.append(u)
                 self.session_seen[u] = ts
         self.session_seen["__init__"] = 1
@@ -182,6 +228,8 @@ class Bridge:
     def _accept(self, m: Message) -> bool:
         if m.type != "text" or not m.text.strip():
             return False
+        if self.in_quiet_hours():
+            return False
         if not self._allowed_chat(m.chat):
             return False
         if _h(m.text) in self.sent_hashes:
@@ -197,9 +245,12 @@ class Bridge:
 
     def poll_once(self) -> None:
         self.allowlist.reload()
-        for chat in self._changed_chats():
+        boot, self.pending_boot = getattr(self, "pending_boot", []), []
+        if boot:
+            log.info("停机补偿：检查 %d 个近期有动静的会话", len(boot))
+        for chat in list(dict.fromkeys(boot + self._changed_chats())):
             try:
-                new = self.reader.poll(chat, since_time=int(self.started))
+                new = self.reader.poll(chat, since_time=int(self.started) - self.stale)
             except Exception:
                 log.exception("读取 %s 失败", chat)
                 continue
@@ -238,7 +289,7 @@ class Bridge:
         with self.chat_locks[chat]:
             payload = self._payload(chat, batch)
             log.info("→ 内核 %s [%s] %s", payload["chat_title"] or self.name_of(chat), payload["senderName"],
-                     payload["text"][:60])
+                     _brief(payload["text"]))
             try:
                 resp = self.kernel.webhook(payload)
             except KernelError as e:
@@ -254,8 +305,35 @@ class Bridge:
                 return
             mention = resp.get("mention") or ""
             for i, b in enumerate(bubbles):
+                if not self.rate_ok(chat):
+                    log.warning("超过发送频率上限，丢弃 %s 的剩余 %d 条回复", self.name_of(chat), len(bubbles) - i)
+                    return
                 text = f"@{mention} {b}" if (i == 0 and mention and chat.endswith("@chatroom")) else b
+                time.sleep(self.typing_delay(text))
+                self.sent_times.append((time.time(), chat))
                 self.send(SendJob(chat=chat, text=text))
+
+    # ---------- 健康 ----------
+    def problems(self) -> list[str]:
+        """当前需要人关注的问题；空列表 = 健康。"""
+        now = time.time()
+        out = []
+        if self.halted:
+            out.append(f"已熔断：{self.halted}")
+        state = self.sender.window_state()
+        if state != "ok":
+            out.append({"login": "微信待登录（需在手机上确认）", "missing": "找不到微信窗口",
+                        "tray": "微信主窗口被隐藏到托盘"}.get(state, state))
+        for rel in ("session/session.db", "message/message_0.db"):
+            if rel not in self.keyring.keys:
+                out.append(f"缺少密钥：{rel}")
+        if now - self.last_poll_ok_at > 120:
+            out.append("消息轮询停滞或持续出错")
+        if now - self.kernel_ok_at > 90:
+            out.append("内核不可达")
+        if self.last_abort and now - self.last_abort[0] < 600:
+            out.append(f"10 分钟内有发送被拦截：{self.last_abort[1]}")
+        return out
 
     # ---------- 提醒 / 心跳 / 联系人 ----------
     def _reminder_loop(self) -> None:
@@ -281,7 +359,7 @@ class Bridge:
                     continue
                 if it.get("chatType") == "group" and it.get("atName"):
                     text = f"@{it['atName']} {text}"
-                job = self.send(SendJob(chat=it.get("wxid") or "", text=text))
+                job = self.send(SendJob(chat=it.get("wxid") or "", text=text, source="reminder"))
                 try:
                     self.kernel.reminder_ack(rid, job.ok and job.verified is not False, job.error)
                 except KernelError as e:
@@ -296,6 +374,7 @@ class Bridge:
                     "account_nick": (self.reader.self_names() or [""])[0], "account_ok": True,
                     "account_why": "", "account_guard": False, "window": self.last_send_ok,
                 })
+                self.kernel_ok_at = time.time()
             except Exception as e:
                 log.debug("心跳失败：%s", e)
             time.sleep(20)
@@ -318,11 +397,14 @@ class Bridge:
             self._sync_kernel_allow(self.allowlist.items)
         except Exception as e:
             log.warning("同步白名单到内核失败：%s", e)
-        self._changed_chats()  # 记下当前各会话时间戳，不回放历史
+        self.pending_boot = self._changed_chats()  # 记下各会话进度；过期窗口内有动静的稍后补处理
         threading.Thread(target=self._send_worker, name="send", daemon=True).start()
         threading.Thread(target=self._reminder_loop, name="reminders", daemon=True).start()
         threading.Thread(target=self._heartbeat_loop, name="heartbeat", daemon=True).start()
         threading.Thread(target=self._sync_contacts, name="contacts", daemon=True).start()
+        from .sender import _ocr
+
+        threading.Thread(target=_ocr, name="ocr-warmup", daemon=True).start()
         if os.environ.get("FUXI_API_TOKEN"):
             from .api import serve
 
@@ -333,6 +415,7 @@ class Bridge:
         while True:
             try:
                 self.poll_once()
+                self.last_poll_ok_at = time.time()
             except Exception:
                 log.exception("轮询出错")
                 time.sleep(3)

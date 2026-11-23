@@ -2,7 +2,7 @@
 
 所有请求需 `Authorization: Bearer <FUXI_API_TOKEN>`。
 
-  GET  /healthz                      {ok, wechat, halted}
+  GET  /healthz                      {ok, healthy, problems[], wechat, halted}
   POST /resume                       解除熔断（发送后核对失败会停止一切发送）
   GET  /allow                        当前白名单 [{chat_id, name}]
   PUT  /allow  {"items": [...]}      整体替换；元素可以是 chat_id、唯一的显示名，或 "*"
@@ -65,7 +65,9 @@ def serve(bridge: "Bridge") -> None:
                 return
             u = urlparse(self.path)
             if u.path == "/healthz":
-                return self._json(200, {"ok": True, "wechat": bridge.last_send_ok, "halted": bridge.halted})
+                probs = bridge.problems()
+                return self._json(200, {"ok": True, "healthy": not probs, "problems": probs,
+                                        "wechat": bridge.last_send_ok, "halted": bridge.halted})
             if u.path == "/allow":
                 return self._json(200, {"ok": True, "items": [
                     {"chat_id": i, "name": "全部" if i == "*" else bridge.name_of(i)} for i in bridge.allowlist.items]})
@@ -199,9 +201,9 @@ def serve(bridge: "Bridge") -> None:
                 results = []
                 # 先图后文：分享图配一句说明的常见用法
                 if img_path:
-                    results.append(bridge.send(SendJob(chat=chat, image=img_path)))
+                    results.append(bridge.send(SendJob(chat=chat, image=img_path, source="api")))
                 if text:
-                    results.append(bridge.send(SendJob(chat=chat, text=str(text))))
+                    results.append(bridge.send(SendJob(chat=chat, text=str(text), source="api")))
             finally:
                 if img_path and os.path.exists(img_path):
                     os.remove(img_path)

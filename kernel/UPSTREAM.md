@@ -12,7 +12,7 @@
 
 | 文件 | 作用 |
 |---|---|
-| `docker-entrypoint.js` | 容器启动时把 `FUXI_KERNEL_TOKEN`、端口、主人 wxid 写入 `data/config.json`，随后 `exec node server.js` |
+| `docker-entrypoint.js` | 容器启动时把 `FUXI_KERNEL_TOKEN`、端口、主人 wxid 写入 `data/config.json`（并默认关闭 `log.traceRaw`），随后 `exec node server.js` |
 | `Dockerfile` | node:22-slim 镜像，`data/` 为卷 |
 | `UPSTREAM.md`、`.upstream-commit` | 本说明 |
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 在本机构建镜像并部署到服务器（服务器拉 Docker Hub 慢，所以本机构建再传）。
 #
-#   FUXI_HOST=<ssh 别名> FUXI_DIR=<服务器上的部署目录> scripts/deploy.sh [bridge|kernel|all]
+#   FUXI_HOST=<ssh 别名> FUXI_DIR=<服务器上的部署目录> scripts/deploy.sh [bridge|kernel|watchdog|all]
 #
 # 服务器地址与目录只从环境变量读，不写进仓库。需要本机 Docker 在运行。
 set -euo pipefail
@@ -14,8 +14,9 @@ root="$(cd "$(dirname "$0")/.." && pwd)"
 case "$what" in
   bridge) services=(bridge) ;;
   kernel) services=(kernel) ;;
-  all) services=(kernel bridge) ;;
-  *) echo "用法：$0 [bridge|kernel|all]" >&2; exit 2 ;;
+  watchdog) services=(watchdog) ;;
+  all) services=(kernel bridge watchdog) ;;
+  *) echo "用法：$0 [bridge|kernel|watchdog|all]" >&2; exit 2 ;;
 esac
 
 images=()
@@ -37,11 +38,13 @@ ssh "$FUXI_HOST" "test -f '$FUXI_DIR/.env'" || {
 }
 
 echo "==> 启动"
-if [ "$what" = bridge ]; then
-  ssh "$FUXI_HOST" "cd '$FUXI_DIR' && docker compose up -d bridge"
+if [ "$what" = bridge ] || [ "$what" = watchdog ]; then
+  ssh "$FUXI_HOST" "cd '$FUXI_DIR' && docker compose up -d --no-deps $what"
+elif [ "$what" = kernel ]; then
+  ssh "$FUXI_HOST" "cd '$FUXI_DIR' && docker compose up -d kernel && docker compose up -d --no-deps --force-recreate bridge"
 else
   # 桥接共用内核的网络命名空间：内核重建后桥接必须跟着重建，否则还挂在旧的命名空间上
-  ssh "$FUXI_HOST" "cd '$FUXI_DIR' && docker compose up -d kernel && docker compose up -d --force-recreate bridge"
+  ssh "$FUXI_HOST" "cd '$FUXI_DIR' && docker compose up -d kernel && docker compose up -d --no-deps --force-recreate bridge && docker compose up -d --no-deps watchdog"
 fi
 
 echo "==> 等待桥接就绪（首次扫描密钥约 30 秒）"

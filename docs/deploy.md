@@ -17,6 +17,7 @@
 | `wechat-selkies` | `nickrunning/wechat-selkies` | 虚拟桌面 + 官方 Linux 微信 + 网页远程桌面 | 独立 compose，浮汐只给它加了一个挂载 |
 | `fuxi-kernel` | `fuxi-kernel`（本仓库 `kernel/`） | 对话、记忆、人设、调模型 | 数据在卷 `fuxi_kernel-data` |
 | `fuxi-bridge` | `fuxi-bridge`（本仓库 `bridge/`） | 读库收消息、操作窗口发消息、对外 API | 共用**内核的网络**、**微信的 pid 命名空间**，只读挂载微信数据，共享 X socket |
+| `fuxi-watchdog` | `fuxi-watchdog`（本仓库 `watchdog/`） | 每分钟查健康并推送告警；微信或内核容器重建后自动重建 bridge | 宿主网络 + docker.sock |
 
 ```
 wechat-selkies ──pid 命名空间──┐
@@ -69,6 +70,12 @@ ssh <host> 'chmod 600 <fuxi-dir>/.env'
 | `FUXI_API_PORT` | 对外 API 在宿主回环上的端口，默认 8790，先确认没被占用 |
 | `FUXI_ALLOW` | 初始白名单，建议先只写 `filehelper` |
 | `DEEPSEEK_API_KEY` | 模型 key |
+| `FUXI_RATE_CHAT` / `FUXI_RATE_GLOBAL` | 自动回复每会话 / 全局每分钟上限，默认 6 / 20（API 发送不受限） |
+| `FUXI_QUIET` | 夜间静默时段，如 `23:30-07:00`（北京时间）；留空不静默。静默期间收到的消息不回复 |
+| `KUMA_PUSH_URL` | 告警用的 Uptime Kuma Push 地址，见「告警」；留空只写日志 |
+
+内核默认不保留聊天原文（`log.traceRaw=false`）；排障需要时在 `.env` 加 `FUXI_KERNEL_TRACE_RAW=1`
+并 `up -d kernel`，用完删掉。
 
 口令可以直接在服务器上生成写入，不经过本机：
 
@@ -82,11 +89,12 @@ ssh <host> 'cd <fuxi-dir> && sed -i "s/^FUXI_KERNEL_TOKEN=.*/FUXI_KERNEL_TOKEN=$
 FUXI_HOST=<host> FUXI_DIR=<fuxi-dir> scripts/deploy.sh
 ```
 
-脚本做的事：本机构建两个镜像 → `docker save | ssh docker load` 传过去 → 上传 `compose.yaml` →
+脚本做的事：本机构建三个镜像 → `docker save | ssh docker load` 传过去 → 上传 `compose.yaml` →
 `docker compose up -d` → 等桥接扫完密钥，打印状态。正常输出最后几行类似：
 
 ```
 fuxi-bridge   Up 40 seconds
+fuxi-watchdog Up 41 seconds
 fuxi-kernel   Up 41 seconds (healthy)
 ... 解出密钥 19 / 19 个库
 ... 白名单已同步到内核（1 个会话）
@@ -135,7 +143,20 @@ docker logs --tail 50 fuxi-kernel        # 对话、模型用量
 curl -s -H "Authorization: Bearer $T" 127.0.0.1:8790/healthz
 ```
 
-`healthz` 里 `halted` 非空表示**已熔断**，见下文。
+`healthz` 的 `healthy` 为 false 时，`problems` 列出原因：已熔断、微信待登录/窗口不在、
+有库解不出密钥、轮询停滞超过 2 分钟、内核心跳超过 90 秒、10 分钟内有放弃发送。
+`halted` 非空表示**已熔断**，见下文。
+
+### 告警
+
+watchdog 每分钟读一次 `healthz`，推送到 Uptime Kuma 的 Push 监控，再由 Kuma 发 Bark 等通知：
+
+1. Kuma 里新建监控，类型选 **Push**，心跳间隔 60 秒，挂上通知；
+2. 复制它给的地址，**去掉** `?status=up&msg=OK&ping=`，写进 `.env` 的 `KUMA_PUSH_URL`；
+3. `docker compose up -d watchdog`。
+
+连续 3 次不健康才报 down（避开重启、扫描密钥的空窗），熔断立即报。watchdog 没有推送（宿主宕机、
+watchdog 自己挂了）时，Kuma 按超时报警。
 
 ### 白名单（改完即时生效，不用重启）
 
@@ -158,6 +179,12 @@ docker cp /tmp/allow.txt fuxi-bridge:/state/allow.txt && rm /tmp/allow.txt
 
 `.env` 里的 `FUXI_ALLOW` 只在第一次生成文件时使用，之后改它**不会**生效。
 
+### 发送安全
+
+每次发送：搜索会话名 → 只点**整行标题完全匹配且唯一**的本地结果 → 用 OCR 读聊天标题，
+与目标一致才粘贴 → 发送后到数据库核对。前三步任何一步不符就**放弃这一条**（日志 `放弃发送`），
+不影响后续；第四步不符就熔断。
+
 ### 熔断与恢复
 
 发送后桥接会到数据库核对消息确实落在目标会话。核对失败（疑似发错会话）或发送中途出错时，
@@ -177,7 +204,8 @@ curl -s -H "Authorization: Bearer $T" -X POST 127.0.0.1:8790/resume
 wechat-selkies 照原来的方式更新（本机拉镜像 → 传到服务器 → `docker compose up -d`）。之后：
 
 1. 在手机上确认登录；
-2. **重建 bridge**：它共用的是旧微信容器的 pid 命名空间，微信容器重建后必须跟着重建：
+2. bridge 共用的是旧微信容器的 pid 命名空间，必须跟着重建。**watchdog 会在 1 分钟内自动重建**
+   （日志 `检测到微信或内核容器已重建`）；没开 watchdog 时手动执行：
 
 ```bash
 cd <fuxi-dir> && docker compose up -d --force-recreate bridge
@@ -194,9 +222,9 @@ FUXI_HOST=<host> FUXI_DIR=<fuxi-dir> scripts/deploy.sh bridge   # 只改了 brid
 FUXI_HOST=<host> FUXI_DIR=<fuxi-dir> scripts/deploy.sh          # 改了 kernel/ 或不确定
 ```
 
-更新 kernel 时 bridge 也会被重建（它共用内核的网络命名空间）。每次 bridge 重建会有约 30 秒
-（扫描密钥）不收消息，**这期间到达的消息不会被回复**——启动时只记录各会话当前进度、不回放，
-避免上线时乱回旧消息。
+更新 kernel 时 bridge 也会被重建（它共用内核的网络命名空间）。bridge 重建后约 30 秒扫描密钥，
+期间不收消息；启动后会**补处理停机期间**的消息，但只补 `FUXI_STALE_SEC`（默认 120 秒）以内的，
+更早的不回，避免上线时乱回旧消息。
 
 同步 whale_girl 上游内核见 [kernel/UPSTREAM.md](../kernel/UPSTREAM.md)。
 
@@ -223,9 +251,10 @@ docker compose down            # 全停；卷保留，加 -v 会删掉记忆等�
 | 现象 | 原因 / 处理 |
 |---|---|
 | 日志 `内存扫描 … 候选 0 个`、`解出密钥 0 / N` | 微信未登录（停在「需在手机上完成登录」）→ 手机确认后 `up -d --force-recreate bridge`。已登录仍为 0 → 微信版本变了，需重新分析 |
-| bridge 反复重启、报错或 `找不到微信进程` | 微信容器重建过而 bridge 没跟着重建 → `up -d --force-recreate bridge` |
-| `找不到微信窗口` | 微信没启动或已退出登录；打开网页版微信检查 |
+| bridge 反复重启、报错或 `找不到微信进程` | 微信容器重建过而 bridge 没跟着重建 → 等 watchdog 处理，或手动 `up -d --force-recreate bridge` |
+| `找不到微信主窗口` | 微信没启动或已退出登录；打开网页版微信检查。窗口只是缩到托盘时桥接会自己点托盘图标恢复 |
 | `搜索「xx」没有唯一的完全匹配结果，放弃发送` | 会话显示名与搜索结果对不上（改了备注、含表情、或有同名）。给联系人设一个唯一的纯文字备注 |
+| `打开的会话标题是「…」，与目标「…」不符，放弃发送` | 点错了行，或 OCR 读错了生僻字/表情。偶发可忽略；同一会话反复出现时给它设纯文字备注 |
 | 熔断 `后核对失败` | 见「熔断与恢复」。常见于有人同时在网页版微信里操作，抢了焦点 |
 | 收到消息但不回复 | 依次看：是否在白名单（`GET /allow`）→ bridge 日志有无 `→ 内核` → kernel 日志里是否因群聊未 @ 等策略不回 |
 | `发送许可查询失败` | 内核没起来或口令不一致；检查 `fuxi-kernel` 状态和 `.env` 的 `FUXI_KERNEL_TOKEN` |

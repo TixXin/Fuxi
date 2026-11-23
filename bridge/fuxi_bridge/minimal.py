@@ -65,7 +65,7 @@ def main() -> None:
                     continue  # 这是 bot 自己刚发的
                 if m.is_self and not reply_self:
                     continue
-                log.info("收到 %s: %s", chat, m.text[:60])
+                log.info("收到 %s: %d 字", chat, len(m.text))
                 try:
                     reply = llm.chat(m.text, SYSTEM)
                 except Exception:

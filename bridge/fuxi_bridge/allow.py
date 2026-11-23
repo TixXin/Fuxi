@@ -9,7 +9,7 @@
 语义：
 - 空名单 = 谁都不回（安全默认）；`*` = 全部放行。
 - 文件不存在时用环境变量 FUXI_ALLOW 生成初始名单（之后以文件为准）。
-- 每次轮询 stat 一下文件，mtime 变了就重读，**改完即生效，无需重启**。
+- 每次轮询读一下文件（很小），内容变了就生效，**改完即生效，无需重启**。
 - 变化后同步到内核：wechat.whitelistOnly + care.whitelist（内核发送前的第二道防线）。
 
 桥接这层必须保留：内核的白名单只在「发送前」拦截，不在名单里的消息仍会进内核、调大模型。
@@ -41,7 +41,7 @@ class AllowList:
         self.path = path
         self.on_change = on_change
         self._lock = threading.Lock()
-        self._mtime: int | None = None
+        self._raw: str | None = None
         self.items: list[str] = []
         if not os.path.exists(path):
             self._write([s.strip() for s in seed.split(",") if s.strip()], {})
@@ -51,19 +51,17 @@ class AllowList:
     # ---- 读 ----
     def reload(self, force: bool = False) -> bool:
         """文件变了就重读，返回是否有变化。"""
+        # 直接比较文件内容：文件很小，而 mtime 在快速连续写入时可能不变（时间戳粒度）
         try:
-            m = os.stat(self.path).st_mtime_ns
+            with open(self.path, encoding="utf-8") as f:
+                raw = f.read()
         except FileNotFoundError:
-            m = None
-        if not force and m == self._mtime:
+            raw = ""
+        if not force and raw == self._raw:
             return False
         with self._lock:
-            self._mtime = m
-            try:
-                with open(self.path, encoding="utf-8") as f:
-                    new = _parse(f.read())
-            except FileNotFoundError:
-                new = []
+            self._raw = raw
+            new = _parse(raw)
             changed = new != self.items
             self.items = new
         if changed or force:

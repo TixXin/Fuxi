@@ -34,6 +34,8 @@ if (env.FUXI_OWNER_WXIDS) {
   set(cfg, ['persona', 'master', 'wxids'], env.FUXI_OWNER_WXIDS.split(',').map((s) => s.trim()).filter(Boolean));
 }
 // 模型 key 走环境变量 DEEPSEEK_API_KEY（内核原生支持），不落盘
+// traceRaw 会在 data/trace 留 24 小时消息原文：默认关，排障时 FUXI_KERNEL_TRACE_RAW=1 临时打开
+set(cfg, ['log', 'traceRaw'], env.FUXI_KERNEL_TRACE_RAW === '1');
 
 const tmp = cfgPath + '.tmp';
 fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2), { mode: 0o600 });

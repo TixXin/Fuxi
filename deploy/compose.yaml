@@ -3,16 +3,24 @@
 # 所有主机路径、容器名、端口都从 .env 读取，仓库里不写服务器信息。见 .env.example。
 name: fuxi
 
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   kernel:
     image: fuxi-kernel:${FUXI_VERSION:-dev}
     container_name: fuxi-kernel
     restart: unless-stopped
+    logging: *logging
     environment:
       FUXI_KERNEL_TOKEN: ${FUXI_KERNEL_TOKEN:?请在 .env 设置 FUXI_KERNEL_TOKEN}
       FUXI_OWNER_WXIDS: ${FUXI_OWNER_WXIDS:-}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-}
+      FUXI_KERNEL_TRACE_RAW: ${FUXI_KERNEL_TRACE_RAW:-0}
     volumes:
       - kernel-data:/app/data            # 记忆、人设演化、提醒、config.json
     ports:
@@ -23,6 +31,7 @@ services:
     image: fuxi-bridge:${FUXI_VERSION:-dev}
     container_name: fuxi-bridge
     restart: unless-stopped
+    logging: *logging
     depends_on: [kernel]
     # 内核的提醒/发送许可等接口只认回环请求 → 与内核同一网络命名空间
     network_mode: "service:kernel"
@@ -40,6 +49,9 @@ services:
       FUXI_SELF_NAMES: ${FUXI_SELF_NAMES:-}
       FUXI_REPLY_SELF: ${FUXI_REPLY_SELF:-0}
       FUXI_ALLOW: ${FUXI_ALLOW:-}
+      FUXI_RATE_CHAT: ${FUXI_RATE_CHAT:-6}
+      FUXI_RATE_GLOBAL: ${FUXI_RATE_GLOBAL:-20}
+      FUXI_QUIET: ${FUXI_QUIET:-}
       DISPLAY: ":1"
     volumes:
       - ${WX_CONFIG_DIR:?请在 .env 设置 WX_CONFIG_DIR}:/wxconfig:ro   # 微信数据，只读
@@ -47,6 +59,22 @@ services:
       - bridge-state:/state                  # 水位
     tmpfs:
       - /work:size=1g,mode=0700              # 解密库、密钥缓存、待发图片，只在内存里
+
+  watchdog:
+    # 宿主侧看门狗：微信/内核容器重建后自动重建 bridge；健康状态推送到 Uptime Kuma
+    image: fuxi-watchdog:${FUXI_VERSION:-dev}
+    container_name: fuxi-watchdog
+    restart: unless-stopped
+    logging: *logging
+    network_mode: host                       # 访问宿主回环上的 bridge API 与 Kuma
+    environment:
+      WECHAT_CONTAINER: ${WECHAT_CONTAINER}
+      FUXI_API_PORT: ${FUXI_API_PORT:-8790}
+      FUXI_API_TOKEN: ${FUXI_API_TOKEN:-}
+      KUMA_PUSH_URL: ${KUMA_PUSH_URL:-}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock   # 只用于 inspect 与重建 bridge
+      - .:/fuxi:ro                                    # compose.yaml 与 .env
 
 volumes:
   kernel-data:

@@ -1,0 +1,70 @@
+'use strict';
+const { redactSecrets } = require('./redact');
+
+/**
+ * 一行式错误摘要，专供日志使用。
+ *
+ * 为什么需要它：以前很多失败分支写的是 `'xxx 失败：' + err.message`，而 LlmError 的
+ * message 是**给用户看的话术**（「咕噜…这次只吐出了个空泡泡」），真正的 code / status /
+ * detail（finish=length、reasoning_tokens=700、HTTP 429…）全被丢掉了 —— 日志里只剩
+ * 「抽取失败」，查不出为什么失败。
+ *
+ * 这里只拼结构信息：
+ *   type=LlmError code=empty status=429 retryable detail=空响应（finish=length …）
+ * 普通 Error 没有 detail 时退回 msg（fs 错误的 EPERM/ENOSPC 也在这里）。
+ *
+ * 注意：detail 由抛错方负责只放结构证据，不要放聊天正文 / 记忆正文。
+ *
+ * @param {*} err
+ * @param {{maxDetail?:number}} [opts]
+ * @returns {string}
+ */
+function describeError(err, { maxDetail = 300 } = {}) {
+  if (err == null) return '无错误对象';
+  if (typeof err !== 'object') return 'msg=' + clipWithEllipsis(err, maxDetail);
+
+  const bits = [];
+  const name = err.name || (err.constructor && err.constructor.name) || 'Error';
+  bits.push('type=' + name);
+  if (err.code) bits.push('code=' + clipWithEllipsis(err.code, 60));
+  if (Number(err.status)) bits.push('status=' + Number(err.status));
+  if (err.retryable === true) bits.push('retryable');
+
+  const detail = clipWithEllipsis(err.detail, maxDetail);
+  if (detail) {
+    bits.push('detail=' + detail);
+  } else if (name !== 'LlmError' && err.message) {
+    // 普通 Error 的 message 就是真相（文件系统错误会带 EPERM/ENOSPC 和路径）
+    bits.push('msg=' + clipWithEllipsis(err.message, maxDetail));
+  } else if (name === 'LlmError') {
+    // LlmError 没有 detail 时，message 是给用户看的话术，不能当日志证据
+    bits.push('detail=(无)');
+  }
+  return bits.join(' ');
+}
+
+function clipWithEllipsis(value, max) {
+  const s = redactSecrets(value).replace(/\s+/g, ' ').trim();
+  return s.length > max ? s.slice(0, max) + '…' : s;
+}
+
+/**
+ * 错误文案：只给用户看的那一行，绝不回显原始异常对象或堆栈。
+ *
+ * HTTP 接口以前写 `String((err && err.message) || err)`，兜底会把整个异常对象
+ * 交给 String()；V8 现在只给 "Error: xxx"，但扫描器无法确认这一点（CWE-209）。
+ * 统一走这里：取 message、去首尾空白、只留第一行、限长、先脱敏。
+ *
+ * @param {*} err
+ * @param {string} [fallback]
+ * @param {{maxLength?:number}} [opts]
+ * @returns {string}
+ */
+function errorMessage(err, fallback = '操作失败', { maxLength = 200 } = {}) {
+  const raw = (err && err.message) || (typeof err === 'string' ? err : '') || '';
+  const line = redactSecrets(String(raw)).split(/[\r\n]/)[0].trim();
+  return line ? line.slice(0, maxLength) : fallback;
+}
+
+module.exports = { describeError, errorMessage };
+

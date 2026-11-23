@@ -1,0 +1,290 @@
+'use strict';
+
+const { getByPath } = require('./objpath');
+const time = require('./time');
+const { parseBoolean, parseNumber } = require('./configValues');
+
+/**
+ * 配置校验：一张纯数据的表 + 两个函数。
+ *
+ * 为什么需要它：`config.json` 现在是 20 多个顶层组的深合并，非法值会在各处
+ * 被 `Number(x) || 默认` 静默吃掉 —— 用户在启动器或 config.json 里把「历史轮数」填成 `abc`，
+ * 界面上显示保存成功，实际还是旧值，只能靠猜。
+ *
+ * 这里只做三件事：
+ *   1. 类型对不对（int / float / bool / string / enum）
+ *   2. 范围对不对（min / max）
+ *   3. 报错带字段路径，人能看懂
+ *
+ * 不改行为：合法值原样通过；非法值只报错，不偷偷改。
+ */
+
+const API_KEY_SPEC = Object.freeze({ type: 'string', maxLen: 250, noWhitespace: true, redactValue: true });
+const FIELDS = {
+  // 外部服务自行决定凭据格式，本地路由的短 Key 也应合法。
+  'deepseek.apiKey': API_KEY_SPEC,
+  'vision.apiKey': API_KEY_SPEC,
+  'voice.apiKey': API_KEY_SPEC,
+  'websearch.deepseek.apiKey': API_KEY_SPEC,
+  'websearch.zhihu.accessSecret': API_KEY_SPEC,
+  // ---- 服务 ----
+  'server.port': { type: 'int', min: 0, max: 65535 },
+  'server.host': { type: 'string', maxLen: 255 },
+  'server.allowRemote': { type: 'bool' },
+
+  // ---- 日志 / 判定链 ----
+  'log.level': { type: 'enum', values: ['debug', 'info', 'warn', 'error'] },
+  'log.fileLevel': { type: 'enum', values: ['debug', 'info', 'warn', 'error'] },
+  'log.trace': { type: 'bool' },
+  'log.traceRaw': { type: 'bool' },
+
+  // ---- 对话 ----
+  'chat.historyTurns': { type: 'int', min: 2, max: 800 },
+  'chat.groupHistoryTurns': { type: 'int', min: 2, max: 800 },
+  'chat.privateMaxChars': { type: 'int', min: 20, max: 4000 },
+  'chat.groupMaxChars': { type: 'int', min: 20, max: 4000 },
+  'chat.maxBubbles': { type: 'int', min: 1, max: 12 },
+  // 连续消息收集：私信和群聊共用安静窗口；群聊另有从首条开始的最大等待。
+  'chat.messageSettleMs': { type: 'int', min: 0, max: 10000 },
+  'chat.groupMaxBatchWaitMs': { type: 'int', min: 0, max: 60000 },
+
+  // ---- 采样参数 ----
+  'deepseek.temperature': { type: 'float', min: 0, max: 2 },
+  'deepseek.maxTokens': { type: 'int', min: 16, max: 32768 },
+  'deepseek.frequencyPenalty': { type: 'float', min: -2, max: 2 },
+  'deepseek.presencePenalty': { type: 'float', min: -2, max: 2 },
+  // 通义千问是否先「思考」再回答：默认 false（快）；难问题想让它想一会儿就设 true。
+  'deepseek.thinking': { type: 'bool' },
+
+  // ---- 群聊 ----
+  'group.requireAt': { type: 'bool' },
+  'group.freeChat': { type: 'bool' },
+  'group.freeChatChance': { type: 'float', min: 0, max: 1 },
+  'group.cooldownSec': { type: 'int', min: 0, max: 3600 },
+  'group.maxRepliesPerMinute': { type: 'int', min: 5, max: 30 },
+  'group.silentMinutes': { type: 'int', min: 1, max: 10080 },
+  'group.engagedMinutes': { type: 'int', min: 1, max: 1440 },
+  'group.masterAlwaysReply': { type: 'bool' },
+
+  // ---- 表情包 ----
+  // 只控制“这一轮要不要在尾部提醒她带一张”，不按概率替模型选图；0 = 只靠模型自觉。
+  'sticker.demandChance': { type: 'float', min: 0, max: 1 },
+  // 命中提醒的轮次，模型没写标记也由程序补一张（1.0 + 开启才约等于每轮都发）。
+  'sticker.ensureSend': { type: 'bool' },
+  'sticker.collectReceived': { type: 'bool' },
+
+  // ---- 记忆（旧键，运行时只读 constants.js）----
+  // 唯一生效的可调项：对话预算（不含 system prompt）。没有上限：
+  // 启动器里可以用输入框手填任意值，但 system + 它超过 hardTotalTokens（64,000）时会被拒绝，
+  // 那个提示由 /api/budget/estimate 的 overHardLimit 在界面上提前给出来。
+  'memory.dialogueBudget': { type: 'int', min: 1000 },
+  'memory.maxSessions': { type: 'int', min: 1, max: 10000 },
+  'memory.maxMessages': { type: 'int', min: 2, max: 2000 },
+  'memory.maxNotesPerUser': { type: 'int', min: 0, max: 200 },
+
+  // ---- 管理员 / 主动搭话 ----
+  'admin.minutes': { type: 'int', min: 1, max: 1440 },
+  'care.enabled': { type: 'bool' },
+  'care.onlyMaster': { type: 'bool' },
+  'care.allowGroups': { type: 'bool' },
+  'care.allowOthers': { type: 'bool' },
+  'care.windows': { type: 'windows' },
+  'care.everyMinutes': { type: 'int', min: 1, max: 1440 },
+  'care.jitterMinutes': { type: 'int', min: 0, max: 180 },
+  'care.maxPerDay': { type: 'int', min: 0, max: 50 },
+  'care.quietAfterMinutes': { type: 'int', min: 0, max: 1440 },
+
+  // ---- 语音识别 ----
+  'voice.enabled': { type: 'bool' },
+  'voice.provider': { type: 'enum', values: ['follow', 'auto', 'deepseek', 'dashscope', 'custom'] },
+  'voice.baseUrl': { type: 'string', maxLen: 500 },
+  'voice.model': { type: 'string', maxLen: 120 },
+  'voice.timeoutMs': { type: 'int', min: 1000, max: 300000 },
+  'voice.maxSeconds': { type: 'int', min: 1, max: 600 },
+
+  // ---- 联网 / 链接 ----
+  'links.enabled': { type: 'bool' },
+  'links.timeoutMs': { type: 'int', min: 1000, max: 60000 },
+  'links.cacheMinutes': { type: 'int', min: 0, max: 1440 },
+  'links.allowPrivate': { type: 'bool' },
+  // 本地搜索强制开启，不再暴露 websearch.enabled（老配置里的 false 也会被 loadConfig 覆盖）。
+  // 搜索 API 总开关：关闭时不调用任何第三方搜索 API，本地搜索仍照常执行。
+  'websearch.api.enabled': { type: 'bool' },
+  'websearch.api.followChat': { type: 'bool' },
+  'websearch.zhihu.dailyLimit': { type: 'int', min: 0, max: 100000 },
+  // 语义路由（每句话先问一次模型「要不要联网」）：不配时只在像问句/命中事实词时才问；
+  // true 则每句都问（更准，每句多 ~2 秒）；false 则完全按关键词。
+  'websearch.semanticRoute': { type: 'bool' },
+  // 环境块（提示词里的 <env>）：地点只到区，时区留空就用系统自己的。
+  // 太长的地址一定是把门牌粘进来了，直接拒掉，别等到拼提示词时才截断。
+  'env.location': { type: 'string', maxLen: 40, redactValue: true },
+  // 唯一的时区来源：日记、主动搭话、提醒、朋友圈、聊天时间戳都读它。
+  'env.timezone': { type: 'timezone' },
+  // 自动探测所在地（Windows 定位服务优先）；false = 只用手填和 websearch.city
+  'env.autoDetect': { type: 'bool' },
+  // ---- 提醒（规则字段和 care 对齐，配置独立）----
+  'reminder.enabled': { type: 'bool' },
+  'diary.enabled': { type: 'bool' },
+  'diary.time': { type: 'clock' },
+  // ---- 朋友圈 ----
+  'moments.autoLike': { type: 'bool' },
+  'moments.autoLikeMaxPerDay': { type: 'int', min: 0, max: 20 },
+  'moments.autoReadEveryHours': { type: 'int', min: 0, max: 24 },
+  'moments.publishFeatureEnabled': { type: 'bool' },
+  'moments.publishEnabled': { type: 'bool' },
+  'moments.publishWithImage': { type: 'bool' },
+  'moments.publishIntervalHours': { type: 'float', min: Number.MIN_VALUE },
+  'moments.publishMaxPerDay': { type: 'int', min: 0 },
+  'moments.publishAccount': { type: 'string', maxLen: 120, redactValue: true },
+  'diary.sendToOwner': { type: 'bool' },
+  'reminder.maxPerDay': { type: 'int', min: 0, max: 200 },
+  'reminder.quietAfterMinutes': { type: 'int', min: 0, max: 1440 },
+
+  // ---- 存储 ----
+  'storage.mediaKeepDays': { type: 'int', min: 1, max: 365 },
+  'storage.mediaMaxMB': { type: 'int', min: 10, max: 100000 },
+
+  // ---- 微信桥接（bridge/engine.py 直接读这几个）----
+  'wechat.backgroundSend': { type: 'bool' },
+  'wechat.keyboardFallback': { type: 'bool' },
+  'wechat.quoteReply': { type: 'bool' },
+  'wechat.whitelistOnly': { type: 'bool' },
+  'wechat.accountGuard': { type: 'bool' },
+  'wechat.bgSend.enabled': { type: 'bool' },
+  'wechat.bgSend.charGapMs': { type: 'int', min: 20, max: 80 },
+  // 后台通道的固定等待（秒，见 bridge/bg_sender.py 的 TIMING）：默认值线上实测过，
+  // 放出来是为了「想快一点」不用改代码；0 也合法（=完全不等）。
+  'wechat.bgSend.timing.gatePulse': { type: 'float', min: 0, max: 3 },
+  'wechat.bgSend.timing.unhide': { type: 'float', min: 0, max: 3 },
+  'wechat.bgSend.timing.spiSettle': { type: 'float', min: 0, max: 3 },
+  'wechat.bgSend.timing.gateWait': { type: 'float', min: 0, max: 3 },
+  'wechat.bgSend.timing.focusGap': { type: 'float', min: 0, max: 3 },
+  'wechat.bgSend.timing.clickSettle': { type: 'float', min: 0, max: 3 },
+  'wechat.bgSend.timing.pollSwitch': { type: 'float', min: 0, max: 3 },
+  'wechat.bgSend.timing.sendEnabled': { type: 'float', min: 0, max: 3 },
+  'wechat.bgSend.timing.afterClick': { type: 'float', min: 0, max: 3 },
+  'wechat.bgSend.timing.verifyPoll': { type: 'float', min: 0, max: 3 },
+  // 后台通道 WM_CHAR 的编码语义：4.1 及以前按 GBK 字节、4.2+ 按 UTF-16 码元。
+  // auto = 按版本自动；版本识别不出来时可以在「微信桥接」页手动钉死。
+  'wechat.bgSend.charMode': { type: 'enum', values: ['auto', 'utf16', 'gbk'] },
+  'wechat.bgSend.verify': { type: 'bool' },
+  'wechat.bgSend.fallbackToForeground': { type: 'bool' },
+  'wechat.bgSend.stripUnencodable': { type: 'bool' },
+  'wechat.bgSend.unhideWindow': { type: 'bool' },
+  'wechat.pipelineWorkers': { type: 'int', min: 1, max: 16 },
+  'wechat.pipelineQueueLimit': { type: 'int', min: 1, max: 32 },
+};
+
+function describe(expected) {
+  switch (expected.type) {
+    case 'int':
+    case 'float':
+      return `${expected.type === 'int' ? '整数' : '数字'}${expected.min !== undefined ? `（${expected.min}~${expected.max}）` : ''}`;
+    case 'bool':
+      return 'true / false';
+    case 'string':
+      return '字符串';
+    case 'clock':
+      return '24 小时制时间（如 23:00）';
+    case 'windows':
+      return '时间段列表（如 09:00-12:00，一行一个）';
+    case 'timezone':
+      return 'IANA 时区（如 Asia/Shanghai；留空 = 系统时区）';
+    case 'enum':
+      return `以下之一：${(expected.values || []).join(' / ')}`;
+    default:
+      return expected.type;
+  }
+}
+
+/** 错误里要不要回显原值：地点、账号这类字段只提示格式，不把值写进日志 */
+function shownValue(value, spec) {
+  return spec && spec.redactValue ? '（已隐藏）' : JSON.stringify(value);
+}
+
+/** 校验单个值；返回错误文字，或 null 表示通过。 */
+function checkValue(value, spec) {
+  if (spec.type === 'bool') {
+    // 老配置里有写成字符串的 "false"；只要值本身合法就放行
+    if (parseBoolean(value) !== undefined) return null;
+    return `应该是 ${describe(spec)}，实际是 ${shownValue(value, spec)}`;
+  }
+  if (spec.type === 'int') {
+    const n = parseNumber(value);
+    if (!Number.isFinite(n) || !Number.isInteger(n)) return `应该是整数，实际是 ${shownValue(value, spec)}`;
+    if (spec.min !== undefined && n < spec.min) return `不能小于 ${spec.min}（实际 ${n}）`;
+    if (spec.max !== undefined && n > spec.max) return `不能大于 ${spec.max}（实际 ${n}）`;
+    return null;
+  }
+  if (spec.type === 'float') {
+    const n = parseNumber(value);
+    if (!Number.isFinite(n)) return `应该是数字，实际是 ${shownValue(value, spec)}`;
+    if (spec.min !== undefined && n < spec.min) return `不能小于 ${spec.min}（实际 ${n}）`;
+    if (spec.max !== undefined && n > spec.max) return `不能大于 ${spec.max}（实际 ${n}）`;
+    return null;
+  }
+  if (spec.type === 'enum') {
+    // 以前 FIELDS 里写了 enum，但 checkValue 没有这个分支，枚举字段其实从没校验过：
+    // 填错值照样「保存成功」，运行时再被默认值吃掉。现在照 values 白名单严格比。
+    const values = Array.isArray(spec.values) ? spec.values : [];
+    const text = typeof value === 'string' ? value : String(value);
+    if (values.includes(text)) return null;
+    return `只能是 ${values.join(' / ')}，实际是 ${shownValue(value, spec)}`;
+  }
+  if (spec.type === 'clock') {
+    if (time.parseClock(value) === null) return `请填写 24 小时制时间（如 23:00），实际是 ${shownValue(value, spec)}`;
+    return null;
+  }
+  if (spec.type === 'windows') {
+    const bad = time.invalidWindows(value);
+    if (bad.length) return `时间段写错了：${bad.join('、')}；请用 09:00-12:00 这样的格式`;
+    return null;
+  }
+  if (spec.type === 'timezone') {
+    const text = String(value == null ? '' : value).trim();
+    if (text && !time.isValidTimeZone(text)) {
+      return `不是有效时区：${shownValue(text, spec)}（如 Asia/Shanghai；留空 = 系统时区）`;
+    }
+    return null;
+  }
+  if (spec.type === 'string') {
+    if (typeof value !== 'string') return `应该是字符串，实际是 ${shownValue(value, spec)}`;
+    if (spec.pattern && !spec.pattern.test(value)) return '格式不对';
+    // Key 这类透传凭据不该夹空白：粘贴时带上的换行/空格会让请求头直接失效。
+    if (spec.noWhitespace && /\s/.test(value)) return `不能包含空格或换行`;
+    if (spec.maxLen && value.length > spec.maxLen) return `太长（最多 ${spec.maxLen} 个字符）`;
+    return null;
+  }
+  return null;
+}
+
+/**
+ * 校验整份配置（只看表里列出的字段，没列的不管）。
+ * @returns {{path:string, message:string, value:any}[]}
+ */
+function validate(config) {
+  const errors = [];
+  for (const [dotted, spec] of Object.entries(FIELDS)) {
+    const value = getByPath(config, dotted);
+    if (value === undefined) continue;          // 缺省 = 用默认值，不算错
+    const message = checkValue(value, spec);
+    if (message) errors.push({ path: dotted, message, value });
+  }
+  // 功能开关：以 features 注册表为准，动态校验（新开关自动纳入）
+  try {
+    const features = require('./features');
+    for (const entry of features.REGISTRY || []) {
+      const value = getByPath(config, entry.path);
+      if (value === undefined) continue;
+      const message = checkValue(value, { type: 'bool' });
+      if (message) errors.push({ path: entry.path, message, value });
+    }
+  } catch { /* features 表读不到就不校验这一块 */ }
+  return errors;
+}
+
+function formatErrors(errors) {
+  return errors.map((e) => `${e.path}：${e.message}`).join('；');
+}
+
+module.exports = { FIELDS, API_KEY_SPEC, validate, checkValue, formatErrors, getByPath };

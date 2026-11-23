@@ -1,0 +1,118 @@
+'use strict';
+
+const features = require('../infra/features');
+const { clampInt } = require('./text');
+const { herNames, namedHerIn, isAddressed, talkingToOthers } = require('./addressing');
+const sessionState = require('./sessionState');
+const { recentReplyCount } = require('./replyQuota');
+
+/** 读布尔开关：兼容老配置里的字符串 "false" / "0"（configSchema 允许这种写法） */
+const toBool = features.toBool;
+
+/**
+ * 触发判断：这条群消息到底要不要接。
+ * 纯逻辑 + 对 state 的少量写入（静默期/接话窗口），不调用模型、不写记忆。
+ */
+
+/** 明确的骂人词：出现就算开战 */
+const INSULT_RE = /傻逼|傻比|煞笔|脑残|智障|弱智|废物|垃圾|狗东西|贱人|婊子|你妈|他妈|操你|草你|去死|滚蛋|滚开|滚|孤儿|低能|神经病|有病|恶心|丑逼|蠢|菜狗|臭机器人|破机器人|人工智障|没素质|素质低|下头|欠揍|挑衅|算什么东西|不要脸/;
+/** 弱一点的贬义：配合「你/机器人」也算骂她 */
+const INSULT_LOOSE_RE = /臭|破|烂|没用|闭嘴|烦人|装什么|什么玩意儿/;
+
+/**
+ * @param {object} bot  需要 bot.config / bot.store / bot.rng
+ * @param {{msg:object, atMe:boolean, clean:{text:string}, isGroup:boolean, state:object, nowMs:number, isMaster:boolean, key:string}} args
+ */
+function computeTrigger(bot, { msg, atMe, clean, isGroup, state, nowMs, isMaster, key, muted = false }) {
+  if (!isGroup) return { wake: true, reason: 'private' };
+  // 静音优先：静音期间的消息不能清静默、不能开接话窗口，也不能产生任何状态副作用。
+  if (muted) return { wake: false, reason: 'muted' };
+  const names = herNames(bot, msg);
+  const addressed = isAddressed(atMe, msg);
+  const guardOn = features.isOn(bot.config, 'groupAddressGuard');
+  // 只要有人 @ 她（或回复她），一律回复。
+  // 例外：被赶走后的静默期内，只有主人 @ / 回复她才能解除；群友再 @ 也不回来。
+  if (addressed) {
+    // 静默期内只有主人 @ / 回复她能解除；群友再 @ 也不回来（需求：被赶走后主人叫才回来）。
+    if (!isMaster && sessionState.isSilent(state, nowMs)) {
+      return { wake: false, reason: 'silent' };
+    }
+    sessionState.clearSilent(state);
+    // 被叫到之后开一个接话窗口，同一人接着问不用再 @
+    sessionState.touchEngagement(
+      state, msg.senderId, nowMs, bot.config.group.engagedMinutes);
+    return { wake: true, reason: 'addressed' };
+  }
+  // 被赶走后的静默期：只有主人显式 @ / 回复她能解除。
+  // 问号、「开麦」这类模糊指令不能破静默，否则「让她滚」等于没用。
+  if (sessionState.isSilent(state, nowMs)) {
+    return { wake: false, reason: 'silent' };
+  }
+  // 任何人单发一个问号，她也回一个问号
+  if (/^[?？]+$/.test(String(clean.text || '').trim())) {
+    return { wake: true, reason: 'question_mark' };
+  }
+  // 没 @ 但明显是在叫她说话：「来给大家说句话」「开麦」「跟大家聊聊」
+  if (/(来(给|和)?(大家|群里|群友)?说|跟大家(说|聊)|开麦|说句话|出来说|你说两句)/.test(clean.text || '')) {
+    sessionState.clearSilent(state);
+    sessionState.touchEngagement(
+      state, msg.senderId, nowMs, bot.config.group.engagedMinutes);
+    return { wake: true, reason: 'directed' };
+  }
+  if (isMaster && toBool(bot.config.group.masterAlwaysReply, true)) return { wake: true, reason: 'master' };
+  const txt = String(clean.text || '');
+  const talking = talkingToOthers({ msg, text: txt, guardOn, names });
+  if (Number(state.engagedUntil) > nowMs) {
+    const sameSender = sessionState.engagedWith(state, msg.senderId, nowMs);
+    const question = /[?？]|吗|呢|怎么|为什么|啥|多少|几点|谁|哪|是不是|能不能|要不要/.test(txt);
+    // 接话窗口也要看「有没有在跟别人说」：@ 了小明、第三人称讲别人，
+    // 都不能因为同一个 sender 就抢答。
+    if (sameSender && !talking && (question || txt.length <= 30)) {
+      return { wake: true, reason: 'engaged' };
+    }
+    // 别人也在接这个话题：她刚说过话、对方又用「你」冲她说，就不算旁人闲聊
+    const justSpoke = Number(state.lastReplyAt) && nowMs - Number(state.lastReplyAt) < 90 * 1000;
+    const toHer = /你|你们|咱/.test(txt) || namedHerIn(txt, names);
+    // L1：以前「她 90 秒内说过话 + 有人发『你…』」就唤醒，别人聊自己的事也会被插嘴。
+    // 现在只有开了 groupAddressGuard 才保留，且本条不能在跟别人说话。
+    if (!guardOn && justSpoke && toHer && txt.length <= 60) return { wake: true, reason: 'engaged_group' };
+    if (guardOn && justSpoke && namedHerIn(txt, names) && !talking && txt.length <= 60) {
+      return { wake: true, reason: 'engaged_group' };
+    }
+    return { wake: false, reason: 'engaged_side_chatter' };
+  }
+  // 她刚在群里说过话（3 分钟内），紧接着有人用「你」冲她说话 → 也算在跟她说。
+  // 同样受 groupAddressGuard 约束：@ 了别人 / 第三人称时不能插嘴。
+  const lastBotAt = Number(state.lastReplyAt) || 0;
+  const txtNow = String(clean.text || '');
+  if (lastBotAt && nowMs - lastBotAt < 3 * 60000 && !talking
+      && (/你|你们/.test(txtNow) || namedHerIn(txtNow, names)) && txtNow.length <= 60) {
+    return { wake: true, reason: 'followup' };
+  }
+
+  const g = bot.config.group;
+  const cooldownMs = (Number(g.cooldownSec) || 0) * 1000;
+  const tooSoon = Number(state.lastReplyAt) + cooldownMs > nowMs;
+  // 每分钟回复上限（原来按小时，1000 基本等于不限；改成分钟制后才有防刷屏的意义）。
+  // 同一套计数在 chat.js 的 burst_limit 里也会兜一次，两处读同一个配置。
+  const cap = Number(g.maxRepliesPerMinute);
+  if (cap > 0) {
+    const recent = recentReplyCount(bot, { key, state, nowMs });
+    if (recent >= cap) return { wake: false, reason: 'minute_cap' };
+  }
+  // 没点名她的时候有两种放行方式，都受同一个「插话概率」控制：
+  //   1. 「允许她自己插话」开着 → 按概率抽一句；
+  //   2. 「必须 @ 她才回」关掉 → 也是按概率抽，不是每条都回。
+  // 以前 case 2 直接 return wake:true，等于让概率设置完全失效（用户以为没保存）。
+  const interjectChance = clampInt(Number(g.freeChatChance) * 1000, 0, 1000, 60) / 1000;
+  const interject = !tooSoon && interjectChance > 0 && bot.rng() < interjectChance;
+  // 开关一律走 toBool：老配置里可能是字符串 "false"（configSchema 明确允许），
+  // 直接 `=== false` / 真值判断会让「关掉的开关」继续生效。
+  if (!toBool(g.requireAt, true)) {
+    return interject ? { wake: true, reason: 'free_chat' } : { wake: false, reason: 'not_addressed' };
+  }
+  if (toBool(g.freeChat, false) && interject) return { wake: true, reason: 'free_chat' };
+  return { wake: false, reason: clean.text ? 'not_addressed' : 'no_text' };
+}
+
+module.exports = { INSULT_RE, INSULT_LOOSE_RE, namedHerIn, herNames, computeTrigger };

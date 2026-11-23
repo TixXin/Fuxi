@@ -1,0 +1,371 @@
+'use strict';
+
+/**
+ * 链接阅读：从聊天里发的链接里读出「标题 / 摘要 / 文章正文片段」。
+ *
+ * 目的：让鲸鲸对别人分享的链接能像真人一样接一句话，
+ * 而不是完全无视，或者瞎编视频内容。
+ *
+ * 只用 Node 内置模块；带超时、大小限制和短缓存。
+ */
+const http = require('node:http');
+const https = require('node:https');
+const dns = require('node:dns');
+const net = require('node:net');
+const { URL } = require('node:url');
+const path = require('node:path');
+const { Worker } = require('node:worker_threads');
+const { decodeEntities } = require('./search/html');
+
+const URL_RE = /https?:\/\/[^\s<>"'（）()【】\[\]\u4e00-\u9fa5]+/g;
+const TRAILING = /[.,;:!?，。；：！？、）)】\]》>]*$/;
+
+/** 从一段文字里提取链接（去掉句末标点） */
+function extractUrls(text) {
+  const raw = String(text || '');
+  const found = raw.match(URL_RE) || [];
+  const out = [];
+  for (const u of found) {
+    const clean = u.replace(TRAILING, '');
+    if (!clean || out.includes(clean)) continue;
+    try {
+      const parsed = new URL(clean);
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') continue;
+      out.push(clean);
+    } catch {
+      /* 不是合法 URL，跳过 */
+    }
+  }
+  return out.slice(0, 2);
+}
+
+
+function stripTags(html) {
+  return decodeEntities(
+    String(html || '')
+      .replace(/<script[\s\S]*?<\/script\b[^>]*>/gi, ' ')
+      .replace(/<style[\s\S]*?<\/style\b[^>]*>/gi, ' ')
+      .replace(/<[^>]+>/g, ' ')
+  )
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function pickMeta(html, names) {
+  for (const name of names) {
+    const re = new RegExp(
+      `<meta[^>]+(?:property|name)=["']${name}["'][^>]*content=["']([\\s\\S]*?)["']`,
+      'i'
+    );
+    const m = html.match(re);
+    if (m && m[1] && m[1].trim()) return decodeEntities(m[1]).trim();
+    const re2 = new RegExp(
+      `<meta[^>]+content=["']([\\s\\S]*?)["'][^>]*(?:property|name)=["']${name}["']`,
+      'i'
+    );
+    const m2 = html.match(re2);
+    if (m2 && m2[1] && m2[1].trim()) return decodeEntities(m2[1]).trim();
+  }
+  return '';
+}
+
+function kindOf(urlString) {
+  let host = '';
+  try { host = new URL(urlString).hostname.toLowerCase(); } catch { return 'web'; }
+  if (/douyin|iesdouyin|tiktok/.test(host)) return 'video';
+  if (/bilibili|b23\.tv/.test(host)) return 'video';
+  if (/youtube|youtu\.be/.test(host)) return 'video';
+  if (/kuaishou/.test(host)) return 'video';
+  if (/xiaohongshu|xhslink/.test(host)) return 'note';
+  if (/mp\.weixin\.qq\.com/.test(host)) return 'article';
+  return 'web';
+}
+
+/**
+ * 群友发来的链接是**别人**控制的。默认不读本机/内网地址：
+ * 否则有人发 http://127.0.0.1:8787/… 或 http://192.168.1.1/，她就替人把内网页面读回来。
+ * 想放开：config.links.allowPrivate = true（自己机器上调试用）。
+ */
+function isPrivateHost(hostname) {
+  let host = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
+  if (!host) return true;
+  if (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local')) return true;
+  // 规范化 IPv6，展开写法和映射到 IPv4 的写法也必须经过同一私网检查。
+  if (net.isIP(host) === 6) {
+    host = new URL(`http://[${host}]/`).hostname.slice(1, -1);
+    const mapped = host.match(/^::ffff:([0-9a-f]+):([0-9a-f]+)$/);
+    if (mapped) {
+      const high = parseInt(mapped[1], 16), low = parseInt(mapped[2], 16);
+      return isPrivateHost([high >> 8, high & 255, low >> 8, low & 255].join('.'));
+    }
+    return host === '::1' || host === '::' || /^fe[89ab]/.test(host) || /^(fc|fd|ff)/.test(host);
+  }
+  const m = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (!m) return false; // 普通域名，交给系统解析
+  const [a, b] = [Number(m[1]), Number(m[2])];
+  if (a === 127 || a === 10 || a === 0) return true;             // 回环 / 私有 / 本网络
+  if (a === 192 && b === 168) return true;                        // 家用内网
+  if (a === 172 && b >= 16 && b <= 31) return true;               // 内网
+  if (a === 169 && b === 254) return true;                        // 云元数据 / 链路本地
+  if (a === 100 && b >= 64 && b <= 127) return true;              // CGNAT
+  return false;
+}
+
+function fetchUrl(urlString, { timeoutMs = 6000, maxBytes = 700 * 1024, redirects = 4, allowPrivate = false, deadline = 0, signal } = {}) {
+  return new Promise((resolve) => {
+    let settled = false;
+    let timer = null;
+    let activeRequest = null;
+    let abort = null;
+    const done = (v) => { if (!settled) { settled = true; clearTimeout(timer); if (abort) signal?.removeEventListener('abort', abort); resolve(v); } };
+    abort = () => { done({ ok: false, error: 'aborted' }); activeRequest?.destroy(); };
+    if (signal?.aborted) return abort();
+    signal?.addEventListener('abort', abort, { once: true });
+    // 整条重定向链共用一个总预算：以前每跳都重新计时，4 跳最坏 6×4=24 秒
+    const budget = Number(deadline) > 0 ? Number(deadline) : Date.now() + Math.max(1, Number(timeoutMs) || 6000);
+    const remaining = () => Math.max(1, budget - Date.now());
+    if (Date.now() >= budget) return done({ ok: false, error: 'timeout' });
+    // socket 的空闲超时覆盖不了慢速持续响应和 DNS 等待，整条链另设硬截止时间。
+    timer = setTimeout(() => {
+      done({ ok: false, error: 'timeout' });
+      activeRequest?.destroy();
+    }, remaining());
+    let parsed;
+    try {
+      parsed = new URL(urlString);
+    } catch {
+      return done({ ok: false, error: 'bad_url' });
+    }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return done({ ok: false, error: 'bad_protocol' });
+    }
+    const hostname = parsed.hostname.replace(/^\[|\]$/g, '');
+    // 链接是别人发的：默认只读公网，别替人抓本机/内网（SSRF）
+    if (!allowPrivate && isPrivateHost(parsed.hostname)) {
+      return done({ ok: false, error: 'private_host' });
+    }
+
+    const start = (address, family) => {
+      if (settled) return;
+      const mod = parsed.protocol === 'http:' ? http : https;
+      const req = mod.request(
+        {
+          protocol: parsed.protocol,
+          hostname,
+          // 必须连接检查过的地址：再次交给系统解析会留下 DNS 重绑定窗口。
+          lookup: address ? (_host, options, callback) => {
+            if (typeof options === 'function') { callback = options; options = {}; }
+            const resolved = { address, family: family || net.isIP(address) };
+            if (options && options.all) callback(null, [resolved]);
+            else callback(null, resolved.address, resolved.family);
+          } : undefined,
+          port: parsed.port || (parsed.protocol === 'http:' ? 80 : 443),
+          path: parsed.pathname + parsed.search,
+          method: 'GET',
+          headers: {
+            'User-Agent':
+              'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+            Accept: 'text/html,application/xhtml+xml,*/*;q=0.8',
+            'Accept-Language': 'zh-CN,zh;q=0.9',
+          },
+        },
+        (res) => {
+          const status = res.statusCode || 0;
+          if (status >= 300 && status < 400 && res.headers.location && redirects > 0) {
+            res.resume();
+            let next;
+            try { next = new URL(res.headers.location, parsed).toString(); }
+            catch { return done({ ok: false, error: 'bad_url', status }); }
+            fetchUrl(next, { timeoutMs, maxBytes, redirects: redirects - 1, allowPrivate, deadline: budget, signal }).then(done);
+            return;
+          }
+          const chunks = [];
+          let size = 0;
+          res.on('data', (c) => {
+            size += c.length;
+            if (size > maxBytes) {
+              res.destroy();
+              done({ ok: false, error: 'too_large', status });
+              return;
+            }
+            chunks.push(c);
+          });
+          res.on('end', () => {
+            done({
+              ok: true,
+              status,
+              finalUrl: parsed.toString(),
+              contentType: String(res.headers['content-type'] || ''),
+              body: Buffer.concat(chunks).toString('utf8'),
+            });
+          });
+          res.on('error', () => done({ ok: false, error: 'read_error', status }));
+        }
+      );
+      activeRequest = req;
+      req.setTimeout(remaining(), () => { req.destroy(); done({ ok: false, error: 'timeout' }); });
+      req.on('error', (e) => done({ ok: false, error: (e && e.code) || 'network' }));
+      req.end();
+    };
+
+    if (allowPrivate) return start();
+    // 普通域名也要解析一次：防止 DNS 指向 127.0.0.1 / 内网网段绕过上面的字面量检查
+    dns.lookup(hostname, (err, address, family) => {
+      if (err) return done({ ok: false, error: (err && err.code) || 'network' });
+      if (isPrivateHost(address)) return done({ ok: false, error: 'private_host' });
+      if (Date.now() >= budget) return done({ ok: false, error: 'timeout' });
+      start(address, family);
+    });
+  });
+}
+
+let activeParsers = 0;
+function parsePageBounded(html, url, { timeoutMs, signal }) {
+  if (signal?.aborted) return Promise.resolve({ error: 'aborted' });
+  if (activeParsers >= 2) return Promise.resolve({ error: 'parse_busy' });
+  return new Promise(resolve => {
+    let worker, timer, settled = false;
+    const finish = value => {
+      if (settled) return;
+      settled = true;
+      activeParsers -= 1;
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', abort);
+      worker?.terminate().catch(() => {});
+      resolve(value);
+    };
+    const abort = () => finish({ error: 'aborted' });
+    activeParsers += 1;
+    try {
+      worker = new Worker(path.join(__dirname, 'linkPageWorker.js'), {
+        workerData: { html, url }, resourceLimits: { maxOldGenerationSizeMb: 32 },
+      });
+      worker.once('message', finish);
+      worker.once('error', () => finish({ error: 'parse_failed' }));
+      worker.once('exit', () => finish({ error: 'parse_failed' }));
+      timer = setTimeout(() => finish({ error: 'parse_timeout' }), Math.max(1, Math.min(1000, timeoutMs)));
+      signal?.addEventListener('abort', abort, { once: true });
+    } catch { finish({ error: 'parse_failed' }); }
+  });
+}
+
+/** 从 HTML 里抽标题/摘要/文章正文 */
+function parsePage(html, finalUrl) {
+  const raw = String(html || '');
+  let title = pickMeta(raw, ['og:title', 'twitter:title']) || '';
+  if (!title) {
+    const t = raw.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+    if (t) title = stripTags(t[1]);
+  }
+  let description = pickMeta(raw, ['og:description', 'description', 'twitter:description']) || '';
+
+  // 公众号文章：正文在 #js_content 里
+  let article = '';
+  const m = raw.match(/<div[^>]+id=["']js_content["'][^>]*>([\s\S]*?)<\/div>\s*(?:<script|<div[^>]+id=["']js_pc_qr_code)/i);
+  if (m) article = stripTags(m[1]);
+  if (!article) {
+    // 兜底：抓 og 之外的正文段落（最多 1200 字）
+    const paras = [];
+    const pRe = /<p[^>]*>([\s\S]*?)<\/p>/gi;
+    let pm;
+    let guard = 0;
+    while ((pm = pRe.exec(raw)) && guard < 60) {
+      guard += 1;
+      const text = stripTags(pm[1]);
+      if (text.length >= 12) paras.push(text);
+      if (paras.join('').length > 1200) break;
+    }
+    article = paras.join('\n').slice(0, 1200);
+  }
+  if (!description && article) description = article.slice(0, 160);
+
+  return {
+    url: finalUrl,
+    kind: kindOf(finalUrl),
+    title: title.slice(0, 120),
+    description: description.slice(0, 240),
+    article: article.slice(0, 1200),
+  };
+}
+
+const cache = new Map();
+
+/**
+ * 读取一个链接：返回 { ok, url, kind, title, description, article, error }
+ */
+async function describeLink(urlString, { timeoutMs = 6000, cacheMinutes = 60, allowPrivate = false, signal } = {}) {
+  if (signal?.aborted) return { ok: false, url: String(urlString || '').slice(0, 500), error: 'aborted' };
+  const key = String(urlString || '').slice(0, 500);
+  // 允许/不允许私网的结果要分开缓存，否则「试过一次被挡」会一直挡
+  const cacheKey = key + (allowPrivate ? '|p' : '');
+  const hit = cache.get(cacheKey);
+  const hitTtl = hit && Number.isFinite(hit.ttl) ? hit.ttl : cacheMinutes;
+  if (hit && Date.now() - hit.at < hitTtl * 60 * 1000) return { ...hit.value, cached: true };
+
+  const deadline = Date.now() + Math.max(1, Number(timeoutMs) || 6000);
+  const res = await fetchUrl(key, { timeoutMs, allowPrivate, deadline, signal });
+  let value;
+  if (!res.ok) {
+    value = { ok: false, url: key, kind: kindOf(key), error: res.error };
+  } else {
+    const info = await parsePageBounded(res.body, res.finalUrl, { timeoutMs: deadline - Date.now(), signal });
+    const ok = !info.error && Boolean(info.title || info.description || info.article);
+    value = {
+      ok,
+      url: info.url || key,
+      kind: info.kind || kindOf(key),
+      title: info.title,
+      description: info.description,
+      article: info.article,
+      error: info.error || (ok ? '' : 'empty'),
+    };
+  }
+  // 失败结果只缓存很短时间：一次 DNS/超时抖动不该让同一个链接一小时内
+  // 都被判成“打不开”，后续重试根本没发请求。
+  if (value.error === 'aborted' || value.error === 'parse_busy') return value;
+  cache.set(cacheKey, {
+    at: Date.now(),
+    value,
+    ttl: value.ok ? cacheMinutes : Math.min(2, cacheMinutes),
+  });
+  if (cache.size > 100) {
+    const oldest = [...cache.entries()].sort((a, b) => a[1].at - b[1].at)[0];
+    if (oldest) cache.delete(oldest[0]);
+  }
+  return value;
+}
+
+/** 把链接信息压成一段给模型看的文字 */
+/** 视频平台的 og:description 常混着播放量/相关视频，清一下 */
+function cleanVideoDesc(s) {
+  let t = String(s || '');
+  t = t
+    .replace(/视频播放量[^,，]*[,，]?/g, '')
+    .replace(/弹幕量[^,，]*[,，]?/g, '')
+    .replace(/点赞数[^,，]*[,，]?/g, '')
+    .replace(/投硬币枚数[^,，]*[,，]?/g, '')
+    .replace(/收藏人数[^,，]*[,，]?/g, '')
+    .replace(/转发人数[^,，]*[,，]?/g, '');
+  const cut = t.search(/相关视频|相关推荐|更多视频/);
+  if (cut > 0) t = t.slice(0, cut);
+  return t.replace(/^[-—–\s,，。]+/, '').replace(/\s+/g, ' ').trim();
+}
+
+function formatForPrompt(info) {
+  if (!info) return '';
+  if (!info.ok) return `对方发了一个链接（${info.url}），但打不开（${info.error || '未知原因'}）。`;
+  const lines = [`链接标题：${info.title || '（无标题）'}`];
+  // 短内容（短视频/小红书）：只要标题和文案，正文里的页面噪音没有用
+  if (info.kind === 'video' || info.kind === 'note') {
+    const desc = cleanVideoDesc(info.description);
+    if (desc) lines.push(`文案：${desc.slice(0, 200)}`);
+    lines.push('（这是短视频平台的链接，你只看到了标题和文案，并没有真的看完视频画面。）');
+  } else {
+    if (info.description) lines.push(`简介：${String(info.description).slice(0, 240)}`);
+    if (info.article && info.article !== info.description) lines.push(`正文片段：${String(info.article).slice(0, 600)}`);
+  }
+  return lines.join('\n');
+}
+
+module.exports = {
+  isPrivateHost, extractUrls, fetchUrl, describeLink, parsePage, formatForPrompt, kindOf, stripTags, decodeEntities, cleanVideoDesc };

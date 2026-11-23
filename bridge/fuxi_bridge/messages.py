@@ -111,7 +111,7 @@ class MessageReader:
             f"message/{n}" for n in os.listdir(d) if re.fullmatch(r"message_\d+\.db", n)
         )
 
-    def _rows(self, shard: str, chat: str, after: int):
+    def _rows(self, shard: str, chat: str, after: int, min_time: int = 0):
         table = "Msg_" + hashlib.md5(chat.encode()).hexdigest()
         con = self.cache.connect(shard)
         try:
@@ -120,9 +120,9 @@ class MessageReader:
             names = dict(con.execute("SELECT rowid, user_name FROM Name2Id").fetchall())
             rows = con.execute(
                 f'SELECT local_id, local_type, real_sender_id, create_time, message_content, '
-                f'compress_content, source, sort_seq FROM "{table}" WHERE sort_seq > ? '
+                f'compress_content, source, sort_seq FROM "{table}" WHERE sort_seq > ? AND create_time >= ? '
                 f"ORDER BY sort_seq, local_id",
-                (after,),
+                (after, min_time),
             ).fetchall()
             return [(r, names.get(r["real_sender_id"], "")) for r in rows]
         finally:
@@ -130,21 +130,33 @@ class MessageReader:
 
     def max_seq(self, chat: str) -> int:
         best = 0
+        table = "Msg_" + hashlib.md5(chat.encode()).hexdigest()
         for shard in self.shards():
-            for r, _ in self._rows(shard, chat, 0)[-1:]:
-                best = max(best, r["sort_seq"])
+            con = self.cache.connect(shard)
+            try:
+                if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone():
+                    best = max(best, con.execute(f'SELECT COALESCE(MAX(sort_seq),0) FROM "{table}"').fetchone()[0])
+            finally:
+                con.close()
         return best
 
-    def poll(self, chat: str) -> list[Message]:
-        """返回 chat 自上次水位以来的新消息；首次见到的会话从当前最新开始（不回放历史）。"""
+    def poll(self, chat: str, since_time: int | None = None) -> list[Message]:
+        """返回 chat 自上次水位以来的新消息。
+
+        没有水位的会话：给了 since_time 就从该时刻（秒）起取，否则把水位设为当前最新、不回放历史。
+        """
+        min_time = 0
         if chat not in self.watermarks:
-            self.watermarks[chat] = self.max_seq(chat)
-            self._save()
-            return []
+            if since_time is None:
+                self.watermarks[chat] = self.max_seq(chat)
+                self._save()
+                return []
+            self.watermarks[chat] = 0
+            min_time = int(since_time)
         after = self.watermarks[chat]
         out: list[Message] = []
         for shard in self.shards():
-            for r, sender in self._rows(shard, chat, after):
+            for r, sender in self._rows(shard, chat, after, min_time=min_time):
                 text = _decode(r["message_content"], r["compress_content"])
                 if chat.endswith("@chatroom"):
                     m = _SENDER_PREFIX.match(text)
@@ -186,3 +198,49 @@ class MessageReader:
             return (r and (r["remark"] or r["nick_name"])) or username
         finally:
             con.close()
+
+    # ---- 联系人 / 群 ----
+    def contacts(self) -> list[dict]:
+        con = self.cache.connect("contact/contact.db")
+        try:
+            rows = con.execute("SELECT username, nick_name, remark, alias FROM contact").fetchall()
+        finally:
+            con.close()
+        return [
+            {"username": r["username"], "name": r["nick_name"] or "", "remark": r["remark"] or "",
+             "alias": r["alias"] or "", "isGroup": (r["username"] or "").endswith("@chatroom")}
+            for r in rows if r["username"]
+        ]
+
+    def find_chats(self, name: str) -> list[dict]:
+        """按备注/昵称/微信号精确匹配会话（发送时用于把显示名解析成唯一 username）。"""
+        if name in ("文件传输助手", "filehelper"):
+            return [{"username": "filehelper", "name": "文件传输助手", "remark": "", "alias": "", "isGroup": False}]
+        return [c for c in self.contacts() if name in (c["remark"], c["name"], c["alias"], c["username"])]
+
+    def self_names(self) -> list[str]:
+        con = self.cache.connect("contact/contact.db")
+        try:
+            r = con.execute("SELECT nick_name FROM contact WHERE username=?", (self.self_wxid,)).fetchone()
+        finally:
+            con.close()
+        return [r["nick_name"]] if r and r["nick_name"] else []
+
+    def self_sent_since(self, chat: str, since_ts: int) -> list[tuple[str, str]]:
+        """chat 中自己在 since_ts（秒）之后发出的消息 [(type, text)]，不动水位。用于发送后核对。"""
+        out = []
+        for shard in self.shards():
+            self.cache.refresh(shard)
+            for r, sender in self._rows(shard, chat, 0, min_time=since_ts):
+                if sender == self.self_wxid:
+                    mtype = MSG_TYPES.get(r["local_type"] & 0xFFFFFFFF, str(r["local_type"]))
+                    out.append((mtype, _decode(r["message_content"], r["compress_content"])))
+        return out
+
+
+_AT_LIST = re.compile(r"<atuserlist>\s*(?:<!\[CDATA\[)?([^<\]]*)")
+
+
+def at_users(source: str) -> list[str]:
+    m = _AT_LIST.search(source or "")
+    return [u for u in (m.group(1).split(",") if m else []) if u]

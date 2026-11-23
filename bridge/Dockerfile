@@ -11,4 +11,4 @@ COPY fuxi_bridge /app/fuxi_bridge
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1 DISPLAY=:1
 
-CMD ["python", "-m", "fuxi_bridge.minimal"]
+CMD ["python", "-m", "fuxi_bridge.app"]

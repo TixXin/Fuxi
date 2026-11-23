@@ -27,7 +27,7 @@ for f in "${files[@]}"; do
     echo "疑似 IP 地址：$f"; grep -nE '\b([0-9]{1,3}\.){3}[0-9]{1,3}\b' "$f" | grep -vE '\b(127\.0\.0\.1|0\.0\.0\.0)\b' | head -3; fail=1
   fi
   # 真实 wxid（示例请写 wxid_<id>）
-  if grep -nE 'wxid_[a-z0-9]{8,}' "$f" >/dev/null; then
+  if grep -oE 'wxid_[a-z0-9]{8,}' "$f" | grep -vqE '^wxid_x+$'; then
     echo "疑似真实 wxid：$f"; fail=1
   fi
   # API key 形态

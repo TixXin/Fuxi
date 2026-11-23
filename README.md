@@ -18,11 +18,21 @@
 │  messages  会话/消息表轮询，sort_seq 水位             │
 │  sender    xdotool + xclip 往微信窗口发文本/图片      │
 └──────┬──────────────────────────────────────────────┘
-       │ POST /webhook/wechat（同一网络命名空间，回环）
+       │ POST /webhook/wechat、拉提醒、心跳（同一网络命名空间，回环）
 ┌──────▼──────────────────────────────────────────────┐
 │ kernel：whale_girl 的 Node 内核（对话/记忆/人设/调模型）│
 └─────────────────────────────────────────────────────┘
+        ▲ 对外发送 API（宿主 127.0.0.1:FUXI_API_PORT，Bearer token）
+        └── 其他项目，如浮屿发版分享图 → 微信群
 ```
+
+桥接主循环（`bridge/fuxi_bridge/app.py`）：
+
+1. session/消息库有变化 → 找出时间戳变了的会话 → 按 sort_seq 水位取新消息；
+2. 过滤：只收文本、跳过自己发的、公众号、超过 120 秒的旧消息；同一会话 1.5 秒内连发合并；
+3. 转成内核 webhook 格式（群聊带 `at_me`，从 source XML 的 `atuserlist` 和「@名字」判断）；
+4. 内核回复的气泡逐条发送，发送前问内核 `send-permission`，发送后到库里核对确实落在目标会话；
+5. 另有线程：每 5 秒拉内核到期提醒、每 20 秒心跳、启动时同步联系人。
 
 - **收消息**：不看界面，直接解密微信本地数据库。密钥以 `x'<hex>'` 字符串形式存在
   进程内存里，被一个固定 32 字节掩码异或混淆；按 32 种相位锚点单遍扫内存即可取出，
@@ -36,7 +46,8 @@
 | 路径 | 内容 |
 |---|---|
 | `bridge/` | Linux 桥接（Python 3.12，依赖 cryptography、zstandard；镜像另装 xdotool/xclip） |
-| `kernel/` | whale_girl Node 内核（阶段 4 引入） |
+| `kernel/` | whale_girl Node 内核（上游文件未改，见 `kernel/UPSTREAM.md`） |
+| `docs/api.md` | 对外发送 API 说明 |
 | `deploy/` | `compose.yaml` 与 `.env.example`；真实 `.env` 只在服务器 |
 | `scripts/check-secrets.sh` | 提交前拦截密钥/IP/wxid（`git config core.hooksPath .githooks` 启用） |
 
@@ -46,11 +57,16 @@
 
 ```bash
 docker build --platform linux/amd64 -t fuxi-bridge:dev bridge
-docker save fuxi-bridge:dev | gzip -1 | ssh <服务器> docker load
+docker build --platform linux/amd64 -t fuxi-kernel:dev kernel
+docker save fuxi-bridge:dev fuxi-kernel:dev | gzip -1 | ssh <服务器> docker load
 ```
 
-服务器上：wechat-selkies 的 compose 需额外挂一个共享目录到 `/tmp/.X11-unix`；
-`deploy/compose.yaml` 与 `.env`（chmod 600）放同一目录后 `docker compose up -d`。
+服务器上：
+
+1. wechat-selkies 的 compose 在 volumes 里加一行 `- ./x11:/tmp/.X11-unix`（目录 `chmod 1777`），
+   `docker compose up -d` 重建后微信需在手机上确认登录一次；
+2. `deploy/compose.yaml` 与 `.env`（按 `.env.example` 填，`chmod 600`）放同一目录，`docker compose up -d`；
+3. 内核设置（人设、群聊策略、白名单等）在卷 `kernel-data` 的 `config.json`，改完自动生效。
 
 调试命令（在桥接容器里）：
 

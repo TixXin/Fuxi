@@ -50,8 +50,10 @@
 |---|---|
 | `bridge/` | Linux 桥接（Python 3.12，依赖 cryptography、zstandard；镜像另装 xdotool/xclip） |
 | `kernel/` | whale_girl Node 内核（上游文件未改，见 `kernel/UPSTREAM.md`） |
+| `docs/deploy.md` | 部署与运维（首次部署、白名单、熔断、升级微信、备份、排障） |
 | `docs/api.md` | 对外发送 API 说明 |
 | `deploy/` | `compose.yaml` 与 `.env.example`；真实 `.env` 只在服务器 |
+| `scripts/deploy.sh` | 本机构建镜像并部署到服务器 |
 | `scripts/check-secrets.sh` | 提交前拦截密钥/IP/wxid（`git config core.hooksPath .githooks` 启用） |
 
 ## 部署

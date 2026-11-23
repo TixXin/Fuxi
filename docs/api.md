@@ -48,6 +48,22 @@
 
 人工确认微信界面无误后解除熔断。重启桥接容器也会解除。
 
+### 白名单 `GET /allow`、`PUT /allow`、`POST /allow`
+
+bot 只回复白名单里的会话。名单存在桥接状态卷的 `allow.txt`（每行一个 chat_id，`#` 后是注释），
+**改文件或调接口都立即生效，不用重启**，并自动同步到内核（`wechat.whitelistOnly` + `care.whitelist`）。
+
+- 空名单 = 谁都不回；`"*"` = 全部放行（慎用）。
+- 元素可以是 chat_id 或**唯一**的显示名（备注/昵称/群名），有歧义返回 409。
+- `PUT {"items": [...]}` 整体替换；`POST {"add": [...], "remove": [...]}` 增删。
+
+```bash
+curl -s -H "Authorization: Bearer $T" -H "Content-Type: application/json" \
+  -X POST -d '{"add":["某个群名"]}' 127.0.0.1:8790/allow
+```
+
+注意：白名单只约束 bot 的**自动回复**和内核提醒；`/send` 是调用方明确指定目标的主动发送，不受它限制。
+
 ## 示例（在本机通过 SSH 调用）
 
 ```bash

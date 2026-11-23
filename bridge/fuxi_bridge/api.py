@@ -4,6 +4,9 @@
 
   GET  /healthz                      {ok, wechat, halted}
   POST /resume                       解除熔断（发送后核对失败会停止一切发送）
+  GET  /allow                        当前白名单 [{chat_id, name}]
+  PUT  /allow  {"items": [...]}      整体替换；元素可以是 chat_id、唯一的显示名，或 "*"
+  POST /allow  {"add": [...], "remove": [...]}  增删
   GET  /chats?q=关键词                按备注/昵称/群名模糊搜，返回 [{chat_id, name, remark, isGroup}]
   POST /send                         {"to": "群名或备注" | "chat_id": "xxx@chatroom",
                                        "text": "...", "image_base64": "...", "image_name": "a.png"}
@@ -63,6 +66,9 @@ def serve(bridge: "Bridge") -> None:
             u = urlparse(self.path)
             if u.path == "/healthz":
                 return self._json(200, {"ok": True, "wechat": bridge.last_send_ok, "halted": bridge.halted})
+            if u.path == "/allow":
+                return self._json(200, {"ok": True, "items": [
+                    {"chat_id": i, "name": "全部" if i == "*" else bridge.name_of(i)} for i in bridge.allowlist.items]})
             if u.path == "/chats":
                 q = (parse_qs(u.query).get("q") or [""])[0].strip()
                 if not q:
@@ -74,9 +80,81 @@ def serve(bridge: "Bridge") -> None:
                     for c in hits]})
             self._json(404, {"ok": False, "error": "not found"})
 
+        def _body(self) -> dict | None:
+            n = int(self.headers.get("Content-Length") or 0)
+            if n <= 0 or n > MAX_BODY:
+                self._json(413, {"ok": False, "error": "body 为空或超过 20MB"})
+                return None
+            try:
+                body = json.loads(self.rfile.read(n))
+            except ValueError:
+                body = None
+            if not isinstance(body, dict):
+                self._json(400, {"ok": False, "error": "JSON 无效"})
+                return None
+            return body
+
+        def _resolve(self, items) -> tuple[list[str], dict[str, str]] | None:
+            """把显示名解析成 chat_id；有歧义或找不到就整批拒绝。"""
+            ids, names, bad = [], {}, []
+            for raw in items or []:
+                it = str(raw).strip()
+                if not it:
+                    continue
+                if it == "*" or it == "filehelper" or it.endswith("@chatroom") or it.startswith("wxid_"):
+                    ids.append(it)
+                    names[it] = "全部" if it == "*" else bridge.name_of(it)
+                    continue
+                hits = bridge.reader.find_chats(it)
+                if len(hits) != 1:
+                    bad.append(f"「{it}」匹配到 {len(hits)} 个会话")
+                    continue
+                ids.append(hits[0]["username"])
+                names[hits[0]["username"]] = it
+            if bad:
+                self._json(409, {"ok": False, "error": "；".join(bad) + "，请改用 chat_id（GET /chats?q= 查）"})
+                return None
+            return ids, names
+
+        def _allow_reply(self):
+            return self._json(200, {"ok": True, "items": [
+                {"chat_id": i, "name": "全部" if i == "*" else bridge.name_of(i)} for i in bridge.allowlist.items]})
+
+        def do_PUT(self):
+            if not self._auth():
+                return
+            if urlparse(self.path).path != "/allow":
+                return self._json(404, {"ok": False, "error": "not found"})
+            body = self._body()
+            if body is None:
+                return
+            got = self._resolve(body.get("items"))
+            if got is None:
+                return
+            ids, names = got
+            bridge.allowlist.set(ids, names)
+            log.warning("白名单被 API 整体替换为 %d 项", len(ids))
+            return self._allow_reply()
+
         def do_POST(self):
             if not self._auth():
                 return
+            if urlparse(self.path).path == "/allow":
+                body = self._body()
+                if body is None:
+                    return
+                add = self._resolve(body.get("add"))
+                if add is None:
+                    return
+                rm = self._resolve(body.get("remove"))
+                if rm is None:
+                    return
+                cur = list(bridge.allowlist.items)
+                names = {i: bridge.name_of(i) for i in cur if i != "*"} | add[1]
+                new = [i for i in cur if i not in rm[0]] + [i for i in add[0] if i not in cur]
+                bridge.allowlist.set(new, names)
+                log.warning("白名单经 API 修改：+%d -%d", len(add[0]), len(rm[0]))
+                return self._allow_reply()
             if urlparse(self.path).path == "/resume":
                 was, bridge.halted = bridge.halted, ""
                 log.warning("人工解除熔断（之前：%s）", was or "未熔断")

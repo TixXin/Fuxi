@@ -12,7 +12,7 @@
   FUXI_SETTLE_MS                  同一会话连发合并窗口，默认 1500
   FUXI_STALE_SEC                  早于此秒数的消息不回复，默认 120
   FUXI_REPLY_SELF                 1 = 文件传输助手里自己的消息也交给内核（自测）
-  FUXI_ALLOW                      只响应这些会话（chat_id 或显示名，逗号分隔）；空 = 全部
+  FUXI_ALLOW                      初始白名单（chat_id，逗号分隔），仅在 /state/allow.txt 不存在时使用
 """
 
 from __future__ import annotations
@@ -28,6 +28,7 @@ import time
 from dataclasses import dataclass, field
 
 from . import messages, store
+from .allow import AllowList
 from .kernel import Kernel, KernelError
 from .messages import Message
 from .sender import Sender, SendError
@@ -69,8 +70,9 @@ class Bridge:
         self.reply_self = env.get("FUXI_REPLY_SELF") == "1"
         self.extra_names = [n.strip() for n in env.get("FUXI_SELF_NAMES", "").split(",") if n.strip()]
         self.interval = float(env.get("FUXI_POLL_INTERVAL", "0.5"))
-        # 只响应这些会话（chat_id 或显示名，逗号分隔）；空 = 全部
-        self.allow = {a.strip() for a in env.get("FUXI_ALLOW", "").split(",") if a.strip()}
+        # 白名单：/state/allow.txt 热加载；FUXI_ALLOW 只在文件不存在时用作初始值
+        self.allowlist = AllowList(os.path.join(state, "allow.txt"), env.get("FUXI_ALLOW", ""),
+                                   on_change=self._sync_kernel_allow)
 
         self.sendq: "queue.Queue[SendJob]" = queue.Queue()
         self.sent_hashes: collections.deque[str] = collections.deque(maxlen=500)
@@ -169,7 +171,13 @@ class Bridge:
         return out
 
     def _allowed_chat(self, chat: str) -> bool:
-        return not self.allow or chat in self.allow or self.name_of(chat) in self.allow
+        return self.allowlist.allows(chat)
+
+    def _sync_kernel_allow(self, items: list[str]) -> None:
+        if not getattr(self, "kernel_ready", False):
+            return  # 内核就绪后 run() 里会补一次
+        self.kernel.set_whitelist(items)
+        log.info("白名单已同步到内核（%s）", "全部放行" if "*" in items else f"{len(items)} 个会话")
 
     def _accept(self, m: Message) -> bool:
         if m.type != "text" or not m.text.strip():
@@ -188,6 +196,7 @@ class Bridge:
         return True
 
     def poll_once(self) -> None:
+        self.allowlist.reload()
         for chat in self._changed_chats():
             try:
                 new = self.reader.poll(chat, since_time=int(self.started))
@@ -266,6 +275,10 @@ class Bridge:
                 if not it.get("wxid") or not text:
                     self.kernel.reminder_ack(rid, False, "missing target or text")
                     continue
+                allowed, reason = self.kernel.send_permission(it["wxid"], self.name_of(it["wxid"]))
+                if not allowed:
+                    self.kernel.reminder_ack(rid, False, f"not allowed: {reason}")
+                    continue
                 if it.get("chatType") == "group" and it.get("atName"):
                     text = f"@{it['atName']} {text}"
                 job = self.send(SendJob(chat=it.get("wxid") or "", text=text))
@@ -300,6 +313,11 @@ class Bridge:
     def run(self) -> None:
         log.info("等待内核就绪…")
         self.kernel.wait_ready()
+        self.kernel_ready = True
+        try:
+            self._sync_kernel_allow(self.allowlist.items)
+        except Exception as e:
+            log.warning("同步白名单到内核失败：%s", e)
         self._changed_chats()  # 记下当前各会话时间戳，不回放历史
         threading.Thread(target=self._send_worker, name="send", daemon=True).start()
         threading.Thread(target=self._reminder_loop, name="reminders", daemon=True).start()

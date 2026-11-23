@@ -8,6 +8,7 @@
 - POST /api/wechat/send-permission {chatId, name} → {allowed, reason}
 - POST /api/wechat/contacts/sync {account, at, items}
 - POST /api/bridge/heartbeat     每 20 秒
+- POST /api/config {patch}       改配置并立即生效（用于同步白名单）
 """
 
 from __future__ import annotations
@@ -65,8 +66,8 @@ class Kernel:
             r = self._req("POST", "/api/wechat/send-permission", {"chatId": chat_id, "name": name}, timeout=10)
             return bool(r.get("allowed", True)), r.get("reason") or ""
         except KernelError as e:
-            log.warning("发送许可查询失败，默认放行：%s", e)
-            return True, ""
+            log.warning("发送许可查询失败，按不允许处理：%s", e)
+            return False, f"permission check failed: {e}"
 
     def reminders_due(self) -> list[dict]:
         return self._req("GET", "/api/reminders/due", timeout=10).get("items") or []
@@ -83,6 +84,16 @@ class Kernel:
     def contacts_sync(self, account: str, items: list[dict]) -> None:
         self._req("POST", "/api/wechat/contacts/sync",
                   {"account": account, "at": int(time.time() * 1000), "items": items}, timeout=30)
+
+    def set_whitelist(self, items: list[str]) -> None:
+        """内核第二道防线：whitelistOnly + care.whitelist（发送前拦截）。'*' = 关闭白名单。"""
+        if "*" in items:
+            patch = {"wechat": {"whitelistOnly": False}, "care": {"whitelist": []}}
+        else:
+            patch = {"wechat": {"whitelistOnly": True}, "care": {"whitelist": list(items)}}
+        r = self._req("POST", "/api/config", {"patch": patch}, timeout=15)
+        if not r.get("ok"):
+            raise KernelError(f"内核拒绝白名单配置：{r.get('error')}")
 
     def heartbeat(self, info: dict) -> None:
         self._req("POST", "/api/bridge/heartbeat", {"platform": "wechat", **info}, timeout=10)

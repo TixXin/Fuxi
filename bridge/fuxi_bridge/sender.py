@@ -88,23 +88,34 @@ class Sender:
             raise SendError("xwd 截图失败")
         return _Shot(r.stdout)
 
-    def open_chat(self, name: str) -> None:
-        """搜索并打开会话。name 用微信里显示的会话名（备注/群名/文件传输助手）。
-
-        搜索下拉框顶部总是先列「搜索网络结果」和若干网络联想词，回车会走网络搜索，
-        所以不能直接回车：截图找到第一个本地结果（功能/联系人/群聊，带大头像），点击它。
-        找不到本地结果就放弃，绝不点到下拉框后面的会话列表。
-        """
+    def _search(self, name: str) -> tuple[str, "_Shot"]:
         w = self._activate()
         self._key("ctrl+f")
         self._clip_text(name)
         self._key("ctrl+a")
         self._key("ctrl+v")
         time.sleep(1.2)  # 等搜索结果
-        hit = self._capture(w).first_local_result()
+        return w, self._capture(w)
+
+    def locate(self, name: str) -> tuple[int, int] | None:
+        """只搜索并定位，不点击（调试用）。"""
+        with self._lock:
+            _, shot = self._search(name)
+            self._key("Escape")
+            return shot.exact_match_row()
+
+    def open_chat(self, name: str) -> None:
+        """搜索并打开会话。name 必须是微信里显示的会话名（备注优先/群名/文件传输助手）。
+
+        搜索下拉框的分区和顺序因关键词而异（网络联想、联系人、群聊「包含:xx」、聊天记录…），
+        不能回车、也不能按位置猜。判定依据：微信把命中的关键词标绿，**只有标题与关键词
+        完全相同的本地结果，整行标题才是纯绿色**。恰好一行这样的结果才点击，否则放弃。
+        """
+        w, shot = self._search(name)
+        hit = shot.exact_match_row()
         if hit is None:
             self._key("Escape")
-            raise SendError(f"搜索「{name}」没有本地会话结果")
+            raise SendError(f"搜索「{name}」没有唯一的完全匹配结果，放弃发送")
         x, y = hit
         self._run("xdotool", "mousemove", "--window", w, str(x), str(y), "click", "1")
         time.sleep(0.6)
@@ -138,7 +149,7 @@ class Sender:
 
 
 class _Shot:
-    """xwd 截图（微信窗口，24 位深、每像素 3 字节 BGR）的最小解析与搜索结果定位。
+    """xwd 截图（微信窗口，每像素 3 或 4 字节、小端 BGR(A)）的最小解析与搜索结果定位。
 
     布局常量按微信 4.x Linux 默认 2 倍缩放实测：左侧导航 0~146，会话列表 146~600，
     搜索下拉框宽到约 786。下拉框里网络联想词只有小图标，本地结果是 ~72px 的大头像。
@@ -154,13 +165,14 @@ class _Shot:
 
         h = struct.unpack(">25I", raw[:100])
         self.w, self.h, self.bpp, self.bpl = h[4], h[5], h[11], h[12]
-        if self.bpp != 24:
+        if self.bpp not in (24, 32):
             raise SendError(f"不支持的截图格式 bpp={self.bpp}")
+        self.step = self.bpp // 8
         self.off = h[0] + h[19] * 12
         self.raw = raw
 
     def px(self, x: int, y: int) -> tuple[int, int, int]:
-        i = self.off + y * self.bpl + x * 3
+        i = self.off + y * self.bpl + x * self.step
         b = self.raw
         return (b[i + 2], b[i + 1], b[i])
 
@@ -179,23 +191,47 @@ class _Shot:
                 return y - run
         return self.h
 
-    def first_local_result(self) -> tuple[int, int] | None:
-        """下拉框内第一个高 55~90px 的头像块（允许 8px 内的断开，头像里可能有白色图案）。"""
-        bottom = self.dropdown_bottom()
-        x0, x1 = self.AVATAR_X
-        start = last = None
-        for y in range(self.TOP_Y, bottom):
-            row = [self.px(x, y) for x in range(x0, x1, 2)]
-            bg = max(set(row), key=row.count)
-            if not any(sum(abs(p[k] - bg[k]) for k in range(3)) > 40 for p in row):
-                continue
-            if last is not None and y - last > 8:  # 上一块结束
-                if 55 <= last - start <= 90:
-                    break
-                start = None
-            if start is None:
-                start = y
-            last = y
-        if start is not None and 55 <= last - start <= 90:
-            return (400, (start + last) // 2)
+    TITLE_X = (246, 700)   # 头像右侧到右侧 ⓘ 图标之前
+    LOCAL_TITLE_MIN_X = 252  # 本地结果标题从 ~258 起；网络联想词从 ~214 起（会被扫描左界截断成 246）
+
+    @staticmethod
+    def _kind(p) -> str | None:
+        r, g, b = p
+        if g > r + 50 and g > b + 20:
+            return "G"   # 关键词高亮绿
+        if max(p) < 170 and max(p) - min(p) < 30:
+            return "D"   # 普通黑/灰字
         return None
+
+    def text_lines(self, bottom: int) -> list[dict]:
+        x0, x1 = self.TITLE_X
+        lines, cur = [], None
+        for y in range(self.TOP_Y, bottom):
+            hits = [(x, k) for x in range(x0, x1) if (k := self._kind(self.px(x, y)))]
+            if hits:
+                if cur is None:
+                    cur = {"y0": y, "y1": y, "G": 0, "D": 0, "xmin": hits[0][0]}
+                cur["y1"] = y
+                cur["xmin"] = min(cur["xmin"], hits[0][0])
+                for _, k in hits:
+                    cur[k] += 1
+            elif cur is not None and y - cur["y1"] > 3:
+                lines.append(cur)
+                cur = None
+        if cur is not None:
+            lines.append(cur)
+        return lines
+
+    def exact_match_row(self) -> tuple[int, int] | None:
+        bottom = self.dropdown_bottom()
+        exact = [
+            l for l in self.text_lines(bottom)
+            if l["xmin"] >= self.LOCAL_TITLE_MIN_X and 15 <= l["y1"] - l["y0"] <= 40
+            and l["G"] >= 40 and l["D"] == 0
+        ]
+        if len(exact) != 1:
+            if exact:
+                log.warning("搜索结果里有 %d 个完全匹配，无法确定目标", len(exact))
+            return None
+        l = exact[0]
+        return (400, (l["y0"] + l["y1"]) // 2)

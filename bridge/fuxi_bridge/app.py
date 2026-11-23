@@ -12,6 +12,7 @@
   FUXI_SETTLE_MS                  同一会话连发合并窗口，默认 1500
   FUXI_STALE_SEC                  早于此秒数的消息不回复，默认 120
   FUXI_REPLY_SELF                 1 = 文件传输助手里自己的消息也交给内核（自测）
+  FUXI_ALLOW                      只响应这些会话（chat_id 或显示名，逗号分隔）；空 = 全部
 """
 
 from __future__ import annotations
@@ -68,6 +69,8 @@ class Bridge:
         self.reply_self = env.get("FUXI_REPLY_SELF") == "1"
         self.extra_names = [n.strip() for n in env.get("FUXI_SELF_NAMES", "").split(",") if n.strip()]
         self.interval = float(env.get("FUXI_POLL_INTERVAL", "0.5"))
+        # 只响应这些会话（chat_id 或显示名，逗号分隔）；空 = 全部
+        self.allow = {a.strip() for a in env.get("FUXI_ALLOW", "").split(",") if a.strip()}
 
         self.sendq: "queue.Queue[SendJob]" = queue.Queue()
         self.sent_hashes: collections.deque[str] = collections.deque(maxlen=500)
@@ -79,6 +82,8 @@ class Bridge:
         self.names_cache: dict[str, str] = {}
         self.started = time.time()
         self.last_send_ok = True
+        # 熔断：发送后核对失败（疑似发错会话）就停止一切发送，直到人工 POST /resume 或重启
+        self.halted: str = ""
 
     # ---------- 名字 ----------
     def name_of(self, username: str) -> str:
@@ -100,6 +105,10 @@ class Bridge:
     def _send_worker(self) -> None:
         while True:
             job = self.sendq.get()
+            if self.halted:
+                job.error = f"发送已熔断：{self.halted}"
+                job.done.set()
+                continue
             try:
                 t0 = int(time.time()) - 2
                 name = self.name_of(job.chat)
@@ -112,10 +121,15 @@ class Bridge:
                 if job.verify:
                     job.verified = self._verify(job, t0)
                     if not job.verified:
-                        log.error("发送后核对失败：%s 里没看到刚发的消息（可能发错会话）", name)
+                        self.halted = f"{time.strftime('%H:%M:%S')} 发往「{name}」后核对失败，可能发错会话"
+                        log.critical("已熔断，停止一切发送：%s。确认无误后 POST /resume 恢复", self.halted)
                 self.last_send_ok = job.verified is not False
             except (SendError, OSError) as e:
                 job.error = str(e)
+                # 发送中途出错时界面状态未知（可能已点开了别的会话），保守起见同样熔断
+                if "放弃发送" not in str(e):
+                    self.halted = f"{time.strftime('%H:%M:%S')} 发往「{job.chat}」时出错：{e}"
+                    log.critical("已熔断：%s", self.halted)
                 self.last_send_ok = False
                 log.error("发送到 %s 失败：%s", job.chat, e)
             finally:
@@ -154,8 +168,13 @@ class Bridge:
         self.session_seen["__init__"] = 1
         return out
 
+    def _allowed_chat(self, chat: str) -> bool:
+        return not self.allow or chat in self.allow or self.name_of(chat) in self.allow
+
     def _accept(self, m: Message) -> bool:
         if m.type != "text" or not m.text.strip():
+            return False
+        if not self._allowed_chat(m.chat):
             return False
         if _h(m.text) in self.sent_hashes:
             return False  # 自己刚发的回复

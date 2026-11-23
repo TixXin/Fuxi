@@ -39,6 +39,7 @@ services:
       FUXI_API_PORT: "8790"
       FUXI_SELF_NAMES: ${FUXI_SELF_NAMES:-}
       FUXI_REPLY_SELF: ${FUXI_REPLY_SELF:-0}
+      FUXI_ALLOW: ${FUXI_ALLOW:-}
       DISPLAY: ":1"
     volumes:
       - ${WX_CONFIG_DIR:?请在 .env 设置 WX_CONFIG_DIR}:/wxconfig:ro   # 微信数据，只读

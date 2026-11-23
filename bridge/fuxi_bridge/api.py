@@ -2,7 +2,8 @@
 
 所有请求需 `Authorization: Bearer <FUXI_API_TOKEN>`。
 
-  GET  /healthz                      {ok, wechat}
+  GET  /healthz                      {ok, wechat, halted}
+  POST /resume                       解除熔断（发送后核对失败会停止一切发送）
   GET  /chats?q=关键词                按备注/昵称/群名模糊搜，返回 [{chat_id, name, remark, isGroup}]
   POST /send                         {"to": "群名或备注" | "chat_id": "xxx@chatroom",
                                        "text": "...", "image_base64": "...", "image_name": "a.png"}
@@ -61,7 +62,7 @@ def serve(bridge: "Bridge") -> None:
                 return
             u = urlparse(self.path)
             if u.path == "/healthz":
-                return self._json(200, {"ok": True, "wechat": bridge.last_send_ok})
+                return self._json(200, {"ok": True, "wechat": bridge.last_send_ok, "halted": bridge.halted})
             if u.path == "/chats":
                 q = (parse_qs(u.query).get("q") or [""])[0].strip()
                 if not q:
@@ -76,6 +77,10 @@ def serve(bridge: "Bridge") -> None:
         def do_POST(self):
             if not self._auth():
                 return
+            if urlparse(self.path).path == "/resume":
+                was, bridge.halted = bridge.halted, ""
+                log.warning("人工解除熔断（之前：%s）", was or "未熔断")
+                return self._json(200, {"ok": True, "was": was})
             if urlparse(self.path).path != "/send":
                 return self._json(404, {"ok": False, "error": "not found"})
             n = int(self.headers.get("Content-Length") or 0)

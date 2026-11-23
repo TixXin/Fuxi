@@ -1,0 +1,27 @@
+# 浮汐编排。与已在运行的 wechat-selkies 容器拼在一起（它由自己的 compose 管理）。
+# 所有主机路径、容器名都从 .env 读取，仓库里不写服务器信息。见 .env.example。
+name: fuxi
+
+services:
+  bridge:
+    image: fuxi-bridge:${FUXI_VERSION:-dev}
+    container_name: fuxi-bridge
+    restart: unless-stopped
+    # 与微信同 pid 命名空间：读 /proc/<微信pid>/mem 提密钥（只读）
+    pid: "container:${WECHAT_CONTAINER}"
+    cap_add: [SYS_PTRACE]
+    env_file: .env
+    environment:
+      FUXI_WX_CONFIG: /wxconfig
+      FUXI_STATE_DIR: /state
+      FUXI_WORK_DIR: /work
+      DISPLAY: ":1"
+    volumes:
+      - ${WX_CONFIG_DIR}:/wxconfig:ro          # 微信数据，只读
+      - ${X11_SOCKET_DIR}:/tmp/.X11-unix       # 与 wechat-selkies 共享的 X socket
+      - state:/state                           # 水位等
+    tmpfs:
+      - /work:size=1g,mode=0700                # 解密库与密钥缓存，只在内存里
+
+volumes:
+  state:

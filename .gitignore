@@ -1,0 +1,22 @@
+# 机密与运行数据：永远不进仓库
+.env
+.env.*
+!.env.example
+*.key
+keys.json
+state/
+data/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.xwd
+
+# Python / Node
+__pycache__/
+*.pyc
+.venv/
+node_modules/
+
+# 本地杂项
+.DS_Store

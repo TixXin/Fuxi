@@ -2,6 +2,8 @@ FROM node:22-slim
 
 WORKDIR /app
 COPY . /app
+# 浮汐扩展的依赖（上游内核零依赖；链接阅读增强要 Readability + linkedom）
+RUN cd fuxi && npm ci --omit=dev --no-audit --no-fund && npm cache clean --force
 ENV NODE_ENV=production TZ=Asia/Shanghai
 VOLUME /app/data
 

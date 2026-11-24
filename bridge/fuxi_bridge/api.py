@@ -9,6 +9,9 @@
   POST /allow  {"add": [...], "remove": [...]}  增删
   GET  /settings                     全部行为设置 {items: [{key, label, type, value, default, desc, choices, kernel}]}
   POST /settings {"key": 值, ...}    修改（立即生效）；→ {ok, items} 或 {ok:false, error}
+  POST /announce {key, text?, image_base64?, image_name?, to?|chat_id?}
+       先发到文件传输助手预览，主人回 /发布 才发群；key 幂等（见 announce.py）→ {ok, created, item}
+  GET  /announce?key=...             查公告状态
   GET  /chats?q=关键词                按备注/昵称/群名模糊搜，返回 [{chat_id, name, remark, isGroup}]
   POST /send                         {"to": "群名或备注" | "chat_id": "xxx@chatroom",
                                        "text": "...", "image_base64": "...", "image_name": "a.png"}
@@ -96,6 +99,12 @@ def serve(bridge: "Bridge") -> None:
                     {"chat_id": i, "name": "全部" if i == "*" else bridge.name_of(i)} for i in bridge.allowlist.items]})
             if u.path == "/settings":
                 return self._settings_reply()
+            if u.path == "/announce":
+                key = (parse_qs(u.query).get("key") or [""])[0]
+                it = bridge.announcer.get(key)
+                if not it:
+                    return self._json(404, {"ok": False, "error": "没有这个 key"})
+                return self._json(200, {"ok": True, "item": bridge.announcer.public(it)})
             if u.path == "/chats":
                 q = (parse_qs(u.query).get("q") or [""])[0].strip()
                 if not q:
@@ -197,6 +206,32 @@ def serve(bridge: "Bridge") -> None:
                         return self._json(400, {"ok": False, "error": str(e), "key": k})
                 log.warning("设置经 API 修改：%s", "、".join(body))
                 return self._settings_reply()
+            if urlparse(self.path).path == "/announce":
+                from .announce import AnnounceError
+                body = self._body()
+                if body is None:
+                    return
+                target = body.get("chat_id") or body.get("to") or bridge.cfg.get("announce_to")
+                try:
+                    chat = bridge.resolve_chat(target)
+                except ValueError as e:
+                    return self._json(409, {"ok": False, "error": f"{e}（可在 /设置 发版群 指定默认群）"})
+                image, ext = None, ".png"
+                if body.get("image_base64"):
+                    try:
+                        image = base64.b64decode(body["image_base64"], validate=True)
+                    except ValueError:
+                        return self._json(400, {"ok": False, "error": "image_base64 无效"})
+                    if str(body.get("image_name", "")).lower().endswith((".jpg", ".jpeg")):
+                        ext = ".jpg"
+                text = body.get("text")
+                try:
+                    it, created = bridge.announcer.create(str(body.get("key") or ""), chat,
+                                                          str(text) if text else None, image, ext)
+                except AnnounceError as e:
+                    return self._json(e.code, {"ok": False, "error": str(e)})
+                log.warning("公告 %s：%s", it["key"], "已发预览，等确认" if created else f"已存在（{it['status']}）")
+                return self._json(200, {"ok": True, "created": created, "item": bridge.announcer.public(it)})
             if urlparse(self.path).path == "/resume":
                 was, bridge.halted = bridge.halted, ""
                 log.warning("人工解除熔断（之前：%s）", was or "未熔断")

@@ -28,7 +28,7 @@ import time
 from dataclasses import dataclass, field
 
 from . import messages, store
-from . import care, control, images, settings, timing, voice
+from . import announce, care, control, images, settings, timing, voice
 from .allow import AllowList
 from .kernel import Kernel, KernelError
 from .messages import Message
@@ -133,6 +133,7 @@ class Bridge:
                                     os.path.join(state, "imgkey.json"))
         self.voices = voice.Voices(self.cache)
         self.media_cache: collections.OrderedDict[str, str] = collections.OrderedDict()   # 看图/语音结果
+        self.announcer = announce.Announcer(self, os.path.join(state, "announce"))
         self.control = control.Control(self)
         self.apply_settings()
 
@@ -185,6 +186,18 @@ class Bridge:
         v = self.cfg.set(key, raw)
         self.apply_settings()
         return v
+
+    def resolve_chat(self, name: str) -> str:
+        """群名/备注/昵称或 chat_id → chat_id；不唯一或找不到抛 ValueError。"""
+        name = (name or "").strip()
+        if not name:
+            raise ValueError("没有指定会话")
+        if name == "filehelper" or name.endswith("@chatroom") or name.startswith("wxid_"):
+            return name
+        hits = self.reader.find_chats(name)
+        if len(hits) != 1:
+            raise ValueError(f"「{name}」匹配到 {len(hits)} 个会话，请改用 chat_id")
+        return hits[0]["username"]
 
     def set_paused(self, on: bool) -> None:
         self.paused = on

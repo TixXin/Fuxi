@@ -66,6 +66,19 @@ curl -s -H "Authorization: Bearer $T" -H "Content-Type: application/json" \
 
 注意：白名单只约束 bot 的**自动回复**和内核提醒；`/send` 是调用方明确指定目标的主动发送，不受它限制。
 
+### `POST /announce`、`GET /announce?key=`
+
+要人确认的群发（浮屿发版公告）：先发到文件传输助手预览，主人在那里回 `/发布 编号` 才真的发到群。
+
+```json
+{"key": "fuyu-v1.2.3", "text": "浮屿 v1.2.3 已更新…", "image_base64": "<png>", "to": "可省，默认用 /设置 发版群"}
+```
+
+→ `{"ok": true, "created": true, "item": {"key", "code", "to", "status", "status_zh"}}`。`key` 是幂等键：
+同一个 key 再调只返回原记录（`created: false`），不会重复预览或重复发群。`status`：`pending` 等确认、
+`sent` 已发出、`cancelled`、`expired`（24 小时没确认）、`failed`（发了一半不会自动重试，避免刷屏）。
+遥控：`/待发` 列出、`/发布 [编号]`、`/取消 [编号]`。
+
 ## 示例（在本机通过 SSH 调用）
 
 ```bash

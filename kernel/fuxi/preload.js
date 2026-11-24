@@ -3,6 +3,9 @@
 'use strict';
 const routes = require('../src/http/routes');
 
+// 链接阅读增强：替换上游 links 模块导出的 describeLink / formatForPrompt（见 links.js）
+require('./links').install();
+
 const original = routes.createRouter;
 routes.createRouter = function createRouter(runtime) {
   const router = original(runtime);

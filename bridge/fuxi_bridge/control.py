@@ -13,6 +13,7 @@
   /测试 名字          只打开该会话并核对标题、不发送，回报耗时
   /存表情 [分类]      把 10 分钟内发到这里的最新一个表情存进表情包库（分类默认「开心」，还有傲娇、炸毛）
   /搭话              立即检查一次主动搭话（仍受内核时间窗/间隔/上限约束），回报结果
+  /待发              列出等确认的发版公告；/发布 [编号] 发出，/取消 [编号] 放弃
   /设置              查看全部设置；/设置 看图 看说明；/设置 看图 只看私聊 修改（立即生效）
 """
 
@@ -236,6 +237,27 @@ class Control:
             return f"内核没改成：{e}"
         return f"已设置 {it.label}：{self._show_setting(it, v)}"
 
+    def announce_list(self, _arg: str) -> str:
+        return self.b.announcer.listing()
+
+    def announce_publish(self, arg: str) -> str:
+        from .announce import AnnounceError
+        try:
+            it = self.b.announcer.publish(arg)
+        except AnnounceError as e:
+            return str(e)
+        if it["status"] == "sent":
+            return f"#{it['code']} 已发到「{it['to']}」。"
+        return f"#{it['code']} 发送失败：{it.get('error')}（不会自动重试，避免重复发）"
+
+    def announce_cancel(self, arg: str) -> str:
+        from .announce import AnnounceError
+        try:
+            it = self.b.announcer.cancel(arg)
+        except AnnounceError as e:
+            return str(e)
+        return f"#{it['code']} 已取消，不会发到「{it['to']}」。"
+
     def _show_setting(self, it, v) -> str:
         from . import settings as st
         if it.key == "owners" and v:
@@ -276,4 +298,7 @@ COMMANDS = {
     "/搭话": "care",
     "/存表情": "save_sticker",
     "/设置": "settings",
+    "/待发": "announce_list",
+    "/发布": "announce_publish",
+    "/取消": "announce_cancel",
 }

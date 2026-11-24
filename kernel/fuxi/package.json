@@ -1,0 +1,10 @@
+{
+  "name": "fuxi-kernel-extras",
+  "private": true,
+  "description": "浮汐在内核上的扩展所需依赖（上游内核本身零依赖）",
+  "license": "AGPL-3.0-only",
+  "dependencies": {
+    "@mozilla/readability": "0.6.0",
+    "linkedom": "0.18.12"
+  }
+}

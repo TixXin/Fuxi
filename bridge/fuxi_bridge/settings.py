@@ -53,6 +53,7 @@ ITEMS: list[Item] = [
          env="FUXI_OWNER_WXIDS"),
     Item("self_names", "bot名字", "list", [], "群里有人 @ 这些名字也算 @ bot（微信昵称和群昵称会自动加上）",
          env="FUXI_SELF_NAMES"),
+    Item("announce_to", "发版群", "text", "", "发版公告（POST /announce）默认发到哪个群：群名或 chat_id；空 = 调用方必须指定"),
     Item("quiet", "静默时段", "text", "", "这段时间不自动回复、不主动搭话，如 00:30-07:30；空 = 不静默",
          env="FUXI_QUIET"),
     Item("rate_chat", "单会话限速", "int", 6, "每个会话每分钟最多发几条", env="FUXI_RATE_CHAT", min=1, max=60),

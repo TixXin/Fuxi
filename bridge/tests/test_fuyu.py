@@ -149,5 +149,47 @@ class StatusTest(unittest.TestCase):
         self.assertIn("#3", fuyu.render_event({"type": "pr_merged", "number": 3, "title": "x"}))
 
 
+class WiringTest(unittest.TestCase):
+    """接进桥接后的 /浮屿 指令和动态通知。"""
+
+    def setUp(self):
+        import os
+        from unittest import mock
+        from fuxi_bridge import control, settings
+        from fuxi_bridge.app import Bridge
+        d = tempfile.mkdtemp()
+        b = object.__new__(Bridge)
+        b.cfg = settings.Settings(os.path.join(d, "s.json"), {})
+        st = StatusTest()
+        st.setUp()
+        b.fuyu = st.f
+        b.send = mock.Mock(return_value=mock.Mock(ok=True))
+        self.b, self.c, self.mock = b, control.Control(b), mock
+
+    def test_command(self):
+        self.assertIn("已修复", self.c.fuyu("#11"))
+        self.assertIn("#11", self.c.fuyu("搜 设置页闪退"))
+        out = self.c.fuyu("")
+        self.assertIn("最新正式版 v1.2.0", out)
+        self.assertIn("仓库 TixXin/Fuyu", out)
+
+    def test_notify_release_only_by_default(self):
+        events = [{"type": "pr_merged", "number": 3, "title": "x"},
+                  {"type": "new_release", "tag": "v1.3.0", "prerelease": False}]
+        with self.mock.patch("threading.Thread") as th:
+            th.return_value.start = lambda: th.call_args.kwargs["target"]()
+            self.b._fuyu_events(events)
+            job = self.b.send.call_args.args[0]
+            self.assertEqual(job.chat, "filehelper")
+            self.assertIn("发布了正式版 v1.3.0", job.text)
+            self.assertNotIn("PR #3", job.text)
+            self.b.cfg.set("fuyu_notify", "关闭")
+            self.b._fuyu_events(events)
+            self.assertEqual(self.b.send.call_count, 1)
+            self.b.cfg.set("fuyu_notify", "all")
+            self.b._fuyu_events(events[:1])
+            self.assertIn("PR #3", self.b.send.call_args.args[0].text)
+
+
 if __name__ == "__main__":
     unittest.main()

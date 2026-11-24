@@ -46,6 +46,14 @@
 `halted` 非空表示已**熔断**——某次发送后核对失败（疑似发错会话）或发送中途出错，
 此后所有发送（bot 回复、提醒、API）一律拒绝。
 
+### `GET /fuyu`
+
+浮屿仓库同步缓存（见 `bridge/fuxi_bridge/fuyu.py`）。
+
+- 不带参数：`{"brief": "...", "version": "浮屿最新正式版 v0.3.13（…）", "latest": {release}, "latest_beta": {release}, "events": [...]}`
+- `?issue=1234`：`{"number": 1234, "status": "#1234「…」已修复：PR #1235 合并于 2026-11-23，包含在 v0.3.13（…）"}`
+- `?q=设置页闪退`：相关 issue 前 5 个 `{"items": [{score, number, title, state, url, status}]}`，`score` 0~1
+
 ### `POST /resume`
 
 人工确认微信界面无误后解除熔断。重启桥接容器也会解除。

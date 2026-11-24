@@ -28,7 +28,7 @@ import time
 from dataclasses import dataclass, field
 
 from . import messages, store
-from . import announce, care, control, images, knowledge, settings, timing, voice
+from . import announce, care, control, fuyu, images, knowledge, settings, timing, voice
 from .allow import AllowList
 from .kernel import Kernel, KernelError
 from .messages import Message
@@ -135,6 +135,8 @@ class Bridge:
         self.media_cache: collections.OrderedDict[str, str] = collections.OrderedDict()   # 看图/语音结果
         self.announcer = announce.Announcer(self, os.path.join(state, "announce"))
         self.knowledge = knowledge.Knowledge(os.path.join(state, "knowledge"))
+        self.fuyu = fuyu.Fuyu(os.path.join(state, "fuyu"))
+        self.fuyu.on_events = self._fuyu_events
         self.handoffs: collections.deque[tuple[float, str]] = collections.deque(maxlen=50)
         self.control = control.Control(self)
         self.apply_settings()
@@ -542,6 +544,26 @@ class Bridge:
         threading.Thread(target=go, name="handoff", daemon=True).start()
         log.info("产品助手 %s：资料里没找到，已转主人", self.name_of(chat))
 
+    def _fuyu_events(self, events: list[dict]) -> None:
+        """浮屿仓库同步发现变化：按「浮屿动态」设置私聊主人（文件传输助手）。"""
+        mode = self.cfg.get("fuyu_notify")
+        if mode == "off":
+            return
+        if mode == "release":
+            events = [e for e in events if e.get("type") == "new_release"]
+        if not events:
+            return
+        lines = [fuyu.render_event(e) for e in events[:12]]
+        if len(events) > 12:
+            lines.append(f"……还有 {len(events) - 12} 条（/浮屿 看最近动态）")
+        text = "【浮屿动态】\n" + "\n".join("- " + x for x in lines)
+
+        def go():   # 同步线程还拿着锁，发送可能要等几十秒，放到别的线程里
+            job = self.send(SendJob(chat="filehelper", text=text, source="control"))
+            if not job.ok:
+                log.warning("浮屿动态通知没发出去：%s", job.error)
+        threading.Thread(target=go, name="fuyu-notify", daemon=True).start()
+
     def _understand(self, chat: str, batch: list[Message], tr: "timing.Trace") -> None:
         """图片、语音交给内核前先看懂/听懂：「[图片]（图片内容：…）」「[语音 5秒]（语音内容：…）」。
         只处理最后发言人的（_payload 只带这些），每种最多最后三条。任何失败都保留原占位，不影响回复。"""
@@ -773,6 +795,8 @@ class Bridge:
         threading.Thread(target=self.care.loop, name="care", daemon=True).start()   # 关着时 tick 直接跳过
         threading.Thread(target=self.knowledge.loop, name="knowledge", daemon=True,
                          args=(lambda: self.cfg.get("knowledge_repo"), lambda: bool(self.cfg.get("assistant_groups")))).start()
+        threading.Thread(target=self.fuyu.loop, name="fuyu", daemon=True,
+                         args=(lambda: self.cfg.get("knowledge_repo"), lambda: bool(self.cfg.get("fuyu_sync")))).start()
         threading.Thread(target=self._heartbeat_loop, name="heartbeat", daemon=True).start()
         threading.Thread(target=self._sync_contacts, name="contacts", daemon=True).start()
         from .sender import _ocr

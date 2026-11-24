@@ -15,6 +15,7 @@
   /搭话              立即检查一次主动搭话（仍受内核时间窗/间隔/上限约束），回报结果
   /待发              列出等确认的发版公告；/发布 [编号] 发出，/取消 [编号] 放弃
   /资料              产品助手资料库状态；/资料 同步 立即同步；/资料 搜 问题 看会检索到哪几段
+  /浮屿              浮屿版本、issue 统计和最近动态；/浮屿 123 查进度；/浮屿 搜 问题 找相关 issue；/浮屿 同步
   /设置              查看全部设置；/设置 看图 看说明；/设置 看图 只看私聊 修改（立即生效）
 """
 
@@ -103,6 +104,8 @@ class Control:
             lines.append("语音转文字：开" + ("（只听私聊）" if b.voice_mode == "private" else ""))
         if b.cfg.get("assistant_groups"):
             lines.append(f"产品助手：{len(b.cfg.get('assistant_groups'))} 个群；资料 {b.knowledge.brief()}")
+        if b.cfg.get("fuyu_sync"):
+            lines.append(f"浮屿仓库：{b.fuyu.brief()}")
         up = int(time.time() - b.started)
         lines.append(f"已运行：{up // 3600} 小时 {up % 3600 // 60} 分")
         lines.append("问题：" + ("；".join(p for p in probs if not p.startswith("已熔断")) or "无"))
@@ -258,6 +261,31 @@ class Control:
         return f"资料库：{b.knowledge.brief()}（来源 {b.cfg.get('knowledge_repo')}）\n" \
                f"产品助手群：{'、'.join(b.cfg.get('assistant_groups')) or '未设置（/设置 产品助手群 群名）'}"
 
+    def fuyu(self, arg: str) -> str:
+        from .fuyu import render_event
+        b = self.b
+        cmd, _, rest = arg.strip().partition(" ")
+        num = cmd.lstrip("#")
+        if cmd == "同步":
+            try:
+                return b.fuyu.sync(b.cfg.get("knowledge_repo"))
+            except Exception as e:
+                return f"同步失败：{e}"
+        if num.isdigit():
+            return b.fuyu.status(int(num))
+        if cmd == "搜":
+            if not rest.strip():
+                return "用法：/浮屿 搜 设置页闪退"
+            hits = b.fuyu.find(rest, k=5)
+            if not hits:
+                return "没找到相关的 issue。"
+            return "\n".join(f"{s:.2f} {b.fuyu.status(it['number'])}" for s, it in hits)
+        events = b.fuyu.recent_events(6)
+        lines = [b.fuyu.version_brief(), f"仓库 {b.cfg.get('knowledge_repo')}：{b.fuyu.brief()}"]
+        if events:
+            lines.append("最近动态：\n" + "\n".join("- " + render_event(e) for e in reversed(events)))
+        return "\n".join(lines)
+
     def announce_list(self, _arg: str) -> str:
         return self.b.announcer.listing()
 
@@ -323,4 +351,5 @@ COMMANDS = {
     "/发布": "announce_publish",
     "/取消": "announce_cancel",
     "/资料": "knowledge",
+    "/浮屿": "fuyu",
 }

@@ -81,9 +81,13 @@
 - [ ] **F1 反馈收集 + 每日摘要（M）**：桥接把浮屿用户群的消息（含图片描述、语音转文字）攒批交给 DeepSeek，
       分成 bug / 建议 / 提问 / 无关并合并同一问题，存 `/state` 反馈库；每天私聊主人一份带编号的摘要。
       先只出摘要，跑一两周看分类准确度。
-- [ ] **F2 浮屿仓库只读同步（M）**：只读 token 定时同步 Releases / Issues / PR / commits（机房走代理）；
-      新反馈查重、标「已知 / 已修于 vX」；群里问「修了没」bot 按缓存回答；合并或发版后回群通知原反馈人
-      （轮询，不对公网开 webhook）。
+- [x] **F2 浮屿仓库只读同步（M）**：`bridge/fuxi_bridge/fuyu.py` 每 30 分钟同步 Releases（ETag）、Issues / PR（增量）
+      到 `/state/fuyu/`，机房直连 GitHub API 即可、不用 token；记录发版 / PR 合并 / issue 开关事件。
+      「修了没」：PR 写了 fixes/修复 #N 或带 issue 编号（如 [B93]）且已合并 → 推出包含它的版本。
+      遥控 `/浮屿`（版本与动态）、`/浮屿 123`（进度）、`/浮屿 搜 文字`（找相关 issue）；`/状态` 一行；API `GET /fuyu`。
+      设置：`浮屿同步`（开）、`浮屿动态`（默认只把发版私聊主人）。
+  - [ ] 群里问「新版本 / 修了没」时 bot 按缓存回答：由产品助手 `_assist` 接 `version_brief()` / `find()` / `status()`。
+  - [ ] 修复发版后回群告诉原反馈人：依赖 F1 的反馈库。
 - [ ] **F3 批准后开 issue + agent 修复（L）**：遥控 `/修 N` `/忽略 N`；批准后脱敏开 issue（`from-wechat`，
       写 token 与只读 token 分开）；浮屿仓库装 Claude Code Action 出 draft PR；可选 Mac 守护进程领
       `fix-local` 的 issue，起 T3 Code / `claude -p` 在独立 worktree 修。群友原话只作问题描述，agent 无密钥、不自动合并。

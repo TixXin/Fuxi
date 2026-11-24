@@ -56,6 +56,10 @@ ITEMS: list[Item] = [
     Item("assistant_groups", "产品助手群", "list", [], "这些群里有人 @ bot 提问时，先从浮屿资料里找相关段落给内核参考；"
          "找不到又像是提问，就私聊主人（群名或 chat_id，多个用逗号）"),
     Item("knowledge_repo", "资料仓库", "text", "TixXin/Fuyu", "产品助手的资料来源：公开 GitHub 仓库（owner/name），每 6 小时同步一次"),
+    Item("fuyu_sync", "浮屿同步", "bool", True, "每 30 分钟同步浮屿仓库的版本、issue、PR 到 /state/fuyu（仓库同「资料仓库」），"
+         "用来查进度、反馈查重"),
+    Item("fuyu_notify", "浮屿动态", "choice", "release", "同步发现变化时私聊主人（发到文件传输助手）",
+         {"release": "只通知发版", "all": "发版+PR合并+issue开关", "off": "关闭"}),
     Item("announce_to", "发版群", "text", "", "发版公告（POST /announce）默认发到哪个群：群名或 chat_id；空 = 调用方必须指定"),
     Item("quiet", "静默时段", "text", "", "这段时间不自动回复、不主动搭话，如 00:30-07:30；空 = 不静默",
          env="FUXI_QUIET"),

@@ -156,7 +156,7 @@ mindmap
 |---|---|---|
 | F0 | 链接读取改进（第一节）✅ | 无 |
 | F1 | 收集器 + 反馈库 + 每日摘要 | 群 chat_id |
-| F2 | GitHub 只读同步（缓存放 `/state/fuyu/`：`releases.json`、`issues.json`、`prs.json`、`meta.json`，字段沿用 GitHub API）、查重、bot 答进度、修复后回群通知 | 机房代理；公开仓库可先不用 token（每小时 60 次） |
+| F2 | ✅ 同步、查进度、通知主人已上线；群里答进度、回群通知待接 · GitHub 只读同步（缓存放 `/state/fuyu/`：`releases.json`、`issues.json`、`prs.json`、`meta.json`，字段沿用 GitHub API）、查重、bot 答进度、修复后回群通知 | 机房代理；公开仓库可先不用 token（每小时 60 次） |
 | F3 | `/修 N` 开 issue、云端 Action 出 draft PR、Mac 本地守护进程（可选） | 写 token、仓库装 Action |
 
 ## 七、待补

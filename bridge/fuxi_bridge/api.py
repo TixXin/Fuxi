@@ -12,6 +12,7 @@
   POST /announce {key, text?, image_base64?, image_name?, to?|chat_id?}
        先发到文件传输助手预览，主人回 /发布 才发群；key 幂等（见 announce.py）→ {ok, created, item}
   GET  /announce?key=...             查公告状态
+  GET  /fuyu                         浮屿仓库同步状态 {brief, version, latest, events}；?issue=N 查进度；?q=文字 找相关 issue
   GET  /chats?q=关键词                按备注/昵称/群名模糊搜，返回 [{chat_id, name, remark, isGroup}]
   POST /send                         {"to": "群名或备注" | "chat_id": "xxx@chatroom",
                                        "text": "...", "image_base64": "...", "image_name": "a.png"}
@@ -105,6 +106,20 @@ def serve(bridge: "Bridge") -> None:
                 if not it:
                     return self._json(404, {"ok": False, "error": "没有这个 key"})
                 return self._json(200, {"ok": True, "item": bridge.announcer.public(it)})
+            if u.path == "/fuyu":
+                qs = parse_qs(u.query)
+                f = bridge.fuyu
+                if (qs.get("issue") or [""])[0].lstrip("#").isdigit():
+                    n = int(qs["issue"][0].lstrip("#"))
+                    return self._json(200, {"ok": True, "number": n, "status": f.status(n)})
+                q = (qs.get("q") or [""])[0].strip()
+                if q:
+                    return self._json(200, {"ok": True, "items": [
+                        {"score": s, "number": it["number"], "title": it["title"], "state": it["state"],
+                         "url": it["html_url"], "status": f.status(it["number"])} for s, it in f.find(q, k=5)]})
+                return self._json(200, {"ok": True, "brief": f.brief(), "version": f.version_brief(),
+                                        "latest": f.latest(), "latest_beta": f.latest(prerelease=True),
+                                        "events": f.recent_events(20)})
             if u.path == "/chats":
                 q = (parse_qs(u.query).get("q") or [""])[0].strip()
                 if not q:

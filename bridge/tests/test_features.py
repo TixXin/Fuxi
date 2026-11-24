@@ -8,7 +8,7 @@ from unittest import mock
 
 import numpy as np
 
-from fuxi_bridge import care, control, messages, settings, timing
+from fuxi_bridge import care, control, fuyu, messages, settings, timing
 from fuxi_bridge.allow import AllowList
 from fuxi_bridge.app import Bridge
 from fuxi_bridge.messages import Message, parse_appmsg
@@ -210,6 +210,7 @@ class ControlTest(unittest.TestCase):
         b.care_on = False
         b.vision_mode = b.voice_mode = "off"
         b.cfg = settings.Settings(os.path.join(d, "settings.json"), {})
+        b.fuyu = fuyu.Fuyu(os.path.join(d, "fuyu"), token="", http=lambda *a: None)
         self.b, self.c = b, control.Control(b)
 
     def test_only_self_in_filehelper(self):

@@ -135,17 +135,18 @@ class Fuyu:
             raise RuntimeError(f"GitHub 返回 {e.code}") from None
 
     def _get_json(self, url: str, etag: str = ""):
-        for attempt in range(3):   # 跨境链路偶尔读到一半断开，重试
+        # 跨境链路偶尔读到一半断开：有时抛异常，有时悄悄返回半截（解码或 JSON 解析才失败），都重试
+        for attempt in range(4):
             try:
                 status, headers, body = self.http(url, etag)
-                break
-            except (OSError, http.client.HTTPException) as e:
-                if attempt == 2:
+                if status == 304:
+                    return 304, headers, None
+                return status, headers, json.loads((body or b"null").decode("utf-8"))
+            except (OSError, http.client.HTTPException, ValueError) as e:
+                if attempt == 3:
                     raise RuntimeError(f"网络中断（{type(e).__name__}）") from None
+                log.info("浮屿仓库：%s 读取不完整，%d 秒后重试", url.split("?")[0].rsplit("/", 1)[-1], 3 * (attempt + 1))
                 time.sleep(3 * (attempt + 1))
-        if status == 304:
-            return 304, headers, None
-        return status, headers, json.loads(body or b"null")
 
     # ---- 同步 ----
     def sync(self, repo: str | None = None) -> str:

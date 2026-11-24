@@ -304,6 +304,9 @@ class AdminServerTest(unittest.TestCase):
         self.assertEqual((code, body["verified"]), (200, True))
         job = self.b.send.call_args[0][0]
         self.assertEqual((job.chat, job.text, job.source), ("wxid_a", "在吗", "admin"))
+        sent = self.b.events.recent(kind="sent")[0]
+        self.assertEqual((sent["chat_name"], sent["text"], sent["ok"]), ("阿青", "在吗", True))
+        self.assertEqual(self.b.events.counts()["received"], 0)                   # 手动发送不算进今天的数字
         self.b.send.side_effect = lambda job: setattr(job, "error", "发送已熔断：x") or job
         code, body, _ = self.req("POST", "/api/send", {"chat_id": "wxid_a", "text": "在吗", "confirm": True})
         self.assertEqual((code, body["error"]), (502, "没发出去：发送已熔断：x"))

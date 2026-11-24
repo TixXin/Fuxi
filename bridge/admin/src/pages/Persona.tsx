@@ -1,6 +1,6 @@
 import { RotateCcw, Save, Sparkles } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { Segmented, Switch, Tag } from "../components/controls";
+import { ChipInput, Segmented, Switch, Tag } from "../components/controls";
 import { Button, Card, ConfirmBar, ErrorNote, Group, PageHead, Row, Skeleton } from "../components/ui";
 import { api, type Persona as P } from "../lib/api";
 import { useBridgeEvent } from "../lib/bus";
@@ -178,6 +178,15 @@ export function Persona({ onMenu }: { onMenu: () => void }) {
                   <Switch label={s.label} checked={Boolean(val(s.key))} onChange={(v) => set(s.key, v as never)} />
                 </Row>
               ))}
+              <Row title="禁言的群" desc="在这些群里一句话都不说，填群名；* 表示所有群">
+                <ChipInput
+                  label="禁言的群"
+                  values={val("mutedGroups") ?? []}
+                  labels={{ "*": "所有群" }}
+                  placeholder="群名，回车添加"
+                  onSave={(v) => set("mutedGroups", v)}
+                />
+              </Row>
             </Card>
           </Group>
           <Group title="预设" meta="套用会覆盖上面的人设" footer="预设在内核的 assets/personas 里，按攻击力从低到高排。">

@@ -449,6 +449,8 @@ def send(b: "Bridge", body: dict) -> dict:
         raise HandlerError("发送需要确认")
     job = b.send(SendJob(chat=chat, text=text, source="admin"))
     log.warning("管理台手动发送到 %s：ok=%s verified=%s", name, job.ok, job.verified)
+    b.events.publish("sent", {"chat": chat, "chat_name": name, "group": chat.endswith("@chatroom"),
+                              "text": text, "ok": job.ok, "verified": job.verified, "error": job.error})
     if not job.ok:
         raise HandlerError(f"没发出去：{job.error or '未知原因'}", 502)
     return {"name": name, "verified": job.verified, "error": job.error}

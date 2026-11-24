@@ -34,7 +34,7 @@ export interface Overview {
 
 export interface BridgeEvent {
   id: number;
-  kind: "message" | "handoff" | "settings" | "status" | "knowledge" | "allow" | "announce" | "feedback" | "persona";
+  kind: "message" | "handoff" | "settings" | "status" | "knowledge" | "allow" | "announce" | "feedback" | "persona" | "sent";
   ts: number;
   [key: string]: unknown;
 }
@@ -88,7 +88,18 @@ export interface HandoffEvent extends BridgeEvent {
   question: string;
 }
 
-export type StreamItem = MessageEvent_ | HandoffEvent;
+export interface SentEvent extends BridgeEvent {
+  kind: "sent";
+  chat: string;
+  chat_name: string;
+  group: boolean;
+  text: string;
+  ok: boolean;
+  verified: boolean | null;
+  error: string;
+}
+
+export type StreamItem = MessageEvent_ | HandoffEvent | SentEvent;
 
 export type SettingType = "bool" | "int" | "text" | "list" | "choice";
 export type SettingValue = boolean | number | string | string[] | null;
@@ -248,7 +259,7 @@ export const api = {
 
 export function subscribe(onEvent: (e: BridgeEvent) => void, onState: (live: boolean) => void): () => void {
   const es = new EventSource("/api/events");
-  const kinds = ["message", "handoff", "settings", "status", "knowledge", "allow", "announce", "feedback", "persona"] as const;
+  const kinds = ["message", "handoff", "settings", "status", "knowledge", "allow", "announce", "feedback", "persona", "sent"] as const;
   const handler = (ev: MessageEvent) => {
     try {
       onEvent(JSON.parse(ev.data));

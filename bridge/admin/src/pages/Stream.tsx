@@ -1,4 +1,4 @@
-import { Bot, LifeBuoy, Search } from "lucide-react";
+import { Bot, LifeBuoy, Search, Send } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { Segmented, Tag } from "../components/controls";
 import { Button, Card, ErrorNote, PageHead, Skeleton } from "../components/ui";
@@ -38,7 +38,7 @@ export function Stream({ live, onMenu }: { live: boolean; onMenu: () => void }) 
   };
   useEffect(() => void load(), []);
 
-  useBridgeEvent(["message", "handoff"], (e: BridgeEvent) => {
+  useBridgeEvent(["message", "handoff", "sent"], (e: BridgeEvent) => {
     setItems((cur) => (cur && !cur.some((x) => x.id === e.id) ? [e as StreamItem, ...cur] : cur));
   });
 
@@ -59,15 +59,16 @@ export function Stream({ live, onMenu }: { live: boolean; onMenu: () => void }) 
   const shown = useMemo(() => {
     const needle = q.trim();
     return (items ?? []).filter((it) => {
-      if (it.kind === "message") {
-        if (filter === "replied" && !it.replies.length) return false;
+      if (it.kind === "message" || it.kind === "sent") {
+        if (filter === "replied" && (it.kind === "sent" || !it.replies.length)) return false;
         if (filter === "private" && it.group) return false;
         if (filter === "group" && !it.group) return false;
       } else if (filter === "private" || filter === "replied") {
         return false;
       }
       if (!needle) return true;
-      const hay = it.kind === "message" ? [it.chat_name, it.sender, it.text, ...it.replies] : [it.chat_name, it.sender, it.question];
+      const hay =
+        it.kind === "message" ? [it.chat_name, it.sender, it.text, ...it.replies] : it.kind === "sent" ? [it.chat_name, it.text] : [it.chat_name, it.sender, it.question];
       return hay.some((s) => s?.includes(needle));
     });
   }, [items, filter, q]);
@@ -93,7 +94,9 @@ export function Stream({ live, onMenu }: { live: boolean; onMenu: () => void }) 
           {shown.length === 0 && (
             <div className="stream__empty">{items.length ? "没有符合条件的消息" : "重启以来还没有消息。白名单里的会话发来消息后会出现在这里。"}</div>
           )}
-          {shown.map((it) => (it.kind === "message" ? <MessageItem key={it.id} m={it} /> : <HandoffItem key={it.id} h={it} />))}
+          {shown.map((it) =>
+            it.kind === "message" ? <MessageItem key={it.id} m={it} /> : it.kind === "sent" ? <SentItem key={it.id} s={it} /> : <HandoffItem key={it.id} h={it} />,
+          )}
         </Card>
       )}
       {items !== null && more && !q && filter === "all" && (
@@ -164,6 +167,27 @@ function HandoffItem({ h }: { h: Extract<StreamItem, { kind: "handoff" }> }) {
           <time className="msg__time">{clockSec(h.ts)}</time>
         </div>
         <div className="msg__in">「{h.question}」资料里没找到，已私聊你</div>
+      </div>
+    </article>
+  );
+}
+
+function SentItem({ s }: { s: Extract<StreamItem, { kind: "sent" }> }) {
+  return (
+    <article className="msg msg--sent">
+      <span className="avatar avatar--icon">
+        <Send size={16} />
+      </span>
+      <div className="msg__body">
+        <div className="msg__head">
+          <b>你手动发送</b>
+          <Tag>{s.chat_name}</Tag>
+          {!s.ok && <Tag tone="bad">没发出去</Tag>}
+          {s.ok && s.verified === false && <Tag tone="warn">核对没通过</Tag>}
+          <time className="msg__time">{clockSec(s.ts)}</time>
+        </div>
+        <div className="msg__in">{s.text}</div>
+        {!s.ok && s.error && <div className="msg__reason">{s.error}</div>}
       </div>
     </article>
   );

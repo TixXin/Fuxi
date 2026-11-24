@@ -20,6 +20,19 @@ LOG="$FUXI_DIR/deploys.log"
 
 usage() { sed -n '4,6p' "$0" | sed 's/^# *//' >&2; exit 2; }
 
+# 连服务器：传完大镜像后 ssh 偶尔被断（Connection closed，退出码 255），连接失败就等几秒重试；
+# 命令本身失败（其他退出码）不重试。这里跑的步骤都能重复执行。
+remote() {
+  local n=1 rc
+  while :; do
+    "$@" && return 0 || rc=$?
+    [ "$rc" -eq 255 ] && [ "$n" -lt 4 ] || return "$rc"
+    echo "!! 连接服务器断了，${n}0 秒后重试（$n/3）" >&2
+    sleep "${n}0"
+    n=$((n + 1))
+  done
+}
+
 services_of() {
   case "$1" in
     bridge|kernel|watchdog) echo "$1" ;;
@@ -32,15 +45,15 @@ services_of() {
 restart() {
   local what="$1"
   case "$what" in
-    bridge|watchdog) ssh "$FUXI_HOST" "cd '$FUXI_DIR' && docker compose up -d --no-deps --force-recreate $what" ;;
-    kernel) ssh "$FUXI_HOST" "cd '$FUXI_DIR' && docker compose up -d --force-recreate kernel && docker compose up -d --no-deps --force-recreate bridge" ;;
-    all) ssh "$FUXI_HOST" "cd '$FUXI_DIR' && docker compose up -d --force-recreate kernel && docker compose up -d --no-deps --force-recreate bridge && docker compose up -d --no-deps --force-recreate watchdog" ;;
+    bridge|watchdog) remote ssh "$FUXI_HOST" "cd '$FUXI_DIR' && docker compose up -d --no-deps --force-recreate $what" ;;
+    kernel) remote ssh "$FUXI_HOST" "cd '$FUXI_DIR' && docker compose up -d --force-recreate kernel && docker compose up -d --no-deps --force-recreate bridge" ;;
+    all) remote ssh "$FUXI_HOST" "cd '$FUXI_DIR' && docker compose up -d --force-recreate kernel && docker compose up -d --no-deps --force-recreate bridge && docker compose up -d --no-deps --force-recreate watchdog" ;;
   esac
 }
 
 wait_ready() {
   echo "==> 等待桥接就绪（首次扫描密钥约 30 秒）"
-  ssh "$FUXI_HOST" "for i in \$(seq 1 40); do docker logs --since 2m fuxi-bridge 2>&1 | grep -q '开始监听' && break; sleep 3; done
+  remote ssh "$FUXI_HOST" "for i in \$(seq 1 40); do docker logs --since 2m fuxi-bridge 2>&1 | grep -q '开始监听' && break; sleep 3; done
     docker ps --filter name=fuxi --format '{{.Names}}\t{{.Status}}\t{{.Image}}'
     docker logs --since 2m fuxi-bridge 2>&1 | grep -E '解出密钥|白名单已|开始监听|ERROR|CRITICAL' | tail -5 | sed -E 's/wxid_[a-z0-9]+/wxid_<id>/g'"
 }
@@ -48,7 +61,7 @@ wait_ready() {
 # 服务器上：把 :dev 指向版本 $2，记日志；第一次用版本部署时，把原来没有版本号的 :dev 存成 initial 方便回滚
 point_dev() {
   local svc="$1" tag="$2" action="$3"
-  ssh "$FUXI_HOST" "set -e
+  remote ssh "$FUXI_HOST" "set -e
     img=fuxi-$svc
     cur=\$(docker image inspect -f '{{.Id}}' \$img:dev 2>/dev/null || true)
     if [ -n \"\$cur\" ] && ! grep -q \" $svc \" '$LOG' 2>/dev/null; then
@@ -79,13 +92,19 @@ deploy() {
     images+=("fuxi-$s:$tag")
   done
 
-  echo "==> 传输镜像到 $FUXI_HOST"
-  docker save "${images[@]}" | gzip -1 | ssh "$FUXI_HOST" docker load
+  local send=()
+  for i in "${images[@]}"; do
+    remote ssh "$FUXI_HOST" "docker image inspect $i >/dev/null 2>&1" && echo "==> 服务器上已有 $i，不再传输" || send+=("$i")
+  done
+  if [ "${#send[@]}" -gt 0 ]; then
+    echo "==> 传输镜像到 $FUXI_HOST"
+    docker save "${send[@]}" | gzip -1 | ssh "$FUXI_HOST" docker load
+  fi
 
   echo "==> 更新 compose.yaml"
-  ssh "$FUXI_HOST" "mkdir -p '$FUXI_DIR' && chmod 700 '$FUXI_DIR'"
-  scp -q "$root/deploy/compose.yaml" "$FUXI_HOST:$FUXI_DIR/compose.yaml"
-  ssh "$FUXI_HOST" "test -f '$FUXI_DIR/.env'" || {
+  remote ssh "$FUXI_HOST" "mkdir -p '$FUXI_DIR' && chmod 700 '$FUXI_DIR'"
+  remote scp -q "$root/deploy/compose.yaml" "$FUXI_HOST:$FUXI_DIR/compose.yaml"
+  remote ssh "$FUXI_HOST" "test -f '$FUXI_DIR/.env'" || {
     echo "!! 服务器上还没有 $FUXI_DIR/.env：按 deploy/.env.example 创建（chmod 600）后再运行本脚本" >&2
     exit 1
   }

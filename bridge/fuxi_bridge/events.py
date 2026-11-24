@@ -1,4 +1,4 @@
-"""管理台用的事件中心：桥接里发生的事（处理完一批消息、转人工……）发布到这里，
+"""管理台用的事件中心：桥接里发生的事（处理完一批消息、转人工、主人手动发送……）发布到这里，
 管理台的服务端推送（SSE）订阅它；最近 500 条留在内存里给对话流翻历史，今天的数字也在这里数。
 
 只在内存里，重启清空，不落盘：管理台不新增保存聊天内容的地方（见 docs/admin.md「目标与边界」）。
@@ -35,7 +35,7 @@ class Events:
         ev = {"id": next(self._ids), "kind": kind, "ts": time.time(), **data}
         with self._lock:
             self._count(ev)
-            if kind in ("message", "handoff"):
+            if kind in ("message", "handoff", "sent"):
                 self._recent.append(ev)
             subs = list(self._subs)
         for q in subs:

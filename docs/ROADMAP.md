@@ -100,7 +100,7 @@
 - [x] **F3 批准后开 issue + agent 修复（L）**：`/修 N`（预览 → `确认`）脱敏开 issue 并打 `claude-fix`，
       `/开issue N` 只开不派；已有 issue 改补评论。浮屿仓库 `claude-fix.yml` 跑 Claude Code Action 出 draft PR，
       同步到 `Fixes #N` 的新 PR 就私聊主人。详见 docs/feedback-loop.md。
-  - [ ] 上线：服务器 `.env` 配 `FUXI_GITHUB_ISSUE_TOKEN`；浮屿仓库合入工作流、加 secret `CLAUDE_CODE_OAUTH_TOKEN`。
+  - [x] 上线：服务器 `.env` 配了 `FUXI_GITHUB_ISSUE_TOKEN`；浮屿仓库合入工作流（TixXin/Fuyu#1238）、加了 secret，连通性测试 #1239 通过。出 draft PR 那一步等第一条真实反馈验证。
   - [ ] 可选：Mac 守护进程领 `fix-local` 的 issue，起 `claude -p` 在独立 worktree 修（要在 macOS 上构建/测试的问题）。
 
 - [x] **发版自动发群（S）**：`POST /announce {key, text, image_base64}` 先把内容发到文件传输助手预览，

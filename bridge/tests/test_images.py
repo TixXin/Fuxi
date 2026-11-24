@@ -124,7 +124,7 @@ class SeeImagesTest(unittest.TestCase):
     def bridge(self):
         from fuxi_bridge.app import Bridge
         b = object.__new__(Bridge)
-        b.vision_mode = "1"
+        b.vision_mode = "all"
         b.images = mock.Mock()
         b.images.load.return_value = (b"jpg", "full")
         b.kernel = mock.Mock()
@@ -159,7 +159,7 @@ class SeeImagesTest(unittest.TestCase):
         b.vision_mode = "private"
         g = [img_msg(1)]
         b._see_images("g@chatroom", g, timing.Trace(0, 0))
-        b.vision_mode = "1"
+        b.vision_mode = "all"
         mixed = [img_msg(1, sender="wxid_b", media="f" * 32), img_msg(2, sender="wxid_a")]
         b._see_images("wxid_a", mixed, timing.Trace(0, 0))
         self.assertEqual(b.images.load.call_count, 1)        # 只看最后发言人的图

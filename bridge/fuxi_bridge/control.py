@@ -13,6 +13,7 @@
   /测试 名字          只打开该会话并核对标题、不发送，回报耗时
   /存表情 [分类]      把 10 分钟内发到这里的最新一个表情存进表情包库（分类默认「开心」，还有傲娇、炸毛）
   /搭话              立即检查一次主动搭话（仍受内核时间窗/间隔/上限约束），回报结果
+  /设置              查看全部设置；/设置 看图 看说明；/设置 看图 只看私聊 修改（立即生效）
 """
 
 from __future__ import annotations
@@ -93,7 +94,7 @@ class Control:
             lines.append(f"回复耗时：{lat}")
         if b.care_on:
             lines.append(f"主动搭话：{b.care.brief()}")
-        if b.vision_mode != "0":
+        if b.vision_mode != "off":
             lines.append("看图：" + ("已就绪" if b.images.uin is not None else "还没有图片密钥（收到图片后自动推算）")
                          + ("，只看私聊" if b.vision_mode == "private" else ""))
         up = int(time.time() - b.started)
@@ -157,7 +158,7 @@ class Control:
     def care(self, _arg: str) -> str:
         b = self.b
         if not b.care_on:
-            return "主动搭话已关闭（FUXI_CARE=0）。"
+            return "主动搭话已关闭（/设置 主动搭话 开）。"
         r = b.care.tick()
         return "已发出一次主动搭话。" if r == "sent" else f"这次不发：{r}"
 
@@ -187,6 +188,57 @@ class Control:
         name = "wx-" + hashlib.md5(data).hexdigest()[:12] + ext
         b.kernel.sticker_upload(emotion, name, data)
         return f"已存进「{label}」（{len(data) // 1024} KB）。"
+
+    def settings(self, arg: str) -> str:
+        from . import settings as st
+        from .kernel import KernelError
+        b = self.b
+        name, _, value = arg.strip().partition(" ")
+        if not name:
+            lines = ["设置（/设置 名称 新值 修改，立即生效）："]
+            for it in st.ITEMS:
+                try:
+                    v = self._show_setting(it, b.get_setting(it.key))
+                except KernelError:
+                    v = "（内核没响应）"
+                lines.append(f"- {it.label}：{v}")
+            return "\n".join(lines)
+        it = st.find(name)
+        if not it:
+            return f"没有「{name}」这项。可选：" + "、".join(i.label for i in st.ITEMS)
+        if not value.strip():
+            extra = ("\n可选：" + " / ".join(it.choices.values())) if it.choices else ""
+            extra += "\n可填：开 / 关" if it.type == "bool" else ""
+            extra += "\n多个用逗号隔开，填「无」清空" if it.type == "list" else ""
+            try:
+                cur = self._show_setting(it, b.get_setting(it.key))
+            except KernelError as e:
+                cur = f"（内核没响应：{e}）"
+            return f"{it.label}：{cur}\n{it.desc}{extra}"
+        raw = value.strip()
+        if it.key == "owners" and raw not in ("无", "空", "清空"):
+            ids = []
+            for part in [p for p in raw.replace("，", ",").replace("、", ",").split(",") if p.strip()]:
+                chat, err = self._resolve(part)
+                if err:
+                    return err
+                if chat.endswith("@chatroom") or chat in ("*", "filehelper"):
+                    return f"「{part}」不是一个人。"
+                ids.append(chat)
+            raw = ",".join(ids)
+        try:
+            v = b.set_setting(it.key, raw)
+        except ValueError as e:
+            return str(e)
+        except KernelError as e:
+            return f"内核没改成：{e}"
+        return f"已设置 {it.label}：{self._show_setting(it, v)}"
+
+    def _show_setting(self, it, v) -> str:
+        from . import settings as st
+        if it.key == "owners" and v:
+            return "、".join(self.b.name_of(x) for x in v)
+        return st.show(it, v)
 
     # ---- 工具 ----
     def _allow_brief(self) -> str:
@@ -221,4 +273,5 @@ COMMANDS = {
     "/测试": "test_open",
     "/搭话": "care",
     "/存表情": "save_sticker",
+    "/设置": "settings",
 }

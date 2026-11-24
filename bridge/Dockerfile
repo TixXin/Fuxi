@@ -13,6 +13,6 @@ RUN pip install --no-cache-dir -r /app/requirements.txt \
 COPY fuxi_bridge /app/fuxi_bridge
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1 DISPLAY=:1 TZ=Asia/Shanghai
-# 安静时段 FUXI_QUIET 按这个时区解释
+# 静默时段（/设置 静默时段）按这个时区解释
 
 CMD ["python", "-m", "fuxi_bridge.app"]

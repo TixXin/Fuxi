@@ -30,9 +30,7 @@ set(cfg, ['gateway', 'wechat', 'inboundToken'], env.FUXI_KERNEL_TOKEN);
 set(cfg, ['gateway', 'wechat', 'enabled'], true);
 set(cfg, ['server', 'host'], '127.0.0.1'); // 只在共享网络命名空间的回环上监听
 set(cfg, ['server', 'port'], Number(env.FUXI_KERNEL_PORT || 8787));
-if (env.FUXI_OWNER_WXIDS) {
-  set(cfg, ['persona', 'master', 'wxids'], env.FUXI_OWNER_WXIDS.split(',').map((s) => s.trim()).filter(Boolean));
-}
+// 主人（persona.master.wxids）由桥接按它的 settings.json 写入，这里不再从环境变量取
 // 模型 key 走环境变量 DEEPSEEK_API_KEY（内核原生支持），不落盘
 // traceRaw 会在 data/trace 留 24 小时消息原文：默认关，排障时 FUXI_KERNEL_TRACE_RAW=1 临时打开
 set(cfg, ['log', 'traceRaw'], env.FUXI_KERNEL_TRACE_RAW === '1');

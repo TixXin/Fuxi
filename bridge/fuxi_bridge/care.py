@@ -34,7 +34,7 @@ REASONS = {
     "out_of_window": "不在允许的时间段",
     "daily_cap": "今天已达上限",
     "too_soon": "离上次太近",
-    "whitelist_filtered": "没有可找的人（主人没设置？见 FUXI_OWNER_WXIDS）",
+    "whitelist_filtered": "没有可找的人（主人没设置？/设置 主人 名字）",
     "whitelist_empty": "没有可找的人（白名单为空）",
     "all_busy": "对方正在聊天，不打扰",
 }
@@ -110,6 +110,8 @@ class Care:
 
     def _tick(self) -> str:
         b = self.b
+        if not b.care_on:
+            return "已关闭（/设置 主动搭话 开）"
         if b.paused:
             return "已暂停"
         if b.halted:

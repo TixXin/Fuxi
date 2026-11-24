@@ -8,13 +8,9 @@
   FUXI_KERNEL_URL                 默认 http://127.0.0.1:8787
   FUXI_KERNEL_TOKEN               与内核 gateway.wechat.inboundToken 一致
   FUXI_API_TOKEN / FUXI_API_PORT  对外发送 API（不设 token 则不开 API）
-  FUXI_SELF_NAMES                 额外的「叫她」名字，逗号分隔（群里 @ 识别用）
-  FUXI_SETTLE_MS                  同一会话连发合并窗口，默认 1500
-  FUXI_STALE_SEC                  早于此秒数的消息不回复，默认 120
-  FUXI_REPLY_SELF                 1 = 文件传输助手里自己的消息也交给内核（自测）
-  FUXI_RATE_CHAT / FUXI_RATE_GLOBAL  自动回复每会话 / 全局每分钟上限，默认 6 / 20
-  FUXI_QUIET                      夜间静默时段，如 00:30-07:30（期间不自动回复）
-  FUXI_ALLOW                      初始白名单（chat_id，逗号分隔），仅在 /state/allow.txt 不存在时使用
+
+行为设置（看图、主动搭话、主人、限速、静默时段…）不走环境变量，见 settings.py（/state/settings.json，
+遥控 /设置）。白名单在 /state/allow.txt（遥控 /允许 /禁止），第一次启动只放行文件传输助手。
 """
 
 from __future__ import annotations
@@ -32,7 +28,7 @@ import time
 from dataclasses import dataclass, field
 
 from . import messages, store
-from . import care, control, images, timing
+from . import care, control, images, settings, timing
 from .allow import AllowList
 from .kernel import Kernel, KernelError
 from .messages import Message
@@ -95,18 +91,18 @@ class Bridge:
         self.reader = messages.MessageReader(self.cache, os.path.join(state, "watermarks.json"), self.self_wxid)
         self.sender = Sender(display=env.get("DISPLAY", ":1"))
         self.kernel = Kernel(env.get("FUXI_KERNEL_URL", "http://127.0.0.1:8787"), env.get("FUXI_KERNEL_TOKEN", ""))
-        self.settle = int(env.get("FUXI_SETTLE_MS", "1500")) / 1000
-        self.stale = int(env.get("FUXI_STALE_SEC", "120"))
-        self.reply_self = env.get("FUXI_REPLY_SELF") == "1"
-        # 防封节奏：自动回复每会话/全局每分钟上限、打字延迟、夜间静默（如 00:30-07:30）
-        self.rate_chat = int(env.get("FUXI_RATE_CHAT", "6"))
-        self.rate_global = int(env.get("FUXI_RATE_GLOBAL", "20"))
-        self.quiet = env.get("FUXI_QUIET", "").strip()
+        # 行为设置：/state/settings.json（见 settings.py），apply_settings 把它们抄到下面这些属性上
+        self.cfg = settings.Settings(os.path.join(state, "settings.json"), dict(env))
+        self.settle, self.stale, self.reply_self = 1.5, 120, False
+        self.rate_chat, self.rate_global, self.quiet = 6, 20, ""
+        self.extra_names: list[str] = []
+        self.masters: list[str] = []
+        self.care_on, self.vision_mode = True, "all"
+        self.kernel_ready = False
         self.sent_times: collections.deque[tuple[float, str]] = collections.deque(maxlen=1000)
-        self.extra_names = [n.strip() for n in env.get("FUXI_SELF_NAMES", "").split(",") if n.strip()]
         self.interval = float(env.get("FUXI_POLL_INTERVAL", "0.5"))
-        # 白名单：/state/allow.txt 热加载；FUXI_ALLOW 只在文件不存在时用作初始值
-        self.allowlist = AllowList(os.path.join(state, "allow.txt"), env.get("FUXI_ALLOW", ""),
+        # 白名单：/state/allow.txt 热加载；文件不存在时（第一次）只放行文件传输助手
+        self.allowlist = AllowList(os.path.join(state, "allow.txt"), env.get("FUXI_ALLOW", "filehelper"),
                                    on_change=self._sync_kernel_allow)
 
         self.sendq: "queue.Queue[SendJob]" = queue.Queue()
@@ -131,17 +127,63 @@ class Bridge:
         # 暂停（文件传输助手 /暂停）：停自动回复与提醒，落盘以便重启后保持
         self.paused_path = os.path.join(state, "paused")
         self.paused = os.path.exists(self.paused_path)
-        self.masters = [x.strip() for x in env.get("FUXI_OWNER_WXIDS", "").split(",") if x.strip()]
-        self.care_on = env.get("FUXI_CARE", "1") != "0"
         self.care = care.Care(self, os.path.join(state, "care.json"))
-        self.stickers_env = env.get("FUXI_STICKERS", "").strip()        # 1 / 0；留空 = 不改内核设置
         self.kernel_data = env.get("FUXI_KERNEL_DATA", "/kernel-data")  # 内核 data 卷（只读）挂在这里
-        # 看图：1 = 私聊群聊都看，private = 只看私聊，0 = 不看（只给内核「[图片]」占位）
-        self.vision_mode = env.get("FUXI_VISION", "1").strip() or "1"
         self.images = images.Images(os.path.dirname(os.path.normpath(self.db_root)), self.self_wxid,
                                     os.path.join(state, "imgkey.json"))
         self.vision_cache: collections.OrderedDict[str, str] = collections.OrderedDict()
         self.control = control.Control(self)
+        self.apply_settings()
+
+    # ---------- 设置 ----------
+    def apply_settings(self) -> list[str]:
+        """把 settings.json 的值抄到属性上；返回变了的项（中文名），并处理需要联动的。"""
+        c = self.cfg
+        new = {
+            "settle": c.get("settle_ms") / 1000, "stale": c.get("stale_sec"), "reply_self": c.get("reply_self"),
+            "rate_chat": c.get("rate_chat"), "rate_global": c.get("rate_global"), "quiet": c.get("quiet"),
+            "extra_names": c.get("self_names"), "masters": c.get("owners"),
+            "care_on": c.get("care_on"), "vision_mode": c.get("vision"),
+        }
+        labels = {"settle": "settle_ms", "stale": "stale_sec", "extra_names": "self_names", "masters": "owners",
+                  "vision_mode": "vision"}
+        changed = []
+        for attr, v in new.items():
+            if getattr(self, attr, None) != v:
+                setattr(self, attr, v)
+                changed.append(attr)
+        if "masters" in changed and self.kernel_ready:
+            self._sync_master()
+        if "vision_mode" in changed and self.vision_mode != "off" and self.kernel_ready:
+            threading.Thread(target=self.images.ensure_key, name="imgkey", daemon=True).start()
+        return [settings.BY_KEY[labels.get(a, a)].label for a in changed]
+
+    def _sync_master(self) -> None:
+        try:
+            self.kernel.set_master(self.masters)
+            log.info("主人已同步到内核：%s", "、".join(self.name_of(m) for m in self.masters) or "（空）")
+        except Exception as e:
+            log.warning("同步主人到内核失败：%s", e)
+
+    def get_setting(self, key: str):
+        it = settings.BY_KEY[key]
+        if it.kernel:
+            v = self.kernel.config()
+            for p in it.kernel:
+                v = v.get(p, {}) if isinstance(v, dict) else {}
+            return it.default if v == {} else v
+        return self.cfg.get(key)
+
+    def set_setting(self, key: str, raw) -> object:
+        """改一项并立即生效；不合法抛 ValueError，内核拒绝抛 KernelError。"""
+        it = settings.BY_KEY[key]
+        if it.kernel:
+            v = settings.parse(it, raw)
+            self.kernel.patch_config(it.kernel, v)
+            return v
+        v = self.cfg.set(key, raw)
+        self.apply_settings()
+        return v
 
     def set_paused(self, on: bool) -> None:
         self.paused = on
@@ -443,7 +485,7 @@ class Bridge:
         """把要交给内核的图片换成「[图片] 描述」。只看最后发言人的图（_payload 只带这些）。
         任何失败都保留原占位，不影响回复。"""
         mode = self.vision_mode
-        if mode == "0" or (mode == "private" and chat.endswith("@chatroom")):
+        if mode == "off" or (mode == "private" and chat.endswith("@chatroom")):
             return
         last = batch[-1].sender
         todo = [m for m in batch if m.type == "image" and m.media and m.sender == last]
@@ -649,24 +691,13 @@ class Bridge:
         except Exception as e:
             log.warning("同步白名单到内核失败：%s", e)
         if self.masters:
-            try:
-                self.kernel.set_master(self.masters)
-                log.info("主人已同步到内核：%s", "、".join(self.name_of(m) for m in self.masters))
-            except Exception as e:
-                log.warning("同步主人到内核失败：%s", e)
-        if self.stickers_env in ("0", "1"):
-            try:
-                self.kernel.set_stickers(self.stickers_env == "1")
-                log.info("表情包已%s", "开启" if self.stickers_env == "1" else "关闭")
-            except Exception as e:
-                log.warning("同步表情包开关到内核失败：%s", e)
+            self._sync_master()
         self.pending_boot = self._changed_chats()  # 记下各会话进度；过期窗口内有动静的稍后补处理
         threading.Thread(target=self._send_worker, name="send", daemon=True).start()
         threading.Thread(target=self._reminder_loop, name="reminders", daemon=True).start()
-        if self.vision_mode != "0":
+        if self.vision_mode != "off":
             threading.Thread(target=self.images.ensure_key, name="imgkey", daemon=True).start()
-        if self.care_on:
-            threading.Thread(target=self.care.loop, name="care", daemon=True).start()
+        threading.Thread(target=self.care.loop, name="care", daemon=True).start()   # 关着时 tick 直接跳过
         threading.Thread(target=self._heartbeat_loop, name="heartbeat", daemon=True).start()
         threading.Thread(target=self._sync_contacts, name="contacts", daemon=True).start()
         from .sender import _ocr
@@ -679,8 +710,13 @@ class Bridge:
         else:
             log.warning("未设置 FUXI_API_TOKEN，对外发送 API 不启动")
         log.info("开始监听全部会话（self=%s）", self.self_wxid[:6] + "…")
+        next_cfg = 0.0
         while True:
             try:
+                if time.monotonic() >= next_cfg:   # settings.json 被外部改了就重新读
+                    next_cfg = time.monotonic() + 2
+                    if self.cfg.reload():
+                        log.info("设置已更新：%s", "、".join(self.apply_settings()) or "无变化")
                 self.poll_once()
                 self.last_poll_ok_at = time.time()
             except Exception:

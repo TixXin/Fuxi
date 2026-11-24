@@ -7,6 +7,8 @@
   GET  /allow                        当前白名单 [{chat_id, name}]
   PUT  /allow  {"items": [...]}      整体替换；元素可以是 chat_id、唯一的显示名，或 "*"
   POST /allow  {"add": [...], "remove": [...]}  增删
+  GET  /settings                     全部行为设置 {items: [{key, label, type, value, default, desc, choices, kernel}]}
+  POST /settings {"key": 值, ...}    修改（立即生效）；→ {ok, items} 或 {ok:false, error}
   GET  /chats?q=关键词                按备注/昵称/群名模糊搜，返回 [{chat_id, name, remark, isGroup}]
   POST /send                         {"to": "群名或备注" | "chat_id": "xxx@chatroom",
                                        "text": "...", "image_base64": "...", "image_name": "a.png"}
@@ -53,6 +55,20 @@ def serve(bridge: "Bridge") -> None:
             self.end_headers()
             self.wfile.write(body)
 
+        def _settings_reply(self) -> None:
+            from . import settings as st
+            from .kernel import KernelError
+            items = []
+            for it in st.ITEMS:
+                try:
+                    v = bridge.get_setting(it.key)
+                except KernelError:
+                    v = None
+                items.append({"key": it.key, "label": it.label, "type": it.type, "value": v,
+                              "default": it.default, "desc": it.desc, "choices": it.choices,
+                              "kernel": bool(it.kernel), "min": it.min, "max": it.max})
+            return self._json(200, {"ok": True, "items": items})
+
         def _auth(self) -> bool:
             got = self.headers.get("Authorization", "")
             if hmac.compare_digest(got.encode(), f"Bearer {token}".encode()):
@@ -78,6 +94,8 @@ def serve(bridge: "Bridge") -> None:
             if u.path == "/allow":
                 return self._json(200, {"ok": True, "items": [
                     {"chat_id": i, "name": "全部" if i == "*" else bridge.name_of(i)} for i in bridge.allowlist.items]})
+            if u.path == "/settings":
+                return self._settings_reply()
             if u.path == "/chats":
                 q = (parse_qs(u.query).get("q") or [""])[0].strip()
                 if not q:
@@ -164,6 +182,21 @@ def serve(bridge: "Bridge") -> None:
                 bridge.allowlist.set(new, names)
                 log.warning("白名单经 API 修改：+%d -%d", len(add[0]), len(rm[0]))
                 return self._allow_reply()
+            if urlparse(self.path).path == "/settings":
+                from . import settings as st
+                from .kernel import KernelError
+                body = self._body()
+                if body is None:
+                    return
+                for k, v in body.items():
+                    if k not in st.BY_KEY:
+                        return self._json(400, {"ok": False, "error": f"没有设置项 {k}"})
+                    try:
+                        bridge.set_setting(k, v)
+                    except (ValueError, KernelError) as e:
+                        return self._json(400, {"ok": False, "error": str(e), "key": k})
+                log.warning("设置经 API 修改：%s", "、".join(body))
+                return self._settings_reply()
             if urlparse(self.path).path == "/resume":
                 was, bridge.halted = bridge.halted, ""
                 log.warning("人工解除熔断（之前：%s）", was or "未熔断")

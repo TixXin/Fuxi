@@ -124,10 +124,16 @@ class Kernel:
     def care_sent(self, chat: str, text: str, group: bool, sid: str) -> None:
         self._req("POST", "/api/care/sent", {"chat": chat, "text": text, "group": group, "id": sid}, timeout=10)
 
-    def set_stickers(self, on: bool) -> None:
-        r = self._req("POST", "/api/config", {"patch": {"features": {"stickers": bool(on)}}}, timeout=15)
+    def patch_config(self, path: tuple, value) -> None:
+        """改内核配置的一项（如 ("features", "stickers")），内核会落盘。"""
+        patch: dict = {}
+        cur = patch
+        for p in path[:-1]:
+            cur = cur.setdefault(p, {})
+        cur[path[-1]] = value
+        r = self._req("POST", "/api/config", {"patch": patch}, timeout=15)
         if not r.get("ok"):
-            raise KernelError(f"内核拒绝表情包开关：{r.get('error')}")
+            raise KernelError(f"内核拒绝修改 {'.'.join(path)}：{r.get('error')}")
 
     def sticker_claim(self, sid: str) -> dict:
         return self._req("POST", "/api/stickers/claim", {"id": sid}, timeout=10).get("item") or {}

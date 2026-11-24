@@ -68,15 +68,18 @@ ssh <host> 'chmod 600 <fuxi-dir>/.env'
 | `FUXI_KERNEL_TOKEN` | `openssl rand -hex 16` 生成 |
 | `FUXI_API_TOKEN` | `openssl rand -hex 24` 生成；留空则不开对外 API |
 | `FUXI_API_PORT` | 对外 API 在宿主回环上的端口，默认 8790，先确认没被占用 |
-| `FUXI_ALLOW` | 初始白名单，建议先只写 `filehelper` |
 | `DEEPSEEK_API_KEY` | 模型 key |
-| `FUXI_RATE_CHAT` / `FUXI_RATE_GLOBAL` | 自动回复每会话 / 全局每分钟上限，默认 6 / 20（API 发送不受限） |
-| `FUXI_QUIET` | 夜间静默时段，如 `23:30-07:00`（北京时间）；留空不静默。静默期间收到的消息不回复 |
-| `FUXI_OWNER_WXIDS` | 主人的 wxid（逗号分隔）。主动搭话只找主人；留空则不会主动搭话 |
-| `FUXI_CARE` | `0` 关闭主动搭话；时间段、间隔、每日上限在内核配置的 `care` 段 |
-| `FUXI_VISION` | 看图：`1`（默认）私聊群聊都看，`private` 只看私聊，`0` 关闭。图片解密密钥首次自动推算并存在 `/state/imgkey.json`；看图模型用内核的配置 |
-| `FUXI_STICKERS` | `1` 开启表情包（内核按回复情绪挑图，桥接发动图）。图库用遥控指令 `/存表情 分类` 填 |
 | `KUMA_PUSH_URL` | 告警用的 Uptime Kuma Push 地址，见「告警」；留空只写日志 |
+
+`.env` 只放部署相关的配置。**行为设置**（看图、主动搭话、主人、bot 名字、静默时段、限速、
+回复自己、合并等待、表情包）在桥接状态卷的 `settings.json` 里，改了立即生效、不用重建容器：
+
+- 文件传输助手发 `/设置` 查看全部，`/设置 看图` 看说明和可选值，`/设置 看图 只看私聊` 修改；
+  `/设置 主人 名字` 可以直接写备注/昵称。
+- 对外 API：`GET /settings` 列出（含类型、默认值、说明，管理台照此生成表单），`POST /settings {"vision": "private"}` 修改。
+- 表情包开关属于内核配置，`/设置` 只是转发给内核，桥接不另存。
+- 白名单在 `allow.txt`，用 `/允许` `/禁止` 改；第一次启动只放行文件传输助手。
+- 旧版放在 `.env` 的 `FUXI_CARE`、`FUXI_VISION`、`FUXI_OWNER_WXIDS` 等只在第一次生成 `settings.json` 时搬过去一次，之后不再起作用。
 
 内核默认不保留聊天原文（`log.traceRaw=false`）；排障需要时在 `.env` 加 `FUXI_KERNEL_TRACE_RAW=1`
 并 `up -d kernel`，用完删掉。
@@ -107,8 +110,7 @@ fuxi-kernel   Up 41 seconds (healthy)
 
 ### 4. 自测
 
-先临时打开「文件传输助手里自己发的也回复」：`.env` 里 `FUXI_REPLY_SELF=1`，然后
-`ssh <host> 'cd <fuxi-dir> && docker compose up -d bridge'`。
+先临时打开「文件传输助手里自己发的也回复」：在文件传输助手发 `/设置 回复自己 开`。
 
 用手机往文件传输助手发一句话，几秒内应收到 bot 回复。也可以从服务器上直接触发：
 
@@ -116,7 +118,7 @@ fuxi-kernel   Up 41 seconds (healthy)
 ssh <host> 'docker exec fuxi-bridge python -m fuxi_bridge.cli send --chat 文件传输助手 --text 你好'
 ```
 
-测完把 `FUXI_REPLY_SELF` 改回 `0` 并再 `up -d bridge`。
+测完发 `/设置 回复自己 关`。
 
 ### 5. 内核设置（可选）
 

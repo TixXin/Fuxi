@@ -181,6 +181,16 @@ class AssistTest(unittest.TestCase):
         self.assertIn("浮屿最新正式版 v0.3.13", p["text"])
         b.send.assert_not_called()                                    # 有版本信息就不转人工
 
+    def test_bug_report_mentioning_update_still_hands_off(self):
+        b = assist_bridge()
+        b.fuyu.latest.return_value = {"tag_name": "v0.3.13"}
+        b.fuyu.find.return_value = [(0.41, {"number": 1030})]
+        with mock.patch("threading.Thread"):
+            p = payload("@浮汐 更新后打不开了怎么办")
+            b._assist("g@chatroom", p)
+        self.assertIn("已经转给主人", p["text"])
+        self.assertEqual(len(b.handoffs), 1)
+
     def test_issue_number_and_bug_match(self):
         b = assist_bridge()
         b.fuyu.status.side_effect = lambda n: f"#{n} 已修复"

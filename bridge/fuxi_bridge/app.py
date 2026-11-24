@@ -542,13 +542,15 @@ class Bridge:
         """版本 / #编号 / 像问题反馈时，从 F2 的仓库缓存里找参考。返回 (几行说明, 是否把握较大可不转人工)。"""
         notes, sure = [], False
         try:
+            bug = bool(BUG_Q.search(q))   # 「更新后打不开了」是故障反馈，不算问版本
             if VERSION_Q.search(q):
                 notes.append(self.fuyu.version_brief())
-                sure = bool(self.fuyu.latest())
-            for n in dict.fromkeys(int(x) for x in re.findall(r"#(\d{1,6})", q)):
+                sure = bool(self.fuyu.latest()) and not bug
+            numbers = list(dict.fromkeys(int(x) for x in re.findall(r"#(\d{1,6})", q)))
+            for n in numbers:
                 notes.append(self.fuyu.status(n))
                 sure = True
-            if not notes and BUG_Q.search(q):
+            if bug and not numbers:
                 for score, it in self.fuyu.find(q, k=2):
                     if score >= 0.45:
                         notes.append(self.fuyu.status(it["number"]))

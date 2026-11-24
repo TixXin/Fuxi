@@ -6,7 +6,8 @@
          看图 / 语音识别完成后再补上识别结果。
   整理   每小时（以及发摘要、小结前）把还没整理的消息成批交给内核的模型（/api/fuxi/complete），
          让它找出对浮屿的反馈：归到已有条目，或新建条目。谁提的由消息序号反查，不让模型写人名。
-  对照   新条目用 F2 的浮屿仓库缓存查相关 issue（分数 ≥ 0.35），附上进度（已修于 vX / 跟进中）。
+  对照   bug / 建议用 F2 的浮屿仓库缓存按字面相似挑 8 个候选 issue，再让模型判断是不是同一件事，
+         对上了就附进度（已修于 vX / 跟进中）。提问不对应 issue。
   摘要   每天 digest_time（默认 12:00）私聊主人：过去 24 小时有动静的条目，带编号。
   小结   每天 group_time（默认 20:00）在反馈群发当天小结：只有标题和处理状态，不带任何人名。
          没有反馈就不发。错过时间 2 小时以上（比如那会儿桥接在重启）当天就不补发了。
@@ -31,7 +32,8 @@ import time
 log = logging.getLogger("fuxi.feedback")
 
 CATEGORIES = {"bug": "问题", "suggestion": "建议", "question": "提问"}
-MATCH_FLOOR = 0.35
+MATCH_FLOOR = 0.5      # 没有模型时只靠字面相似度，阈值放高宁可漏配
+CANDIDATES = 8         # 每条反馈交给模型判断的候选 issue 数
 BATCH = 150            # 每次交给模型的消息条数
 CLASSIFY_EVERY = 3600
 LATE_LIMIT = 2 * 3600  # 定时任务最多晚多久还补发
@@ -56,6 +58,11 @@ SYSTEM = """你在帮「浮屿」（一款桌面灵动岛软件，支持 Windows
 - title、detail 里不要出现任何人名、昵称、微信号、联系方式；不要编造聊天里没有的信息。
 - answered 只对 question 有意义：群里已经有人（主人、bot 或其他用户）给出了答案就填 true。
 - 没有反馈就输出 {{"items":[]}}。"""
+
+MATCH_SYSTEM = """判断浮屿用户在群里的反馈，是不是 GitHub 上已有的某个 issue 说的同一件事（同一个故障，或同一个需求）。
+每条反馈后面列了几个候选 issue（字面相似挑出来的，大多数可能无关）。
+只在确定是同一件事时才对应；只是同一个模块、相关但不是同一个问题的，不要对应。
+只输出 JSON，不要解释、不要代码块围栏：{"matches":[{"id":反馈编号,"issue":issue编号或null}]}"""
 
 
 def _day(ts: float | None = None) -> str:
@@ -172,6 +179,7 @@ class Feedback:
             if not msgs:
                 return "没有新消息"
             made = touched = 0
+            fresh: list[dict] = []
             for i in range(0, len(msgs), BATCH):
                 part = msgs[i:i + BATCH]
                 try:
@@ -181,13 +189,15 @@ class Feedback:
                     self._save()
                     raise
                 for it in out:
-                    if self._merge(it, part):
-                        made += 1
-                    else:
-                        touched += 1
+                    new, cur = self._merge(it, part)
+                    made += new
+                    touched += not new
+                    if not cur.get("issue") and cur not in fresh:
+                        fresh.append(cur)
                 self.meta["classified_until"] = part[-1]["ts"]
                 self.meta["last_error"] = ""
                 self._save()
+            self._match(fresh)
             self.meta["classified_at"] = now
             self._save()
             self._trim_inbox(now - 7 * 86400)
@@ -211,8 +221,8 @@ class Feedback:
             out.append(it)
         return out
 
-    def _merge(self, it: dict, part: list[dict]) -> bool:
-        """并入已有条目或新建；返回是否新建。"""
+    def _merge(self, it: dict, part: list[dict]) -> tuple[bool, dict]:
+        """并入已有条目或新建；返回（是否新建，条目）。"""
         msgs = it.get("_msgs") or []
         users = [m for m in msgs if not m.get("role")]
         ts = max((m["ts"] for m in msgs), default=part[-1]["ts"])
@@ -247,21 +257,53 @@ class Feedback:
                 cur["chats"].append(m["chat"])
         if cur["category"] == "question" and it.get("answered") and cur["status"] == "new":
             cur["status"] = "answered"
-        self._match(cur)
-        return new
+        return new, cur
 
-    def _match(self, cur: dict) -> None:
-        if not self.fuyu or cur.get("issue") or cur["status"] == "ignored":
+    def _candidates(self, cur: dict) -> list[tuple[float, dict]]:
+        quotes = " ".join(q.split("：", 1)[-1] for q in cur.get("quotes") or [])
+        seen: dict[int, tuple[float, dict]] = {}
+        for q in (cur["title"], f"{cur['title']} {cur.get('detail') or ''} {quotes}"):
+            for score, issue in self.fuyu.find(q, k=CANDIDATES):
+                if issue["number"] not in seen or seen[issue["number"]][0] < score:
+                    seen[issue["number"]] = (score, issue)
+        return sorted(seen.values(), key=lambda x: -x[0])[:CANDIDATES]
+
+    def _match(self, items: list[dict]) -> None:
+        """给还没对应 issue 的 bug / 建议找 GitHub 上的同一个 issue：字面相似挑候选，模型判断是不是同一件事。"""
+        items = [i for i in items if i["category"] != "question" and i["status"] != "ignored" and not i.get("issue")]
+        if not self.fuyu or not items:
             return
         try:
-            hits = self.fuyu.find(f"{cur['title']} {cur.get('detail') or ''}", k=1)
+            cands = {i["id"]: self._candidates(i) for i in items}
         except Exception as e:
             log.warning("反馈查重失败：%s", e)
             return
-        if hits and hits[0][0] >= MATCH_FLOOR:
-            cur["issue"], cur["issue_score"] = hits[0][1]["number"], hits[0][0]
-            if cur["status"] == "new":
-                cur["status"] = "known"
+        picks: dict[int, int] = {}
+        if self.complete:
+            blocks = []
+            for i in items:
+                lines = [f"反馈 #{i['id']} [{i['category']}] {i['title']}。{i.get('detail') or ''}"]
+                lines += [f"  候选 #{c['number']}（{'未关闭' if c['state'] == 'open' else '已关闭'}）{c['title']}"
+                          for _, c in cands[i["id"]]]
+                blocks.append("\n".join(lines))
+            try:
+                data = _json_block(self.complete(MATCH_SYSTEM, "\n\n".join(blocks)))
+                valid = {iid: {c["number"] for _, c in cs} for iid, cs in cands.items()}
+                for m in data.get("matches") or []:
+                    iid, num = m.get("id"), m.get("issue")
+                    if isinstance(iid, int) and isinstance(num, int) and num in valid.get(iid, ()):
+                        picks[iid] = num
+            except Exception as e:   # 模型判断失败：退回只认字面相似度很高的
+                log.warning("反馈查重（模型）失败：%s", e)
+                picks = {iid: cs[0][1]["number"] for iid, cs in cands.items() if cs and cs[0][0] >= MATCH_FLOOR}
+        else:
+            picks = {iid: cs[0][1]["number"] for iid, cs in cands.items() if cs and cs[0][0] >= MATCH_FLOOR}
+        for i in items:
+            if i["id"] in picks:
+                i["issue"] = picks[i["id"]]
+                i["issue_score"] = next((s for s, c in cands[i["id"]] if c["number"] == i["issue"]), 0)
+                if i["status"] == "new":
+                    i["status"] = "known"
 
     # ---- 查询与操作 ----
     def get(self, iid: int) -> dict | None:

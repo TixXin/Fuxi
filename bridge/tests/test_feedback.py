@@ -13,8 +13,9 @@ DAY = time.mktime((2026, 11, 24, 0, 0, 0, 0, 0, -1))   # 本地时间 2026-11-24
 class FakeFuyu:
     def find(self, text, k=1):
         if "闪退" in text:
-            return [(0.6, {"number": 1234})]
-        return [(0.1, {"number": 1})]
+            return [(0.3, {"number": 1234, "title": "设置页闪退", "state": "closed"}),
+                    (0.2, {"number": 77, "title": "设置页卡顿", "state": "open"})]
+        return [(0.1, {"number": 1, "title": "无关", "state": "open"})]
 
     def status(self, n):
         return "#1234「设置页闪退」已修复：PR #1235 合并于 2026-11-23，包含在 v0.3.13（2026-11-23 发布）"
@@ -48,6 +49,7 @@ class CollectTest(unittest.TestCase):
                  "answered": True},
                 {"category": "chat", "title": "闲聊"},          # 非法类别丢掉
             ]}),
+            json.dumps({"matches": [{"id": 1, "issue": 1234}, {"id": 2, "issue": 999}]}),   # 999 不在候选里，丢掉
             "好的：" + json.dumps({"items": [{"ref": 1, "category": "bug", "title": "设置页闪退",
                                              "messages": [1], "answered": False}]}))
         f = make(model)
@@ -71,7 +73,9 @@ class CollectTest(unittest.TestCase):
         f.classify(now=DAY + 13 * 3600)
         self.assertEqual(len(f.items), 2)
         self.assertEqual(len(f.items[0]["reporters"]), 3)
-        self.assertIn("#1 [bug] 设置页一打开就闪退", model.prompts[1][0], "已有条目要给模型看")
+        self.assertIn("#1 [bug] 设置页一打开就闪退", model.prompts[2][0], "已有条目要给模型看")
+        self.assertIn("候选 #1234（已关闭）设置页闪退", model.prompts[1][1])
+        self.assertNotIn("怎么关掉开机自启", model.prompts[1][1], "提问不去对 issue")
         # 落盘后重新加载
         again = fb.Feedback(f.root, complete=model, fuyu=FakeFuyu())
         self.assertEqual(len(again.items), 2)
@@ -89,6 +93,25 @@ class CollectTest(unittest.TestCase):
         f = make(FakeModel())
         add(f, 1, "刚发的", ts=time.time())
         self.assertEqual(f.classify(), "没有新消息", "30 秒内的消息可能还在补识别")
+
+
+class MatchTest(unittest.TestCase):
+    def item(self):
+        return {"id": 5, "category": "bug", "title": "设置页闪退", "detail": "", "status": "new", "issue": None,
+                "quotes": ["09:00 小明：设置页闪退"]}
+
+    def test_model_says_no_match(self):
+        f = make(FakeModel(json.dumps({"matches": [{"id": 5, "issue": None}]})))
+        it = self.item()
+        f._match([it])
+        self.assertIsNone(it["issue"])
+        self.assertEqual(it["status"], "new")
+
+    def test_model_fails_falls_back_to_high_lexical_only(self):
+        f = make(FakeModel("坏了"))
+        it = self.item()
+        f._match([it])
+        self.assertIsNone(it["issue"], "字面分 0.3 不够 0.5，不配")
 
 
 class ReportTest(unittest.TestCase):
@@ -165,7 +188,8 @@ class WiringTest(unittest.TestCase):
         b._allowed_chat = lambda c: c == "g@chatroom"
         b.send = mock.Mock(return_value=mock.Mock(ok=True, error=""))
         model = FakeModel(json.dumps({"items": [{"ref": None, "category": "bug", "title": "设置页闪退",
-                                                 "messages": [1], "answered": False}]}))
+                                                 "messages": [1], "answered": False}]}),
+                          json.dumps({"matches": [{"id": 1, "issue": 1234}]}))
         b.feedback = fb.Feedback(os.path.join(d, "fb"), complete=model, fuyu=FakeFuyu())
         self.b, self.c, self.mock = b, control.Control(b), mock
 

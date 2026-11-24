@@ -20,3 +20,6 @@ node_modules/
 
 # 本地杂项
 .DS_Store
+
+# 管理台前端构建产物
+bridge/admin/dist/

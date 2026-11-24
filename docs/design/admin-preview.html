@@ -1,0 +1,371 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>浮汐管理台预览</title>
+<script src="https://unpkg.com/lucide@0.454.0/dist/umd/lucide.min.js"></script>
+<style>
+:root {
+  --color-white: #fff;
+  --color-text: #f8f6f0;
+  --color-text-muted: rgba(248,246,240,.72);
+  --color-text-subtle: rgba(248,246,240,.52);
+  --color-surface: #111112;
+  --color-sidebar: #18181a;
+  --a04: rgba(255,255,255,.04); --a06: rgba(255,255,255,.06); --a08: rgba(255,255,255,.08);
+  --a12: rgba(255,255,255,.12); --a16: rgba(255,255,255,.16);
+  --color-accent: #74d6ff; --color-on-accent: #06202c;
+  --ok: #34c759; --warn: #ffd60a; --bad: #ff453a; --idle: #8e8e93;
+  --mint: #35e985;
+  --focus: rgba(143,216,255,.88);
+  --radius-sm: 6px; --radius-md: 8px; --radius-lg: 10px; --radius-xl: 12px; --pill: 999px;
+  --ease: cubic-bezier(.2,.8,.2,1); --fast: 120ms; --base: 160ms; --medium: 240ms;
+  --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", "PingFang SC", "Microsoft YaHei UI", system-ui, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  color-scheme: dark;
+}
+:root[data-theme="light"] {
+  --color-text: #18181e; --color-text-muted: rgba(24,24,30,.72); --color-text-subtle: rgba(24,24,30,.56);
+  --color-surface: #f6f6f8; --color-sidebar: #ececf0;
+  --a04: rgba(0,0,0,.035); --a06: rgba(0,0,0,.05); --a08: rgba(0,0,0,.06); --a12: rgba(0,0,0,.09); --a16: rgba(0,0,0,.12);
+  --color-accent: #0a7fd1; --color-on-accent: #fff; --mint: #1f8a5b; --focus: rgba(10,127,209,.8);
+  color-scheme: light;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body { background: var(--color-surface); color: var(--color-text); font: 13px/1.5 var(--font-ui); -webkit-font-smoothing: antialiased; }
+button { font: inherit; color: inherit; }
+svg.lucide { width: 16px; height: 16px; stroke-width: 1.9; flex: none; }
+
+.app { display: grid; grid-template-columns: 196px minmax(0,1fr); height: 100%; }
+.side { background: var(--color-sidebar); border-right: 1px solid var(--a06); display: grid; grid-template-rows: auto auto 1fr auto; padding: 14px 8px 10px; min-height: 0; }
+.brand { display: flex; align-items: center; gap: 9px; padding: 2px 10px 14px; font-weight: 600; font-size: 14px; }
+.brand-mark { width: 24px; height: 24px; border-radius: 8px; display: grid; place-items: center; background: linear-gradient(135deg, #74d6ff, #35e985); color: #06202c; }
+.brand-mark svg.lucide { width: 14px; height: 14px; stroke-width: 2.4; }
+.search { position: relative; margin: 0 2px 10px; color: var(--color-text-muted); }
+.search svg { position: absolute; left: 9px; top: 7px; width: 14px; height: 14px; }
+.search input { width: 100%; height: 30px; padding: 0 10px 0 29px; color: var(--color-text); background: var(--a06); border: 1px solid var(--a08); border-radius: var(--radius-md); outline: none; font: inherit; font-size: 12.5px; }
+.search input:focus { border-color: var(--focus); }
+.nav { overflow-y: auto; scrollbar-width: none; }
+.nav-group + .nav-group { margin-top: 12px; }
+.nav-label { padding: 0 10px 4px; color: var(--color-text-subtle); font-size: 11.5px; }
+.nav ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 1px; }
+.nav-item { position: relative; width: 100%; min-height: 30px; display: flex; align-items: center; gap: 9px; padding: 0 10px; color: var(--color-text-muted); background: transparent; border: 0; border-radius: var(--radius-md); text-align: left; cursor: pointer; transition: color var(--base) var(--ease), background var(--base) var(--ease); }
+.nav-item:hover { color: var(--color-text); background: var(--a06); }
+.nav-item[aria-current="page"] { color: var(--color-text); background: var(--a08); font-weight: 600; }
+.nav-item[aria-current="page"]::before { content: ""; position: absolute; left: 0; top: 7px; bottom: 7px; width: 3px; border-radius: 3px; background: var(--color-accent); }
+.nav-item .badge { margin-left: auto; min-width: 18px; height: 18px; padding: 0 5px; border-radius: var(--pill); background: var(--color-accent); color: var(--color-on-accent); font-size: 11px; font-weight: 600; display: grid; place-items: center; }
+.side-foot { display: flex; align-items: center; justify-content: space-between; padding: 8px 10px 0; color: var(--color-text-subtle); font-size: 11.5px; border-top: 1px solid var(--a06); }
+.icon-btn { width: 28px; height: 28px; display: grid; place-items: center; border: 0; border-radius: var(--radius-md); background: transparent; color: var(--color-text-muted); cursor: pointer; }
+.icon-btn:hover { background: var(--a08); color: var(--color-text); }
+
+.main { overflow-y: auto; min-width: 0; }
+.page { max-width: 860px; margin: 0 auto; padding: 22px 24px 48px; }
+.page-head { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
+.page-head h1 { margin: 0; font-size: 20px; font-weight: 650; letter-spacing: .2px; }
+.page-head .spacer { flex: 1; }
+.menu-btn { display: none; }
+.tabs { display: flex; gap: 18px; border-bottom: 1px solid var(--a06); margin: -4px 0 16px; }
+.tab { position: relative; padding: 8px 0 9px; border: 0; background: none; color: var(--color-text-muted); cursor: pointer; }
+.tab[aria-selected="true"] { color: var(--color-text); font-weight: 600; }
+.tab[aria-selected="true"]::after { content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; border-radius: 2px; background: var(--color-accent); }
+
+.group + .group { margin-top: 18px; }
+.group-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 4px; margin-bottom: 8px; min-height: 22px; }
+.group-title { margin: 0; font-size: 13px; font-weight: 600; }
+.group-meta { color: var(--color-text-subtle); font-size: 12px; }
+.card { background: var(--a04); border: 1px solid var(--a06); border-radius: var(--radius-xl); }
+.card > * + * { position: relative; }
+.card > * + *::before { content: ""; position: absolute; top: 0; left: 16px; right: 16px; border-top: 1px solid var(--a06); }
+.foot { padding: 8px 4px 0; color: var(--color-text-subtle); font-size: 12px; }
+
+.row { min-height: 52px; display: flex; align-items: center; gap: 12px; padding: 11px 16px; }
+.row-text { flex: 1; min-width: 0; }
+.row-title { display: flex; align-items: center; gap: 6px; }
+.row-desc { color: var(--color-text-subtle); font-size: 12px; margin-top: 1px; }
+.row-ico { width: 30px; height: 30px; border-radius: 9px; display: grid; place-items: center; background: var(--a08); color: var(--color-text-muted); flex: none; }
+
+.switch { position: relative; width: 40px; height: 24px; flex: none; }
+.switch input { position: absolute; inset: 0; opacity: 0; margin: 0; cursor: pointer; z-index: 1; }
+.switch span { position: absolute; inset: 0; border-radius: var(--pill); background: var(--a16); transition: background var(--base) var(--ease); }
+.switch span::after { content: ""; position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.35); transition: transform var(--base) var(--ease); }
+.switch input:checked + span { background: var(--color-accent); }
+.switch input:checked + span::after { transform: translateX(16px); }
+.switch input:focus-visible + span { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+.seg { display: inline-flex; padding: 2px; border-radius: var(--radius-md); background: var(--a06); border: 1px solid var(--a06); flex: none; }
+.seg button { border: 0; background: transparent; padding: 3px 11px; border-radius: 6px; color: var(--color-text-muted); cursor: pointer; font-size: 12.5px; }
+.seg button[aria-pressed="true"] { background: var(--a16); color: var(--color-text); font-weight: 600; }
+.input { height: 30px; padding: 0 10px; border-radius: var(--radius-md); border: 1px solid var(--a08); background: var(--a06); color: var(--color-text); font: inherit; outline: none; width: 150px; }
+.input:focus { border-color: var(--focus); }
+.input.num { width: 76px; text-align: right; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; max-width: 380px; }
+.chip { display: inline-flex; align-items: center; gap: 4px; height: 24px; padding: 0 6px 0 9px; border-radius: var(--pill); background: var(--a08); font-size: 12px; }
+.chip svg.lucide { width: 12px; height: 12px; opacity: .7; cursor: pointer; }
+.chip.add { background: transparent; border: 1px dashed var(--a16); color: var(--color-text-muted); padding: 0 9px; cursor: pointer; }
+
+.btn { display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 12px; border-radius: var(--radius-md); border: 1px solid var(--a12); background: var(--a06); cursor: pointer; font-size: 12.5px; }
+.btn:hover { background: var(--a12); }
+.btn.primary { background: var(--color-accent); border-color: transparent; color: var(--color-on-accent); font-weight: 600; }
+.btn.danger { color: var(--bad); }
+.btn svg.lucide { width: 14px; height: 14px; }
+
+.dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--idle); }
+.dot.ok { background: var(--ok); box-shadow: 0 0 0 3px rgba(52,199,89,.16); }
+.dot.warn { background: var(--warn); box-shadow: 0 0 0 3px rgba(255,214,10,.16); }
+.dot.bad { background: var(--bad); box-shadow: 0 0 0 3px rgba(255,69,58,.16); }
+.status-pill { display: inline-flex; align-items: center; gap: 7px; height: 26px; padding: 0 11px 0 9px; border-radius: var(--pill); background: var(--a06); border: 1px solid var(--a08); font-size: 12px; }
+.tag { display: inline-flex; align-items: center; height: 18px; padding: 0 6px; border-radius: 5px; font-size: 11px; background: var(--a08); color: var(--color-text-muted); }
+.tag.accent { background: rgba(116,214,255,.14); color: var(--color-accent); }
+.tag.mint { background: rgba(53,233,133,.13); color: var(--mint); }
+.tag.warn { background: rgba(255,214,10,.13); color: var(--warn); }
+
+/* 概览 */
+.hero { position: relative; overflow: hidden; border-radius: var(--radius-xl); border: 1px solid var(--a06); padding: 18px 18px 16px; background: radial-gradient(120% 140% at 0% 0%, rgba(116,214,255,.16), transparent 55%), radial-gradient(90% 120% at 100% 100%, rgba(53,233,133,.10), transparent 60%), var(--a04); }
+.hero-top { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.hero h2 { margin: 0; font-size: 17px; font-weight: 650; }
+.hero p { margin: 4px 0 0; color: var(--color-text-muted); }
+.hero-actions { margin-left: auto; display: flex; gap: 8px; }
+.services { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 10px; margin-top: 16px; }
+.svc { padding: 10px 12px; border-radius: var(--radius-lg); background: var(--a04); border: 1px solid var(--a06); }
+.svc-name { display: flex; align-items: center; gap: 7px; font-weight: 600; }
+.svc-sub { color: var(--color-text-subtle); font-size: 12px; margin-top: 3px; font-family: var(--font-mono); }
+.stats { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 10px; }
+.stat { padding: 12px 14px; border-radius: var(--radius-xl); background: var(--a04); border: 1px solid var(--a06); }
+.stat-label { display: flex; align-items: center; gap: 6px; color: var(--color-text-muted); font-size: 12px; }
+.stat-label svg.lucide { width: 13px; height: 13px; }
+.stat-value { font-size: 24px; font-weight: 650; margin-top: 4px; font-variant-numeric: tabular-nums; }
+.stat-sub { color: var(--color-text-subtle); font-size: 11.5px; }
+.spark { display: flex; align-items: flex-end; gap: 2px; height: 22px; margin-top: 6px; }
+.spark i { flex: 1; border-radius: 2px 2px 0 0; background: rgba(116,214,255,.45); }
+
+/* 对话流 */
+.toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+.toolbar .search { margin: 0; width: 220px; }
+.live { display: inline-flex; align-items: center; gap: 6px; color: var(--mint); font-size: 12px; }
+.live .dot { background: var(--mint); animation: pulse 1.6s infinite; }
+@keyframes pulse { 50% { opacity: .35; } }
+.msg { display: grid; grid-template-columns: 34px minmax(0,1fr); gap: 10px; padding: 12px 16px; }
+.avatar { width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center; font-weight: 600; font-size: 13px; color: #06202c; }
+.msg-head { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.msg-head b { font-weight: 600; }
+.msg-head .time { margin-left: auto; color: var(--color-text-subtle); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.msg-in { margin-top: 3px; color: var(--color-text); }
+.msg-out { margin-top: 7px; padding: 8px 10px; border-radius: 10px; background: rgba(116,214,255,.08); border: 1px solid rgba(116,214,255,.16); }
+.msg-out .who { display: flex; align-items: center; gap: 5px; color: var(--color-accent); font-size: 11.5px; margin-bottom: 2px; }
+.msg-out .who svg.lucide { width: 12px; height: 12px; }
+.timing { display: flex; height: 6px; border-radius: 3px; overflow: hidden; margin-top: 8px; background: var(--a06); }
+.timing i { display: block; height: 100%; }
+.timing-legend { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 4px; color: var(--color-text-subtle); font-size: 11px; }
+.timing-legend span::before { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 2px; margin-right: 4px; background: var(--c); vertical-align: 0; }
+
+/* 会话 */
+.chat-row .row-ico { font-weight: 600; font-size: 12px; color: #06202c; }
+
+/* 确认条 */
+.confirm { display: flex; align-items: center; gap: 10px; padding: 10px 16px; background: rgba(255,69,58,.07); }
+.confirm-text { flex: 1; color: var(--color-text-muted); }
+
+.empty { display: grid; place-items: center; gap: 6px; padding: 34px 16px; color: var(--color-text-subtle); text-align: center; }
+.empty svg.lucide { width: 26px; height: 26px; opacity: .6; }
+
+[hidden] { display: none !important; }
+.fade { animation: fadeIn var(--medium) var(--ease) both; }
+@keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .fade, .live .dot { animation: none; } * { transition: none !important; } }
+
+@media (max-width: 760px) {
+  .app { grid-template-columns: 1fr; }
+  .side { position: fixed; inset: 0 auto 0 0; width: 240px; z-index: 10; transform: translateX(-100%); transition: transform var(--medium) var(--ease); box-shadow: 0 0 40px rgba(0,0,0,.4); }
+  body.nav-open .side { transform: none; }
+  .scrim { position: fixed; inset: 0; background: rgba(0,0,0,.4); z-index: 9; display: none; }
+  body.nav-open .scrim { display: block; }
+  .menu-btn { display: grid; }
+  .page { padding: 14px 16px 40px; }
+  .services { grid-template-columns: 1fr; }
+  .stats { grid-template-columns: repeat(2, minmax(0,1fr)); }
+  .hero-actions { margin-left: 0; width: 100%; }
+  .row { flex-wrap: wrap; }
+  .chips { justify-content: flex-start; }
+  .toolbar .search { width: 100%; }
+}
+</style>
+</head>
+<body>
+<div class="scrim" onclick="document.body.classList.remove('nav-open')"></div>
+<div class="app">
+  <aside class="side">
+    <div class="brand"><span class="brand-mark"><i data-lucide="waves"></i></span>浮汐</div>
+    <label class="search"><i data-lucide="search"></i><input placeholder="搜索设置、会话…"></label>
+    <nav class="nav" id="nav">
+      <div class="nav-group"><ul>
+        <li><button class="nav-item" data-page="overview"><i data-lucide="layout-dashboard"></i>概览</button></li>
+        <li><button class="nav-item" data-page="stream"><i data-lucide="messages-square"></i>对话流</button></li>
+      </ul></div>
+      <div class="nav-group"><div class="nav-label">机器人</div><ul>
+        <li><button class="nav-item" data-page="chats"><i data-lucide="users"></i>会话</button></li>
+        <li><button class="nav-item" data-page="persona"><i data-lucide="sparkles"></i>人设</button></li>
+        <li><button class="nav-item" data-page="settings"><i data-lucide="sliders-horizontal"></i>设置</button></li>
+      </ul></div>
+      <div class="nav-group"><div class="nav-label">浮屿</div><ul>
+        <li><button class="nav-item" data-page="announce"><i data-lucide="megaphone"></i>发版公告<span class="badge">1</span></button></li>
+        <li><button class="nav-item" data-page="feedback"><i data-lucide="inbox"></i>群反馈</button></li>
+        <li><button class="nav-item" data-page="knowledge"><i data-lucide="book-open"></i>资料库</button></li>
+      </ul></div>
+      <div class="nav-group"><div class="nav-label">工具</div><ul>
+        <li><button class="nav-item" data-page="send"><i data-lucide="send"></i>发送</button></li>
+      </ul></div>
+    </nav>
+    <div class="side-foot"><span>e17da99</span>
+      <button class="icon-btn" id="theme" title="切换深浅色"><i data-lucide="sun-moon"></i></button></div>
+  </aside>
+
+  <main class="main">
+    <!-- 概览 -->
+    <section class="page fade" id="overview">
+      <div class="page-head"><button class="icon-btn menu-btn" onclick="document.body.classList.add('nav-open')"><i data-lucide="menu"></i></button><h1>概览</h1></div>
+      <div class="hero">
+        <div class="hero-top">
+          <span class="status-pill"><span class="dot ok"></span>正常回复中</span>
+          <div><h2>浮汐在线，已运行 12 小时</h2><p>白名单 3 个会话 · 静默时段 01:00–08:00 · 今天回了 46 条</p></div>
+          <div class="hero-actions"><button class="btn"><i data-lucide="pause"></i>暂停回复</button><button class="btn"><i data-lucide="rotate-cw"></i>重启桥接</button></div>
+        </div>
+        <div class="services">
+          <div class="svc"><div class="svc-name"><span class="dot ok"></span>微信</div><div class="svc-sub">已登录 · 20/20 个库</div></div>
+          <div class="svc"><div class="svc-name"><span class="dot ok"></span>内核</div><div class="svc-sub">deepseek-chat · 0.9s</div></div>
+          <div class="svc"><div class="svc-name"><span class="dot ok"></span>桥接</div><div class="svc-sub">无熔断 · 队列 0</div></div>
+        </div>
+      </div>
+      <div class="group" style="margin-top:18px">
+        <div class="group-head"><h3 class="group-title">今天</h3><span class="group-meta">每 5 秒刷新</span></div>
+        <div class="stats">
+          <div class="stat"><div class="stat-label"><i data-lucide="message-circle"></i>收到</div><div class="stat-value">128</div><div class="spark" id="spark1"></div></div>
+          <div class="stat"><div class="stat-label"><i data-lucide="reply"></i>回复</div><div class="stat-value">46</div><div class="spark" id="spark2"></div></div>
+          <div class="stat"><div class="stat-label"><i data-lucide="timer"></i>平均回复用时</div><div class="stat-value">6.8s</div><div class="stat-sub">合并等待 3s · 模型 2.1s · 发送 1.4s</div></div>
+          <div class="stat"><div class="stat-label"><i data-lucide="life-buoy"></i>转人工</div><div class="stat-value">2</div><div class="stat-sub">浮屿用户交流群</div></div>
+        </div>
+      </div>
+      <div class="group">
+        <div class="group-head"><h3 class="group-title">需要你看一眼</h3></div>
+        <div class="card">
+          <div class="row"><span class="row-ico"><i data-lucide="megaphone"></i></span><div class="row-text"><div class="row-title">v0.3.14 发版公告等确认 <span class="tag warn">#482</span></div><div class="row-desc">发到「浮屿用户交流群」· 23 小时后过期</div></div><button class="btn">预览</button><button class="btn primary">发布</button></div>
+          <div class="row"><span class="row-ico"><i data-lucide="life-buoy"></i></span><div class="row-text"><div class="row-title">群里有人问「能导出到 Notion 吗」</div><div class="row-desc">资料里没找到 · 20:51 · 小明</div></div><button class="btn">去回复</button></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 对话流 -->
+    <section class="page fade" id="stream" hidden>
+      <div class="page-head"><button class="icon-btn menu-btn" onclick="document.body.classList.add('nav-open')"><i data-lucide="menu"></i></button><h1>对话流</h1><span class="spacer"></span><span class="live"><span class="dot"></span>实时</span></div>
+      <div class="toolbar">
+        <label class="search"><i data-lucide="search"></i><input placeholder="搜索内容或会话"></label>
+        <div class="seg"><button aria-pressed="true">全部</button><button>有回复</button><button>私聊</button><button>群聊</button></div>
+      </div>
+      <div class="card">
+        <div class="msg"><span class="avatar" style="background:#a99bff">屿</span><div>
+          <div class="msg-head"><b>浮屿用户交流群</b><span class="tag">小明</span><span class="tag accent">@我</span><span class="tag mint">附资料 2 段</span><span class="time">20:52:13</span></div>
+          <div class="msg-in">截图怎么贴到屏幕上？</div>
+          <div class="msg-out"><div class="who"><i data-lucide="bot"></i>浮汐 · 2 条气泡</div>截完图按 F3 就能贴到屏幕上～贴图可以拖动、缩放，双击关掉</div>
+          <div class="timing"><i style="width:38%;background:#8e8e93"></i><i style="width:8%;background:#a99bff"></i><i style="width:34%;background:#74d6ff"></i><i style="width:20%;background:#35e985"></i></div>
+          <div class="timing-legend"><span style="--c:#8e8e93">合并等待 3.0s</span><span style="--c:#a99bff">检索 0.6s</span><span style="--c:#74d6ff">模型 2.7s</span><span style="--c:#35e985">发送 1.6s</span></div>
+        </div></div>
+        <div class="msg"><span class="avatar" style="background:#ffb27a">阿</span><div>
+          <div class="msg-head"><b>阿青</b><span class="tag">私聊</span><span class="tag">图片</span><span class="time">20:47:02</span></div>
+          <div class="msg-in"><span style="color:var(--color-text-subtle)">[图片：一只橘猫趴在键盘上]</span> 看它</div>
+          <div class="msg-out"><div class="who"><i data-lucide="bot"></i>浮汐</div>它是不是想帮你写代码 哈哈哈</div>
+        </div></div>
+        <div class="msg"><span class="avatar" style="background:#5eead4">工</span><div>
+          <div class="msg-head"><b>工作群</b><span class="tag">老周</span><span class="time">20:41:30</span></div>
+          <div class="msg-in">明天几点开会来着</div>
+          <div class="row-desc" style="margin-top:6px">没回：不在白名单</div>
+        </div></div>
+      </div>
+    </section>
+
+    <!-- 会话 -->
+    <section class="page fade" id="chats" hidden>
+      <div class="page-head"><button class="icon-btn menu-btn" onclick="document.body.classList.add('nav-open')"><i data-lucide="menu"></i></button><h1>会话</h1></div>
+      <div class="toolbar">
+        <label class="search"><i data-lucide="search"></i><input placeholder="搜索名字（最近 7 天说过话的）"></label>
+        <div class="seg"><button aria-pressed="true">全部</button><button>已允许</button><button>群聊</button></div>
+      </div>
+      <div class="group">
+        <div class="group-head"><h3 class="group-title">白名单</h3><span class="group-meta">只回这些会话 · 3 个</span></div>
+        <div class="card">
+          <div class="row chat-row"><span class="row-ico" style="background:#74d6ff"><i data-lucide="file-text"></i></span><div class="row-text"><div class="row-title">文件传输助手</div><div class="row-desc">遥控指令 · 不能移出</div></div><label class="switch"><input type="checkbox" checked disabled><span></span></label></div>
+          <div class="row chat-row"><span class="row-ico" style="background:#a99bff">屿</span><div class="row-text"><div class="row-title">浮屿用户交流群 <span class="tag mint">产品助手</span><span class="tag">收集反馈</span></div><div class="row-desc">群聊 · 只在被 @ 或引用时回 · 今天 31 条</div></div><label class="switch"><input type="checkbox" checked><span></span></label></div>
+          <div class="row chat-row"><span class="row-ico" style="background:#ffb27a">阿</span><div class="row-text"><div class="row-title">阿青</div><div class="row-desc">私聊 · 今天 12 条</div></div><label class="switch"><input type="checkbox" checked><span></span></label></div>
+          <div class="confirm"><i data-lucide="triangle-alert" style="color:var(--bad)"></i><span class="confirm-text">移出后浮汐不再回「阿青」的消息，主动搭话也会停。</span><button class="btn">取消</button><button class="btn danger">移出</button></div>
+        </div>
+      </div>
+      <div class="group">
+        <div class="group-head"><h3 class="group-title">最近说过话</h3><span class="group-meta">打开开关就加进白名单</span></div>
+        <div class="card">
+          <div class="row chat-row"><span class="row-ico" style="background:#5eead4">工</span><div class="row-text"><div class="row-title">工作群</div><div class="row-desc">群聊 · 20:41</div></div><label class="switch"><input type="checkbox"><span></span></label></div>
+          <div class="row chat-row"><span class="row-ico" style="background:#f4a6d7">妈</span><div class="row-text"><div class="row-title">妈妈</div><div class="row-desc">私聊 · 19:02</div></div><label class="switch"><input type="checkbox"><span></span></label></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 设置 -->
+    <section class="page fade" id="settings" hidden>
+      <div class="page-head"><button class="icon-btn menu-btn" onclick="document.body.classList.add('nav-open')"><i data-lucide="menu"></i></button><h1>设置</h1></div>
+      <div class="tabs" role="tablist"><button class="tab" aria-selected="true">回复</button><button class="tab">理解消息</button><button class="tab">主动与限速</button><button class="tab">浮屿</button></div>
+      <div class="group">
+        <div class="group-head"><h3 class="group-title">回复</h3></div>
+        <div class="card">
+          <div class="row"><div class="row-text"><div class="row-title">bot 名字</div><div class="row-desc">群里 @ 这些名字算叫它</div></div><div class="chips"><span class="chip">浮汐<i data-lucide="x"></i></span><span class="chip">小汐<i data-lucide="x"></i></span><span class="chip add">＋ 添加</span></div></div>
+          <div class="row"><div class="row-text"><div class="row-title">主人</div><div class="row-desc">主人的话优先、可以用遥控指令</div></div><div class="chips"><span class="chip">我自己<i data-lucide="x"></i></span><span class="chip add">＋ 添加</span></div></div>
+          <div class="row"><div class="row-text"><div class="row-title">静默时段</div><div class="row-desc">这段时间收到消息不回，早上再看</div></div><input class="input" value="01:00-08:00"></div>
+          <div class="row"><div class="row-text"><div class="row-title">合并等待</div><div class="row-desc">对方连发几条时，等多久再一起回（毫秒）</div></div><input class="input num" value="3000"></div>
+          <div class="row"><div class="row-text"><div class="row-title">表情包</div><div class="row-desc">偶尔配一张表情包</div></div><label class="switch"><input type="checkbox"><span></span></label></div>
+        </div>
+      </div>
+      <div class="group">
+        <div class="group-head"><h3 class="group-title">理解消息</h3></div>
+        <div class="card">
+          <div class="row"><div class="row-text"><div class="row-title">看图</div><div class="row-desc">收到图片先让模型看一眼再回</div></div><div class="seg"><button aria-pressed="true">都看</button><button>只看私聊</button><button>关</button></div></div>
+          <div class="row"><div class="row-text"><div class="row-title">语音转文字</div></div><div class="seg"><button>都转</button><button aria-pressed="true">只转私聊</button><button>关</button></div></div>
+        </div>
+        <div class="foot">改完立即生效，和文件传输助手里的 /设置 是同一份。</div>
+      </div>
+    </section>
+
+    <!-- 其余页的占位 -->
+    <section class="page fade" id="placeholder" hidden>
+      <div class="page-head"><button class="icon-btn menu-btn" onclick="document.body.classList.add('nav-open')"><i data-lucide="menu"></i></button><h1 id="ph-title"></h1></div>
+      <div class="card"><div class="empty"><i data-lucide="pencil-ruler"></i><div>这一页在预览里先不画</div><div style="font-size:12px">版式同上：分组标题 + 卡片 + 设置行</div></div></div>
+    </section>
+  </main>
+</div>
+<script>
+lucide.createIcons();
+const pages = ["overview", "stream", "chats", "settings"];
+const nav = document.querySelectorAll(".nav-item");
+function show(p) {
+  nav.forEach(n => n.dataset.page === p ? n.setAttribute("aria-current", "page") : n.removeAttribute("aria-current"));
+  document.querySelectorAll("main > section").forEach(s => s.hidden = true);
+  const id = pages.includes(p) ? p : "placeholder";
+  if (id === "placeholder") document.getElementById("ph-title").textContent = [...nav].find(n => n.dataset.page === p).textContent.replace(/\d+$/, "");
+  const el = document.getElementById(id); el.hidden = false; el.classList.remove("fade"); void el.offsetWidth; el.classList.add("fade");
+  document.body.classList.remove("nav-open");
+  document.querySelector(".main").scrollTop = 0;
+}
+nav.forEach(n => n.addEventListener("click", () => show(n.dataset.page)));
+show(location.hash.slice(1) || "overview");
+document.querySelectorAll(".seg").forEach(seg => seg.addEventListener("click", e => {
+  if (e.target.tagName !== "BUTTON") return;
+  seg.querySelectorAll("button").forEach(b => b.setAttribute("aria-pressed", b === e.target));
+}));
+document.querySelectorAll(".tab").forEach(t => t.addEventListener("click", () => document.querySelectorAll(".tab").forEach(x => x.setAttribute("aria-selected", x === t))));
+document.getElementById("theme").onclick = () => {
+  const r = document.documentElement; r.dataset.theme = r.dataset.theme === "light" ? "dark" : "light";
+};
+for (const [id, vals] of [["spark1", [3,5,2,8,12,9,4,6,14,11,7,5,9,13,8,6]], ["spark2", [1,2,1,3,5,4,2,2,6,4,3,2,4,5,3,2]]]) {
+  const m = Math.max(...vals);
+  document.getElementById(id).innerHTML = vals.map(v => `<i style="height:${Math.max(8, v / m * 100)}%"></i>`).join("");
+}
+</script>
+</body>
+</html>

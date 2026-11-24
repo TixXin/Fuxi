@@ -31,7 +31,7 @@ import time
 from dataclasses import dataclass, field
 
 from . import messages, store
-from . import control, timing
+from . import care, control, timing
 from .allow import AllowList
 from .kernel import Kernel, KernelError
 from .messages import Message
@@ -127,6 +127,9 @@ class Bridge:
         # 暂停（文件传输助手 /暂停）：停自动回复与提醒，落盘以便重启后保持
         self.paused_path = os.path.join(state, "paused")
         self.paused = os.path.exists(self.paused_path)
+        self.masters = [x.strip() for x in env.get("FUXI_MASTER", "").split(",") if x.strip()]
+        self.care_on = env.get("FUXI_CARE", "1") != "0"
+        self.care = care.Care(self, os.path.join(state, "care.json"))
         self.control = control.Control(self)
 
     def set_paused(self, on: bool) -> None:
@@ -528,9 +531,17 @@ class Bridge:
             self._sync_kernel_allow(self.allowlist.items)
         except Exception as e:
             log.warning("同步白名单到内核失败：%s", e)
+        if self.masters:
+            try:
+                self.kernel.set_master(self.masters)
+                log.info("主人已同步到内核：%s", "、".join(self.name_of(m) for m in self.masters))
+            except Exception as e:
+                log.warning("同步主人到内核失败：%s", e)
         self.pending_boot = self._changed_chats()  # 记下各会话进度；过期窗口内有动静的稍后补处理
         threading.Thread(target=self._send_worker, name="send", daemon=True).start()
         threading.Thread(target=self._reminder_loop, name="reminders", daemon=True).start()
+        if self.care_on:
+            threading.Thread(target=self.care.loop, name="care", daemon=True).start()
         threading.Thread(target=self._heartbeat_loop, name="heartbeat", daemon=True).start()
         threading.Thread(target=self._sync_contacts, name="contacts", daemon=True).start()
         from .sender import _ocr

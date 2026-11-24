@@ -11,6 +11,7 @@
   /允许 名字或ID      加入白名单（名字须唯一匹配：备注/昵称/群名）
   /禁止 名字或ID      移出白名单
   /测试 名字          只打开该会话并核对标题、不发送，回报耗时
+  /搭话              立即检查一次主动搭话（仍受内核时间窗/间隔/上限约束），回报结果
 """
 
 from __future__ import annotations
@@ -74,6 +75,8 @@ class Control:
         lat = b.latency.brief()
         if lat:
             lines.append(f"回复耗时：{lat}")
+        if b.care_on:
+            lines.append(f"主动搭话：{b.care.brief()}")
         up = int(time.time() - b.started)
         lines.append(f"已运行：{up // 3600} 小时 {up % 3600 // 60} 分")
         lines.append("问题：" + ("；".join(p for p in probs if not p.startswith("已熔断")) or "无"))
@@ -132,6 +135,13 @@ class Control:
             return f"打开「{name}」失败：{e}"
         return f"已打开并核对「{name}」，耗时 {dt:.2f} 秒（未发送任何内容）。"
 
+    def care(self, _arg: str) -> str:
+        b = self.b
+        if not b.care_on:
+            return "主动搭话已关闭（FUXI_CARE=0）。"
+        r = b.care.tick()
+        return "已发出一次主动搭话。" if r == "sent" else f"这次不发：{r}"
+
     # ---- 工具 ----
     def _allow_brief(self) -> str:
         items = self.b.allowlist.items
@@ -163,4 +173,5 @@ COMMANDS = {
     "/允许": "allow",
     "/禁止": "deny",
     "/测试": "test_open",
+    "/搭话": "care",
 }

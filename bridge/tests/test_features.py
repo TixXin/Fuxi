@@ -8,7 +8,7 @@ from unittest import mock
 
 import numpy as np
 
-from fuxi_bridge import control, messages, timing
+from fuxi_bridge import care, control, messages, timing
 from fuxi_bridge.allow import AllowList
 from fuxi_bridge.app import Bridge
 from fuxi_bridge.messages import Message, parse_appmsg
@@ -205,6 +205,7 @@ class ControlTest(unittest.TestCase):
         b.sender.open_stats.return_value = {"n": 3, "p50": 1.4, "max": 1.9, "last": 1.2}
         b.problems = lambda: []
         b.latency = timing.LatencyStats()
+        b.care_on = False
         self.b, self.c = b, control.Control(b)
 
     def test_only_self_in_filehelper(self):
@@ -235,6 +236,55 @@ class ControlTest(unittest.TestCase):
     def test_status_and_help(self):
         self.assertIn("中位 1.4 秒", self.c.handle("/状态"))
         self.assertIn("/测试", self.c.handle("/帮助"))
+
+
+class CareTest(unittest.TestCase):
+    def setUp(self):
+        d = tempfile.mkdtemp()
+        b = object.__new__(Bridge)
+        b.halted, b.paused, b.pending = "", False, {}
+        b.in_quiet_hours = lambda: False
+        b.names_cache = {"wxid_m": "主人"}
+        b.allowlist = AllowList(os.path.join(d, "allow.txt"), "wxid_m,filehelper")
+        b.reader = mock.Mock()
+        b.reader.sessions.return_value = [{"username": "wxid_old", "last_timestamp": 0}]
+        b.kernel = mock.Mock()
+        b.kernel.config.return_value = {"care": {"quietAfterMinutes": 20}}
+        b.kernel.care_due.return_value = {"due": True, "target": {"wxid": "wxid_m"}}
+        b.kernel.send_permission.return_value = (True, "")
+        b.kernel.care_text.return_value = {"text": "在干啥呢"}
+        b.send = mock.Mock(return_value=mock.Mock(ok=True))
+        self.b, self.path = b, os.path.join(d, "care.json")
+        self.c = care.Care(b, self.path)
+
+    def test_sends_records_and_persists(self):
+        self.assertEqual(self.c.tick(), "sent")
+        self.assertEqual(self.b.send.call_args[0][0].text, "在干啥呢")
+        self.b.kernel.care_sent.assert_called_once()
+        self.assertEqual(care.Care(self.b, self.path).sent_today, 1)
+        # 第二次把上次时间和今天次数交给内核判断
+        self.c.tick()
+        last, n, _ = self.b.kernel.care_due.call_args[0]
+        self.assertGreater(last, 0)
+        self.assertEqual(n, 1)
+
+    def test_active_chats_are_reported_and_rechecked(self):
+        now = __import__("time").time()
+        self.b.reader.sessions.side_effect = [[{"username": "wxid_x", "last_timestamp": now}],
+                                              [{"username": "wxid_m", "last_timestamp": now}]]
+        self.assertEqual(self.c.tick(), "生成期间对方来了消息")
+        self.assertEqual(self.b.kernel.care_due.call_args[0][2], ["wxid_x"])
+        self.b.send.assert_not_called()
+
+    def test_gates(self):
+        self.b.kernel.care_due.return_value = {"due": False, "reason": "too_soon", "waitMinutes": 30}
+        self.assertEqual(self.c.tick(), "离上次太近（还要 30 分钟）")
+        self.b.kernel.care_due.return_value = {"due": True, "target": {"wxid": "wxid_z"}}
+        self.assertIn("不在白名单", self.c.tick())
+        self.b.paused = True
+        self.assertEqual(self.c.tick(), "已暂停")
+        self.b.send.assert_not_called()
+        self.assertIn("当前不发：已暂停", self.c.brief())
 
 
 class SpeedTest(unittest.TestCase):

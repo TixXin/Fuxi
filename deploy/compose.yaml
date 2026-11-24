@@ -52,6 +52,8 @@ services:
       FUXI_RATE_CHAT: ${FUXI_RATE_CHAT:-6}
       FUXI_RATE_GLOBAL: ${FUXI_RATE_GLOBAL:-20}
       FUXI_QUIET: ${FUXI_QUIET:-}
+      FUXI_MASTER: ${FUXI_MASTER:-}
+      FUXI_CARE: ${FUXI_CARE:-1}
       DISPLAY: ":1"
     volumes:
       - ${WX_CONFIG_DIR:?请在 .env 设置 WX_CONFIG_DIR}:/wxconfig:ro   # 微信数据，只读

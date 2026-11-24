@@ -8,7 +8,8 @@
 - POST /api/wechat/send-permission {chatId, name} → {allowed, reason}
 - POST /api/wechat/contacts/sync {account, at, items}
 - POST /api/bridge/heartbeat     每 20 秒
-- POST /api/config {patch}       改配置并立即生效（用于同步白名单）
+- POST /api/config {patch}       改配置并立即生效（用于同步白名单、主人）
+- GET  /api/care/due · GET /api/care · POST /api/care/sent   主动搭话（见 care.py）
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ import json
 import logging
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 log = logging.getLogger(__name__)
@@ -94,6 +96,25 @@ class Kernel:
         r = self._req("POST", "/api/config", {"patch": patch}, timeout=15)
         if not r.get("ok"):
             raise KernelError(f"内核拒绝白名单配置：{r.get('error')}")
+
+    def set_master(self, wxids: list[str]) -> None:
+        """主人身份（主动搭话只找主人；主人还能用内核的管理指令）。"""
+        r = self._req("POST", "/api/config", {"patch": {"persona": {"master": {"wxids": list(wxids)}}}}, timeout=15)
+        if not r.get("ok"):
+            raise KernelError(f"内核拒绝主人配置：{r.get('error')}")
+
+    def config(self) -> dict:
+        return self._req("GET", "/api/config", timeout=10).get("config") or {}
+
+    def care_due(self, last_ms: int, sent_today: int, active: list[str]) -> dict:
+        q = urllib.parse.urlencode({"last": last_ms, "sentToday": sent_today, "active": ",".join(active)})
+        return self._req("GET", "/api/care/due?" + q, timeout=10)
+
+    def care_text(self, chat: str) -> dict:
+        return self._req("GET", "/api/care?" + urllib.parse.urlencode({"chat": chat}), timeout=90)
+
+    def care_sent(self, chat: str, text: str, group: bool, sid: str) -> None:
+        self._req("POST", "/api/care/sent", {"chat": chat, "text": text, "group": group, "id": sid}, timeout=10)
 
     def heartbeat(self, info: dict) -> None:
         self._req("POST", "/api/bridge/heartbeat", {"platform": "wechat", **info}, timeout=10)

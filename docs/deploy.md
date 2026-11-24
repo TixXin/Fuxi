@@ -72,6 +72,8 @@ ssh <host> 'chmod 600 <fuxi-dir>/.env'
 | `DEEPSEEK_API_KEY` | 模型 key |
 | `FUXI_RATE_CHAT` / `FUXI_RATE_GLOBAL` | 自动回复每会话 / 全局每分钟上限，默认 6 / 20（API 发送不受限） |
 | `FUXI_QUIET` | 夜间静默时段，如 `23:30-07:00`（北京时间）；留空不静默。静默期间收到的消息不回复 |
+| `FUXI_MASTER` | 主人的 wxid（逗号分隔）。主动搭话只找主人；留空则不会主动搭话 |
+| `FUXI_CARE` | `0` 关闭主动搭话；时间段、间隔、每日上限在内核配置的 `care` 段 |
 | `KUMA_PUSH_URL` | 告警用的 Uptime Kuma Push 地址，见「告警」；留空只写日志 |
 
 内核默认不保留聊天原文（`log.traceRaw=false`）；排障需要时在 `.env` 加 `FUXI_KERNEL_TRACE_RAW=1`

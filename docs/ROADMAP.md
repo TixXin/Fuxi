@@ -87,7 +87,7 @@
 - [ ] **F3 批准后开 issue + agent 修复（L）**：遥控 `/修 N` `/忽略 N`；批准后脱敏开 issue（`from-wechat`，
       写 token 与只读 token 分开）；浮屿仓库装 Claude Code Action 出 draft PR；可选 Mac 守护进程领
       `fix-local` 的 issue，起 T3 Code / `claude -p` 在独立 worktree 修。群友原话只作问题描述，agent 无密钥、不自动合并。
-- [ ] **待补信息**：浮屿仓库地址与公开/私有、用户群 chat_id、摘要发送时间与去处。
+- [ ] **待补信息**：用户群 chat_id、摘要发送时间与去处。（浮屿仓库：TixXin/Fuyu，公开，main）
 
 - [x] **发版自动发群（S）**：`POST /announce {key, text, image_base64}` 先把内容发到文件传输助手预览，
       主人回 `/发布 编号` 才发群（`/取消`、`/待发`；24 小时过期）；key 幂等，状态存状态卷，重跑不重复预览/发群。

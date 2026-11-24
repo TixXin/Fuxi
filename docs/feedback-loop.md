@@ -39,7 +39,7 @@ GBK 编码的老网页（上游按 UTF-8 解码，会乱码）。
 
 | 事项 | 决定 |
 |---|---|
-| 浮屿仓库 | 新开的 GitHub 仓库（地址待填；公开或私有决定 issue 脱敏程度，先按公开处理） |
+| 浮屿仓库 | [TixXin/Fuyu](https://github.com/TixXin/Fuyu)，**公开**，默认分支 `main`；版本说明在仓库 `docs/releases/v<版本>.md`（中英双语，「## 更新内容」段）。公开仓库，所以 issue 必须脱敏 |
 | 反馈来源 | 只收集一个群：浮屿用户群（具体 chat_id 写进 `settings.json`） |
 | 修复在哪跑 | 默认云端 GitHub Action（`@claude`）；需要本机构建测试的问题由 Mac 本地跑 |
 | 人工关卡 | 开 issue 前要主人批准；PR 只出 draft，合并和发版由主人决定 |
@@ -156,11 +156,12 @@ mindmap
 |---|---|---|
 | F0 | 链接读取改进（第一节）✅ | 无 |
 | F1 | 收集器 + 反馈库 + 每日摘要 | 群 chat_id |
-| F2 | GitHub 只读同步、查重、bot 答进度、修复后回群通知 | 仓库地址、只读 token、机房代理 |
+| F2 | GitHub 只读同步（缓存放 `/state/fuyu/`：`releases.json`、`issues.json`、`prs.json`、`meta.json`，字段沿用 GitHub API）、查重、bot 答进度、修复后回群通知 | 机房代理；公开仓库可先不用 token（每小时 60 次） |
 | F3 | `/修 N` 开 issue、云端 Action 出 draft PR、Mac 本地守护进程（可选） | 写 token、仓库装 Action |
 
 ## 七、待补
 
-- 浮屿仓库地址；仓库公开还是私有。
+与「用户群产品助手」的分工：它的知识文件放 `/state/knowledge/`，版本信息读 F2 的 `/state/fuyu/releases.json`。
+
 - 浮屿用户群的 chat_id。
 - 每日摘要的时间，以及发到主人私聊还是文件传输助手。

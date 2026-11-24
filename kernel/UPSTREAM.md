@@ -12,7 +12,9 @@
 
 | 文件 | 作用 |
 |---|---|
-| `docker-entrypoint.js` | 容器启动时把 `FUXI_KERNEL_TOKEN`、端口、主人 wxid 写入 `data/config.json`（并默认关闭 `log.traceRaw`），随后 `exec node server.js` |
+| `docker-entrypoint.js` | 容器启动时把 `FUXI_KERNEL_TOKEN`、端口写入 `data/config.json`（并默认关闭 `log.traceRaw`），随后 `exec node -r ./fuxi/preload.js server.js` |
+| `fuxi/preload.js` | 预加载：包一层 `createRouter`，追加浮汐自己的接口（不改上游文件） |
+| `fuxi/asr.js` | `POST /api/fuxi/asr`：WAV → 文字，用内核的 voice 配置（调用方式同上游「测试语音」，返回完整文本） |
 | `Dockerfile` | node:22-slim 镜像，`data/` 为卷 |
 | `UPSTREAM.md`、`.upstream-commit` | 本说明 |
 

@@ -59,7 +59,10 @@
       uin 用缩略图 JPEG 结尾反推异或字节后在 2^24 内暴力找，几秒，存 `/state/imgkey.json`）→ wxgf（HEVC）用
       OpenCV 解第一帧 → JPEG 交内核 `/api/vision`，描述附在「[图片]」后面。只看最后发言人的最多 3 张；
       失败保留占位。`/设置 看图 全部|只看私聊|关闭`。
-- [ ] **语音（L）**：silk 解码 + 语音识别。
+- [x] **语音（M）**：消息行 server_id → `message/media_*.db` 的 VoiceInfo 取 SILK（腾讯版，开头多 0x02）→
+      silk-python 解成 16 kHz WAV → 内核扩展 `POST /api/fuxi/asr`（`kernel/fuxi/asr.js`，用内核 voice 配置，
+      默认跟随聊天服务商：DeepSeek `/v1/tools/asr` 或千问 `qwen3-asr-flash`）→ 文字附在「[语音 N秒]」后面。
+      `/设置 语音转文字 全部|只听私聊|关闭`；失败保留占位。
 
 - [x] **设置集中管理（S）**：行为开关从 `.env` 搬到桥接状态卷的 `settings.json`（`settings.py` 登记每项的
       类型/默认值/说明），改了立即生效；遥控 `/设置`、API `GET/POST /settings`（管理台用）。内核管的项
@@ -92,6 +95,5 @@
 
 ## 暂不做
 
-- （已做图片理解；语音识别排在 P1 最后。）
 - 白名单全部放开：P0 完成前不做。
 - 对外 API 暴露公网：继续走 SSH。

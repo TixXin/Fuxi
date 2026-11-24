@@ -111,6 +111,13 @@ class Kernel:
             raise KernelError(f"看图失败：{r.get('error')}")
         return str(r.get("text") or "").strip()
 
+    def asr(self, wav_b64: str) -> str:
+        """语音转文字（浮汐内核扩展 /api/fuxi/asr，用内核的 voice 配置）。"""
+        r = self._req("POST", "/api/fuxi/asr", {"audio": wav_b64}, timeout=100)
+        if not r.get("ok"):
+            raise KernelError(f"语音识别失败：{r.get('error')}")
+        return str(r.get("text") or "").strip()
+
     def config(self) -> dict:
         return self._req("GET", "/api/config", timeout=10).get("config") or {}
 

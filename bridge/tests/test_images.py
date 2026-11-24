@@ -129,7 +129,8 @@ class SeeImagesTest(unittest.TestCase):
         b.images.load.return_value = (b"jpg", "full")
         b.kernel = mock.Mock()
         b.kernel.vision.return_value = "一只橘猫趴在键盘上"
-        b.vision_cache = __import__("collections").OrderedDict()
+        b.media_cache = __import__("collections").OrderedDict()
+        b.voice_mode = "off"
         b.names_cache = {}
         b.name_of = lambda u: u
         return b
@@ -137,10 +138,10 @@ class SeeImagesTest(unittest.TestCase):
     def test_describes_and_caches(self):
         b = self.bridge()
         batch = [img_msg(1)]
-        b._see_images("wxid_a", batch, timing.Trace(0, 0))
+        b._understand("wxid_a", batch, timing.Trace(0, 0))
         self.assertEqual(batch[0].text, "[图片]（图片内容：一只橘猫趴在键盘上）")
         again = [img_msg(2)]
-        b._see_images("wxid_a", again, timing.Trace(0, 0))
+        b._understand("wxid_a", again, timing.Trace(0, 0))
         self.assertEqual(b.kernel.vision.call_count, 1)
         self.assertIn("橘猫", again[0].text)
 
@@ -148,20 +149,20 @@ class SeeImagesTest(unittest.TestCase):
         b = self.bridge()
         b.kernel.vision.side_effect = KernelError("x")
         batch = [img_msg(1)]
-        b._see_images("wxid_a", batch, timing.Trace(0, 0))
+        b._understand("wxid_a", batch, timing.Trace(0, 0))
         self.assertEqual(batch[0].text, "[图片]")
         b.images.load.side_effect = ValueError("还没有图片密钥")
-        b._see_images("wxid_a", batch, timing.Trace(0, 0))
+        b._understand("wxid_a", batch, timing.Trace(0, 0))
         self.assertEqual(batch[0].text, "[图片]")
 
     def test_modes_and_other_senders(self):
         b = self.bridge()
         b.vision_mode = "private"
         g = [img_msg(1)]
-        b._see_images("g@chatroom", g, timing.Trace(0, 0))
+        b._understand("g@chatroom", g, timing.Trace(0, 0))
         b.vision_mode = "all"
         mixed = [img_msg(1, sender="wxid_b", media="f" * 32), img_msg(2, sender="wxid_a")]
-        b._see_images("wxid_a", mixed, timing.Trace(0, 0))
+        b._understand("wxid_a", mixed, timing.Trace(0, 0))
         self.assertEqual(b.images.load.call_count, 1)        # 只看最后发言人的图
         self.assertEqual(mixed[0].text, "[图片]")
 

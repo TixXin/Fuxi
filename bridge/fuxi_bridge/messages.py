@@ -53,7 +53,7 @@ class Message:
     # type 49 解析结果（见 parse_appmsg）：引用的原消息、拍一拍对象等；普通文本为空
     quote: dict = field(default_factory=dict)
     patted: str = ""
-    media: str = ""    # 图片：.dat 文件名（packed_info_data 里的 32 位十六进制），见 images.py
+    media: str = ""    # 图片：.dat 文件名（packed_info_data 里的 32 位十六进制，见 images.py）；语音：server_id（见 voice.py）
 
     @property
     def is_group(self) -> bool:
@@ -126,7 +126,7 @@ class MessageReader:
             names = dict(con.execute("SELECT rowid, user_name FROM Name2Id").fetchall())
             rows = con.execute(
                 f'SELECT local_id, local_type, real_sender_id, create_time, message_content, '
-                f'compress_content, source, sort_seq, packed_info_data FROM "{table}" WHERE sort_seq > ? AND create_time >= ? '
+                f'compress_content, source, sort_seq, packed_info_data, server_id FROM "{table}" WHERE sort_seq > ? AND create_time >= ? '
                 f"ORDER BY sort_seq, local_id",
                 (after, min_time),
             ).fetchall()
@@ -180,6 +180,8 @@ class MessageReader:
                     text = parse_media(mtype, text)
                     if mtype == "image":
                         extra = {"media": image_name(r["packed_info_data"])}
+                    elif mtype == "voice" and r["server_id"]:
+                        extra = {"media": str(r["server_id"])}
                 out.append(Message(
                     chat=chat, local_id=r["local_id"], sort_seq=r["sort_seq"], type=mtype,
                     sender=sender, is_self=(sender == self.self_wxid), create_time=r["create_time"],

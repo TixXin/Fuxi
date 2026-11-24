@@ -70,7 +70,7 @@ def msg(**kw) -> Message:
 def bare_bridge() -> Bridge:
     b = object.__new__(Bridge)
     b.self_wxid = SELF
-    b.vision_mode = "off"
+    b.vision_mode = b.voice_mode = "off"
     b.extra_names = ["鲸鲸"]
     b.names_cache = {"wxid_a": "小明", "g@chatroom": "测试群", SELF: "我"}
     b.reader = mock.Mock(self_names=lambda: [])
@@ -207,7 +207,7 @@ class ControlTest(unittest.TestCase):
         b.problems = lambda: []
         b.latency = timing.LatencyStats()
         b.care_on = False
-        b.vision_mode = "off"
+        b.vision_mode = b.voice_mode = "off"
         self.b, self.c = b, control.Control(b)
 
     def test_only_self_in_filehelper(self):

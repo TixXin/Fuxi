@@ -97,6 +97,8 @@ class Control:
         if b.vision_mode != "off":
             lines.append("看图：" + ("已就绪" if b.images.uin is not None else "还没有图片密钥（收到图片后自动推算）")
                          + ("，只看私聊" if b.vision_mode == "private" else ""))
+        if b.voice_mode != "off":
+            lines.append("语音转文字：开" + ("（只听私聊）" if b.voice_mode == "private" else ""))
         up = int(time.time() - b.started)
         lines.append(f"已运行：{up // 3600} 小时 {up % 3600 // 60} 分")
         lines.append("问题：" + ("；".join(p for p in probs if not p.startswith("已熔断")) or "无"))

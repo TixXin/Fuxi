@@ -21,7 +21,7 @@ import threading
 
 STAGES = ("discover", "settle", "vision", "kernel", "typing", "queue", "open", "paste", "verify")
 LABELS = {
-    "discover": "发现", "settle": "合并", "vision": "看图", "kernel": "内核", "typing": "打字", "queue": "排队",
+    "discover": "发现", "settle": "合并", "vision": "识别", "kernel": "内核", "typing": "打字", "queue": "排队",
     "open": "进会话", "paste": "粘贴", "verify": "核对", "first": "首条", "total": "全部",
 }
 

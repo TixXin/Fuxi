@@ -28,7 +28,7 @@ import time
 from dataclasses import dataclass, field
 
 from . import messages, store
-from . import care, control, images, settings, timing
+from . import care, control, images, settings, timing, voice
 from .allow import AllowList
 from .kernel import Kernel, KernelError
 from .messages import Message
@@ -97,7 +97,7 @@ class Bridge:
         self.rate_chat, self.rate_global, self.quiet = 6, 20, ""
         self.extra_names: list[str] = []
         self.masters: list[str] = []
-        self.care_on, self.vision_mode = True, "all"
+        self.care_on, self.vision_mode, self.voice_mode = True, "all", "all"
         self.kernel_ready = False
         self.sent_times: collections.deque[tuple[float, str]] = collections.deque(maxlen=1000)
         self.interval = float(env.get("FUXI_POLL_INTERVAL", "0.5"))
@@ -131,7 +131,8 @@ class Bridge:
         self.kernel_data = env.get("FUXI_KERNEL_DATA", "/kernel-data")  # 内核 data 卷（只读）挂在这里
         self.images = images.Images(os.path.dirname(os.path.normpath(self.db_root)), self.self_wxid,
                                     os.path.join(state, "imgkey.json"))
-        self.vision_cache: collections.OrderedDict[str, str] = collections.OrderedDict()
+        self.voices = voice.Voices(self.cache)
+        self.media_cache: collections.OrderedDict[str, str] = collections.OrderedDict()   # 看图/语音结果
         self.control = control.Control(self)
         self.apply_settings()
 
@@ -143,10 +144,10 @@ class Bridge:
             "settle": c.get("settle_ms") / 1000, "stale": c.get("stale_sec"), "reply_self": c.get("reply_self"),
             "rate_chat": c.get("rate_chat"), "rate_global": c.get("rate_global"), "quiet": c.get("quiet"),
             "extra_names": c.get("self_names"), "masters": c.get("owners"),
-            "care_on": c.get("care_on"), "vision_mode": c.get("vision"),
+            "care_on": c.get("care_on"), "vision_mode": c.get("vision"), "voice_mode": c.get("voice"),
         }
         labels = {"settle": "settle_ms", "stale": "stale_sec", "extra_names": "self_names", "masters": "owners",
-                  "vision_mode": "vision"}
+                  "vision_mode": "vision", "voice_mode": "voice"}
         changed = []
         for attr, v in new.items():
             if getattr(self, attr, None) != v:
@@ -463,7 +464,7 @@ class Bridge:
                 log.info("%s 撤回了 %d 条消息，不再回复它们", self.name_of(chat), len(gone))
                 if not batch:
                     return
-            self._see_images(chat, batch, tr)
+            self._understand(chat, batch, tr)
             k0 = time.monotonic()
             payload = self._payload(chat, batch)
             log.info("→ 内核 %s [%s] %s", payload["chat_title"] or self.name_of(chat), payload["senderName"],
@@ -481,33 +482,45 @@ class Bridge:
                 if sticker:
                     self._send_sticker(chat, sticker, delivered)
 
-    def _see_images(self, chat: str, batch: list[Message], tr: "timing.Trace") -> None:
-        """把要交给内核的图片换成「[图片] 描述」。只看最后发言人的图（_payload 只带这些）。
-        任何失败都保留原占位，不影响回复。"""
-        mode = self.vision_mode
-        if mode == "off" or (mode == "private" and chat.endswith("@chatroom")):
-            return
+    def _understand(self, chat: str, batch: list[Message], tr: "timing.Trace") -> None:
+        """图片、语音交给内核前先看懂/听懂：「[图片]（图片内容：…）」「[语音 5秒]（语音内容：…）」。
+        只处理最后发言人的（_payload 只带这些），每种最多最后三条。任何失败都保留原占位，不影响回复。"""
+        group = chat.endswith("@chatroom")
         last = batch[-1].sender
-        todo = [m for m in batch if m.type == "image" and m.media and m.sender == last]
-        if not todo:
-            return
         t0 = time.monotonic()
-        for m in todo[-3:]:   # 一口气发很多张时只看最后三张
-            desc = self.vision_cache.get(m.media)
-            if desc is None:
-                try:
-                    jpeg, src = self.images.load(chat, m.media)
-                    desc = self.kernel.vision(base64.b64encode(jpeg).decode())
-                    log.info("看图 %s：%s（%d 字）", self.name_of(chat), src, len(desc))
-                except (ValueError, KernelError) as e:
-                    log.info("看图失败 %s：%s", self.name_of(chat), e)
-                    continue
-                self.vision_cache[m.media] = desc
-                while len(self.vision_cache) > 200:
-                    self.vision_cache.popitem(last=False)
-            if desc:
-                m.text = f"{m.text}（图片内容：{desc}）"
-        tr.add("vision", time.monotonic() - t0)
+        did = False
+        for kind, mode, label in (("image", self.vision_mode, "图片内容"), ("voice", self.voice_mode, "语音内容")):
+            if mode == "off" or (mode == "private" and group):
+                continue
+            todo = [m for m in batch if m.type == kind and m.media and m.sender == last]
+            for m in todo[-3:]:
+                key = f"{kind}:{chat}:{m.media}"
+                got = self.media_cache.get(key)
+                if got is None:
+                    did = True
+                    try:
+                        got = self._recognize(chat, kind, m.media)
+                    except (ValueError, KernelError) as e:
+                        log.info("%s失败 %s：%s", "看图" if kind == "image" else "语音识别", self.name_of(chat), e)
+                        continue
+                    self.media_cache[key] = got
+                    while len(self.media_cache) > 300:
+                        self.media_cache.popitem(last=False)
+                if got:
+                    m.text = f"{m.text}（{label}：{got}）"
+        if did:
+            tr.add("vision", time.monotonic() - t0)
+
+    def _recognize(self, chat: str, kind: str, media: str) -> str:
+        if kind == "image":
+            jpeg, src = self.images.load(chat, media)
+            text = self.kernel.vision(base64.b64encode(jpeg).decode())
+            log.info("看图 %s：%s（%d 字）", self.name_of(chat), src, len(text))
+            return text
+        wav = self.voices.load(chat, int(media))
+        text = self.kernel.asr(base64.b64encode(wav).decode())
+        log.info("语音识别 %s：%.1f 秒 → %d 字", self.name_of(chat), (len(wav) - 44) / 32000, len(text))
+        return text
 
     def _deliver(self, chat: str, batch: list[Message], resp: dict, tr: "timing.Trace", k0: float) -> bool:
         """发出内核的文字回复；全部气泡都发成功才返回 True（随后才发表情包）。"""

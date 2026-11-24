@@ -43,6 +43,8 @@ class Item:
 ITEMS: list[Item] = [
     Item("vision", "看图", "choice", "all", "收到图片时用内核的看图模型看懂内容",
          {"all": "全部", "private": "只看私聊", "off": "关闭"}, env="FUXI_VISION"),
+    Item("voice", "语音转文字", "choice", "all", "收到语音时用内核的语音识别转成文字（服务商跟随内核 voice 配置）",
+         {"all": "全部", "private": "只听私聊", "off": "关闭"}),
     Item("care_on", "主动搭话", "bool", True, "一阵子没人说话时主动找主人聊一句（时段/间隔/上限由内核定）",
          env="FUXI_CARE"),
     Item("stickers", "表情包", "bool", False, "回复后按情绪发表情包（图库用 /存表情 填）",

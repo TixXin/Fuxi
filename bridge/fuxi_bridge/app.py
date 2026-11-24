@@ -29,7 +29,7 @@ import time
 from dataclasses import dataclass, field
 
 from . import messages, store
-from . import announce, care, control, feedback, fuyu, images, issues, knowledge, outreach, settings, timing, voice
+from . import announce, care, control, events, feedback, fuyu, images, issues, knowledge, outreach, settings, timing, voice
 from .allow import AllowList
 from .kernel import Kernel, KernelError
 from .messages import Message
@@ -124,6 +124,7 @@ class Bridge:
         self.pending_at: dict[str, float] = {}
         self.pending_seen: dict[str, float] = {}   # 最后一条待处理消息被读到的时刻（time.time）
         self.latency = timing.LatencyStats()
+        self.events = events.Events()   # 管理台的对话流和今天的数字（只在内存）
         self.chat_locks: dict[str, threading.Lock] = collections.defaultdict(threading.Lock)
         self.pool = cf.ThreadPoolExecutor(max_workers=4, thread_name_prefix="chat")
         self.session_seen: dict[str, int] = {}
@@ -482,6 +483,7 @@ class Bridge:
     def _dispatch(self, chat: str, batch: list[Message], seen: float | None = None) -> None:
         if self.paused:
             log.info("已暂停，不处理 %s 的 %d 条消息", self.name_of(chat), len(batch))
+            self._publish_batch(chat, batch, None, "已暂停")
             return
         tr = timing.Trace(batch[-1].create_time, seen or time.time())
         tr.add("settle", time.time() - tr.seen)
@@ -491,6 +493,20 @@ class Bridge:
             if tr.bubbles:
                 self.latency.add(tr.result())
                 log.info("回复耗时 %s %s", self.name_of(chat), tr.summary())
+            self._publish_batch(chat, batch, tr)
+
+    def _publish_batch(self, chat: str, batch: list[Message], tr: "timing.Trace | None", reason: str = "") -> None:
+        try:
+            last = batch[-1]
+            self.events.publish("message", {
+                "chat": chat, "chat_name": self.name_of(chat), "group": last.is_group,
+                "sender": self.name_of(last.sender) if last.is_group and last.sender else "",
+                "count": len(batch), "kinds": sorted({m.type for m in batch}),
+                "text": "\n".join(m.text for m in batch)[:2000], "msg_time": last.create_time,
+                "replies": list(getattr(tr, "replies", [])), "reason": reason or getattr(tr, "reason", ""),
+                "timing": tr.result() if tr is not None and tr.bubbles else None})
+        except Exception:
+            log.exception("发布对话流事件失败")
 
     def _dispatch_traced(self, chat: str, batch: list[Message], tr: "timing.Trace") -> None:
         with self.chat_locks[chat]:
@@ -499,6 +515,7 @@ class Bridge:
                 batch = [m for m in batch if m.msg_id not in gone]
                 log.info("%s 撤回了 %d 条消息，不再回复它们", self.name_of(chat), len(gone))
                 if not batch:
+                    tr.reason = "对方撤回了"
                     return
             self._understand(chat, batch, tr)
             k0 = time.monotonic()
@@ -510,6 +527,7 @@ class Bridge:
                 resp = self.kernel.webhook(payload)
             except KernelError as e:
                 log.error("内核 webhook 失败：%s", e)
+                tr.reason = f"内核出错：{e}"
                 return
             sticker = resp.get("sticker") or None   # 内核已为这次回复预留的表情包任务
             delivered = False
@@ -600,6 +618,8 @@ class Bridge:
             log.info("产品助手 %s：转人工太频繁，这次不私聊主人", self.name_of(chat))
             return
         self.handoffs.append((now, chat))
+        self.events.publish("handoff", {"chat": chat, "chat_name": self.name_of(chat),
+                                        "sender": payload.get("senderName") or "", "question": q[:300]})
         text = (f"【浮屿群求助】{payload.get('senderName') or '有人'} 在「{self.name_of(chat)}」问：\n{q[:300]}\n"
                 "资料里没找到相关内容，可能需要你来回。")
 
@@ -706,8 +726,9 @@ class Bridge:
             elif now - it["agent_at"] > self.AGENT_LATE and not it.get("agent_late"):
                 self.feedback.set_fields(it, agent_late=True)
                 repo = self.cfg.get("knowledge_repo") or self.fuyu.repo
-                texts.append(f"【代理还没结果】反馈 #{it['id']}「{it['title']}」→ issue #{it['issue']}，派出已超过 2 小时。\n"
-                             f"看看运行记录：https://github.com/{repo}/actions/workflows/claude-fix.yml")
+                look = ("Mac 开着吗？日志在 ~/.fuxi-fix/logs/" if it.get("agent_where") == "local"
+                        else f"看看运行记录：https://github.com/{repo}/actions/workflows/claude-fix.yml")
+                texts.append(f"【代理还没结果】反馈 #{it['id']}「{it['title']}」→ issue #{it['issue']}，派出已超过 2 小时。\n{look}")
         gh = self.fixflow.gh
         if gh.ready and now - gh.checked_at > 86400:
             try:
@@ -821,18 +842,22 @@ class Bridge:
         """发出内核的文字回复；全部气泡都发成功才返回 True（随后才发表情包）。"""
         if resp.get("action") != "reply":
             log.info("内核不回复：%s", resp.get("reason") or resp.get("skipped") or resp.get("action"))
+            tr.reason = f"内核决定不回：{resp.get('reason') or resp.get('skipped') or resp.get('action')}"
             return False
         bubbles = [b for b in (resp.get("bubbles") or [resp.get("reply") or ""]) if b and b.strip()]
         allowed, reason = self.kernel.send_permission(chat, self.name_of(chat))
         if not allowed:
             log.info("内核不允许在 %s 发言：%s", chat, reason)
+            tr.reason = f"不允许发言：{reason}"
             return False
         tr.add("kernel", time.monotonic() - k0)
         mention = resp.get("mention") or ""
         for i, b in enumerate(bubbles):
             if self.paused:
+                tr.reason = "发送途中被暂停"
                 return False
             if not self.rate_ok(chat):
+                tr.reason = "超过发送频率上限"
                 log.warning("超过发送频率上限，丢弃 %s 的剩余 %d 条回复", self.name_of(chat), len(bubbles) - i)
                 return False
             at, text = "", b
@@ -846,11 +871,14 @@ class Bridge:
             tr.add("typing", delay)
             if i == 0 and self._revoked(batch):
                 log.info("%s 在生成回复期间撤回了消息，放弃这次回复", self.name_of(chat))
+                tr.reason = "对方撤回了"
                 return False
             self.sent_times.append((time.time(), chat))
             job = self.send(SendJob(chat=chat, text=text, at=at))
             if not job.ok:
+                tr.reason = f"发送失败：{job.error}"
                 return False
+            tr.replies.append(text)
             if job.t_sent:
                 tr.add("queue", job.t_start - job.t_queued)
                 tr.add("open", job.open_s)
@@ -1022,6 +1050,9 @@ class Bridge:
             threading.Thread(target=serve, args=(self,), name="api", daemon=True).start()
         else:
             log.warning("未设置 FUXI_API_TOKEN，对外发送 API 不启动")
+        from .admin import serve as serve_admin
+
+        threading.Thread(target=serve_admin, args=(self,), name="admin", daemon=True).start()
         log.info("开始监听全部会话（self=%s）", self.self_wxid[:6] + "…")
         next_cfg = 0.0
         while True:

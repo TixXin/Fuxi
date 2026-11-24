@@ -3,6 +3,7 @@ Claude Code Action 出 draft PR（工作流在浮屿仓库 .github/workflows/cla
 
 流程（遥控，两步，先看后发）：
   /修 3 [补充说明]        预览要开的 issue（标题、正文、标签）；/修 3 确认 才真的开，并打 claude-fix 交给代理
+  /修 3 本地 [补充说明]   同上，但交给 Mac 上的 scripts/fix-local.sh（打 fix-local），要在 macOS 上构建/测试的问题用
   /开issue 3 [补充说明]   同上，但只开 issue、不派代理（/开issue 3 确认）
   反馈已经对上了浮屿仓库里的 issue 时，不重复开：/修 给那个 issue 打 claude-fix 并补一条评论（群里的新情况）。
 
@@ -28,6 +29,7 @@ log = logging.getLogger("fuxi.issues")
 
 LABEL_FROM = "from-wechat"
 LABEL_FIX = "claude-fix"
+LABEL_LOCAL = "fix-local"     # 交给 Mac 上的 scripts/fix-local.sh（要在 macOS 上构建/测试的问题）
 LABEL_STUCK = "claude-stuck"   # 浮屿工作流：代理没修成时打上，并把查到的写成 issue 评论
 API = "https://api.github.com/repos/{repo}"
 
@@ -57,7 +59,7 @@ def quote_line(q: str) -> str:
     return scrub(f"{m.group(1)}：{m.group(2)}" if m else q)
 
 
-def draft(it: dict, note: str = "", fix: bool = True) -> tuple[str, str, list[str]]:
+def draft(it: dict, note: str = "", fix: bool = True, local: bool = False) -> tuple[str, str, list[str]]:
     """群反馈条目 → (标题, 正文, 标签)。"""
     kind = {"bug": "bug", "suggestion": "enhancement", "question": "question"}[it["category"]]
     title = f"[群反馈] {scrub(it['title'])}"
@@ -79,7 +81,7 @@ def draft(it: dict, note: str = "", fix: bool = True) -> tuple[str, str, list[st
     if note.strip():
         lines += ["", "## 维护者补充", scrub(note.strip())]
     lines += ["", f"<sub>浮汐反馈编号 #{it['id']}</sub>"]
-    labels = [LABEL_FROM, kind] + ([LABEL_FIX] if fix else [])
+    labels = [LABEL_FROM, kind] + ([LABEL_LOCAL if local else LABEL_FIX] if fix else [])
     return title[:120], "\n".join(lines), labels
 
 
@@ -176,6 +178,9 @@ class FixFlow:
         if not m:
             return f"用法：{cmd} 3 [补充说明]（先预览），{cmd} 3 确认（真的开）"
         iid, rest = int(m.group(1)), m.group(2).strip()
+        local = fix and (rest == "本地" or rest.startswith("本地 "))
+        if local:
+            rest = rest[2:].strip()
         it = self.fb.get(iid)
         if not it:
             return f"没有反馈 #{iid}（/反馈 看列表）"
@@ -185,27 +190,29 @@ class FixFlow:
             p = self.pending.pop(iid, None)
             if not p or p["fix"] != fix or time.time() - p["at"] > 3600:
                 return f"先用 {cmd} {iid} 预览一下（预览 1 小时内有效）。"
-            return self._do(it, p["note"], fix)
-        self.pending[iid] = {"note": rest, "fix": fix, "at": time.time()}
-        return self._preview(it, rest, fix)
+            return self._do(it, p["note"], fix, p.get("local", False))
+        self.pending[iid] = {"note": rest, "fix": fix, "local": local, "at": time.time()}
+        return self._preview(it, rest, fix, local)
 
     def _existing(self, it: dict) -> int | None:
         return it.get("issue") or None
 
-    def _preview(self, it: dict, note: str, fix: bool) -> str:
+    def _preview(self, it: dict, note: str, fix: bool, local: bool = False) -> str:
         cmd = "/修" if fix else "/开issue"
+        label = LABEL_LOCAL if local else LABEL_FIX
+        who = "Mac 上的本机修复（scripts/fix-local.sh，Mac 要开着）" if local else "云端代理"
         warn = "" if self.gh.ready else "\n⚠️ 还没配置 FUXI_GITHUB_ISSUE_TOKEN，确认后会失败。"
         num = self._existing(it)
         if num:
-            what = (f"给已有的 issue #{num} 打 {LABEL_FIX} 标签交给代理，并补一条评论：" if fix
+            what = (f"给已有的 issue #{num} 打 {label} 标签交给{who}，并补一条评论：" if fix
                     else f"反馈已对应 issue #{num}，只补一条评论：")
             return (f"【预览】{what}\n\n{followup(it, note)}\n\n确认无误回 {cmd} {it['id']} 确认{warn}")
-        title, body, labels = draft(it, note, fix)
-        agent = "，并交给云端代理修（出 draft PR）" if fix else "（不派代理）"
+        title, body, labels = draft(it, note, fix, local)
+        agent = f"，并交给{who}修（出 draft PR）" if fix else "（不派代理）"
         return (f"【预览】将在 {self.gh.repo_of()} 开 issue{agent}\n标签：{'、'.join(labels)}\n\n{title}\n\n{body}\n\n"
                 f"确认无误回 {cmd} {it['id']} 确认；要补充说明就 {cmd} {it['id']} 补充的话（重新预览）{warn}")
 
-    def _do(self, it: dict, note: str, fix: bool) -> str:
+    def _do(self, it: dict, note: str, fix: bool, local: bool = False) -> str:
         num = self._existing(it)
         try:
             if num:
@@ -214,15 +221,15 @@ class FixFlow:
                     return f"issue #{num} 已经关闭（{self.fb.progress(it)}）。要重新修就先在 GitHub 上重开。"
                 self.gh.comment(num, followup(it, note))
                 if fix:
-                    self.gh.add_labels(num, [LABEL_FIX])
+                    self.gh.add_labels(num, [LABEL_LOCAL if local else LABEL_FIX])
                 url = cur.get("html_url") or f"https://github.com/{self.gh.repo_of()}/issues/{num}"
             else:
-                title, body, labels = draft(it, note, fix)
+                title, body, labels = draft(it, note, fix, local)
                 data = self.gh.create(title, body, labels)
                 num, url = data["number"], data.get("html_url", "")
         except IssueError as e:
             return f"没开成：{e}"
-        self.fb.mark_issue(it, num, agent=fix)
-        tail = "，已交给云端代理，出了 draft PR 会通知你" if fix else ""
+        self.fb.mark_issue(it, num, agent=fix, local=local)
+        tail = (f"，已交给{'本机修复（Mac 每 10 分钟领一次）' if local else '云端代理'}，出了 draft PR 会通知你" if fix else "")
         log.info("反馈 #%s → issue #%s（%s）", it["id"], num, "派代理" if fix else "只开 issue")
         return f"#{it['id']} → issue #{num}{tail}\n{url}"

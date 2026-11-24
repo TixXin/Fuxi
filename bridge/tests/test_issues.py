@@ -100,6 +100,18 @@ class FlowTest(unittest.TestCase):
         fl.handle("3", fix=True)
         self.assertIn("已经关闭", fl.handle("3 确认", fix=True))
 
+    def test_local(self):
+        f, gh, fl = flow(item())
+        self.assertIn("交给Mac 上的本机修复", fl.handle("3 本地 只在 Mac 上", fix=True))
+        out = fl.handle("3 确认", fix=True)
+        self.assertIn("本机修复", out)
+        body = gh.calls[0][2]
+        self.assertIn("fix-local", body["labels"])
+        self.assertNotIn("claude-fix", body["labels"])
+        self.assertIn("只在 Mac 上", body["body"])
+        self.assertEqual(f.get(3)["agent_where"], "local")
+        self.assertIn("本机修复：", f.detail(3))
+
     def test_errors(self):
         f, gh, fl = flow(item(), token="")
         self.assertIn("还没配置", fl.handle("3", fix=True))

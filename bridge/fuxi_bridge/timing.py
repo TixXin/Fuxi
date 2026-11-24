@@ -37,6 +37,8 @@ class Trace:
         self.bubbles = 0
         self.first_sent: float | None = None
         self.last_sent: float | None = None
+        self.replies: list[str] = []   # 发出的气泡（管理台对话流用）
+        self.reason = ""                # 没回或没回完的原因
 
     def add(self, stage: str, seconds: float) -> None:
         self.s[stage] += max(0.0, seconds)

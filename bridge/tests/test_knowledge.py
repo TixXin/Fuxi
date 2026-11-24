@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+from fuxi_bridge import events
 from fuxi_bridge import knowledge as kn
 from fuxi_bridge import settings
 
@@ -135,6 +136,7 @@ def assist_bridge():
     b.kernel = mock.Mock()
     b.kernel.complete.side_effect = lambda system, text, n: "1" if "贴" in text.split("资料：")[0] else "0"
     b.handoffs = collections.deque(maxlen=50)
+    b.events = events.Events()
     b.send = mock.Mock(return_value=mock.Mock(ok=True))
     return b
 

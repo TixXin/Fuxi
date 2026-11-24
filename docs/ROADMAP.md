@@ -101,7 +101,8 @@
       `/开issue N` 只开不派；已有 issue 改补评论。浮屿仓库 `claude-fix.yml` 跑 Claude Code Action 出 draft PR，
       同步到 `Fixes #N` 的新 PR 就私聊主人。详见 docs/feedback-loop.md。
   - [x] 上线：服务器 `.env` 配了 `FUXI_GITHUB_ISSUE_TOKEN`；浮屿仓库合入工作流（TixXin/Fuyu#1238）、加了 secret，连通性测试 #1239 通过。出 draft PR 那一步等第一条真实反馈验证。
-  - [ ] 可选：Mac 守护进程领 `fix-local` 的 issue，起 `claude -p` 在独立 worktree 修（要在 macOS 上构建/测试的问题）。
+  - [x] Mac 本地修复：`scripts/fix-local.sh`（launchd 每 10 分钟），`/修 N 本地` 打 `fix-local`；连通性测试 #1241 通过。
+  - [x] 没修成 / 超时没结果 / 凭据到期都私聊主人（Fuyu#1240 工作流改为贴评论 + `claude-stuck`）。
 
 - [x] **发版自动发群（S）**：`POST /announce {key, text, image_base64}` 先把内容发到文件传输助手预览，
       主人回 `/发布 编号` 才发群（`/取消`、`/待发`；24 小时过期）；key 幂等，状态存状态卷，重跑不重复预览/发群。

@@ -161,8 +161,12 @@ mindmap
   `anthropics/claude-code-action@v1`（ubuntu，`pnpm check`，Rust 留给 PR 的 Windows CI），推分支后用
   `PR_UPDATER_TOKEN` 开 draft PR（用 `GITHUB_TOKEN` 开的 PR 不触发 CI）。修不了就只提交 `CLAUDE_FIX_NOTES.md` 说明卡在哪。
   需要仓库 secret `CLAUDE_CODE_OAUTH_TOKEN`（`claude setup-token`）。
-- **Mac 本地（可选）**：守护进程轮询带 `fix-local` 标签的 issue，起 T3 Code 或 `claude -p` 会话，
-  在独立 worktree 里修，开 draft PR。用于必须在 macOS 上构建或测试的问题。
+- **Mac 本地**：`scripts/fix-local.sh`（`install` 装成 launchd 任务，每 10 分钟一次；`uninstall` 卸载）。
+  领仓库主人亲手打了 `fix-local` 的 issue（看 issue 事件里打标签的人），先摘标签防重复，在独立克隆
+  `~/.fuxi-fix/Fuyu` 里用 `claude -p` 修（可以跑 `pnpm check` 和 `cargo test`），用本机 gh 推分支、开 draft PR；
+  修不了同样贴评论、打 `claude-stuck`。日志 `~/.fuxi-fix/logs/`。遥控 `/修 3 本地`。
+  launchd 里的 bash 读不了 ~/Desktop，所以 install 会把脚本拷到 `~/.fuxi-fix/`：改了脚本要重新 install。
+  Mac 睡眠时不跑，所以派出 2 小时没结果的提醒会写「Mac 开着吗」。
 - 不做图形界面自动化（模拟点击开会话），太脆弱。
 
 ### 安全护栏
@@ -191,7 +195,7 @@ mindmap
 | F0 | 链接读取改进（第一节）✅ | 无 |
 | F1 | ✅ 收集器 + 反馈库 + 每日 12:00 私聊主人摘要 + 20:00 群小结 | — |
 | F2 | ✅ 同步、查进度、通知主人已上线；群里答进度、回群通知待接 · GitHub 只读同步（缓存放 `/state/fuyu/`：`releases.json`、`issues.json`、`prs.json`、`meta.json`，字段沿用 GitHub API）、查重、bot 答进度、修复后回群通知 | 机房代理；公开仓库可先不用 token（每小时 60 次） |
-| F3 | ✅ `/修 N` 开 issue、云端 Action 出 draft PR、出 PR 通知主人；Mac 本地守护进程（可选，未做） | 写 token、仓库装 Action |
+| F3 | ✅ `/修 N` 开 issue、云端 Action 出 draft PR、出 PR / 没修成通知主人；`/修 N 本地` 交给 Mac | 写 token、仓库装 Action |
 
 ## 七、待补
 

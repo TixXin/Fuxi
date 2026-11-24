@@ -31,6 +31,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlparse
 
+from . import handlers
+
 if TYPE_CHECKING:
     from .app import Bridge
 
@@ -60,18 +62,7 @@ def serve(bridge: "Bridge") -> None:
             self.wfile.write(body)
 
         def _settings_reply(self) -> None:
-            from . import settings as st
-            from .kernel import KernelError
-            items = []
-            for it in st.ITEMS:
-                try:
-                    v = bridge.get_setting(it.key)
-                except KernelError:
-                    v = None
-                items.append({"key": it.key, "label": it.label, "type": it.type, "value": v,
-                              "default": it.default, "desc": it.desc, "choices": it.choices,
-                              "kernel": bool(it.kernel), "min": it.min, "max": it.max})
-            return self._json(200, {"ok": True, "items": items})
+            return self._json(200, {"ok": True, "items": handlers.settings_items(bridge)})
 
         def _auth(self) -> bool:
             got = self.headers.get("Authorization", "")
@@ -90,12 +81,7 @@ def serve(bridge: "Bridge") -> None:
                 raw = self.path
             u = urlparse(raw)
             if u.path == "/healthz":
-                probs = bridge.problems()
-                return self._json(200, {"ok": True, "healthy": not probs, "problems": probs,
-                                        "wechat": bridge.last_send_ok, "halted": bridge.halted,
-                                        "paused": bridge.paused, "open_chat": bridge.sender.open_stats(),
-                                        "latency": bridge.latency.summary(),
-                                        "version": os.environ.get("FUXI_BUILD", "dev")})
+                return self._json(200, {"ok": True, **handlers.health(bridge)})
             if u.path == "/allow":
                 return self._json(200, {"ok": True, "items": [
                     {"chat_id": i, "name": "全部" if i == "*" else bridge.name_of(i)} for i in bridge.allowlist.items]})
@@ -208,20 +194,14 @@ def serve(bridge: "Bridge") -> None:
                 log.warning("白名单经 API 修改：+%d -%d", len(add[0]), len(rm[0]))
                 return self._allow_reply()
             if urlparse(self.path).path == "/settings":
-                from . import settings as st
-                from .kernel import KernelError
                 body = self._body()
                 if body is None:
                     return
-                for k, v in body.items():
-                    if k not in st.BY_KEY:
-                        return self._json(400, {"ok": False, "error": f"没有设置项 {k}"})
-                    try:
-                        bridge.set_setting(k, v)
-                    except (ValueError, KernelError) as e:
-                        return self._json(400, {"ok": False, "error": str(e), "key": k})
-                log.warning("设置经 API 修改：%s", "、".join(body))
-                return self._settings_reply()
+                try:
+                    items = handlers.set_settings(bridge, body)
+                except handlers.HandlerError as e:
+                    return self._json(e.code, {"ok": False, "error": str(e), **e.extra})
+                return self._json(200, {"ok": True, "items": items})
             if urlparse(self.path).path == "/announce":
                 from .announce import AnnounceError
                 body = self._body()
@@ -249,9 +229,7 @@ def serve(bridge: "Bridge") -> None:
                 log.warning("公告 %s：%s", it["key"], "已发预览，等确认" if created else f"已存在（{it['status']}）")
                 return self._json(200, {"ok": True, "created": created, "item": bridge.announcer.public(it)})
             if urlparse(self.path).path == "/resume":
-                was, bridge.halted = bridge.halted, ""
-                log.warning("人工解除熔断（之前：%s）", was or "未熔断")
-                return self._json(200, {"ok": True, "was": was})
+                return self._json(200, {"ok": True, "was": handlers.resume(bridge)})
             if urlparse(self.path).path != "/send":
                 return self._json(404, {"ok": False, "error": "not found"})
             n = int(self.headers.get("Content-Length") or 0)

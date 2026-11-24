@@ -339,7 +339,7 @@ class Feedback:
                 it["fixed_in"], it["status"] = tag, "fixed"
             self._save()
 
-    def mark_issue(self, it: dict, number: int, agent: bool = False) -> None:
+    def mark_issue(self, it: dict, number: int, agent: bool = False, local: bool = False) -> None:
         """/修、/开issue 开出（或对上）issue 后记下；agent=True 表示已打 claude-fix 交给云端代理。"""
         with self._lock:
             it["issue"], it["issue_score"] = number, 1
@@ -347,6 +347,7 @@ class Feedback:
                 it["status"] = "known"
             if agent:   # 重新派（比如补充线索后再 /修）：清掉上一次的结果
                 it["agent_at"] = time.time()
+                it["agent_where"] = "local" if local else "cloud"
                 for k in ("agent_pr", "agent_stuck", "agent_late"):
                     it.pop(k, None)
             self._save()
@@ -418,7 +419,8 @@ class Feedback:
     def _agent_line(self, it: dict) -> str:
         if not it.get("agent_at"):
             return ""
-        head = f"云端代理：{time.strftime('%m-%d %H:%M', time.localtime(it['agent_at']))} 派出，"
+        where = "本机修复" if it.get("agent_where") == "local" else "云端代理"
+        head = f"{where}：{time.strftime('%m-%d %H:%M', time.localtime(it['agent_at']))} 派出，"
         if it.get("agent_pr"):
             pr = it["agent_pr"]
             try:

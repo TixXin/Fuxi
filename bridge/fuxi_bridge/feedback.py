@@ -17,7 +17,8 @@
   items.json   条目 [{id, category, title, detail, platform, status, first_seen, last_seen, count,
                        reporters[{wxid, name}], quotes[], issue, issue_score, chats[]}]
   meta.json    classified_until、next_id、digest_day、group_day、last_error
-状态：new（新）| known（GitHub 上已有 issue）| answered（群里已解答的提问）| ignored（主人 /忽略）
+状态：new（新）| known（GitHub 上已有 issue）| answered（群里已解答的提问）| fixed（已随某个正式版发布，fixed_in）
+     | ignored（主人 /忽略）
 """
 
 from __future__ import annotations
@@ -318,6 +319,26 @@ class Feedback:
             self._save()
             return f"#{iid}「{it['title']}」已忽略，不再出现在摘要和群小结里"
 
+    def fixed_in(self, tag: str) -> list[dict]:
+        """对应 issue 已包含在正式版 tag 里、还没通知过的条目（修复通知用）。"""
+        out = []
+        for it in self.items:
+            if it["status"] == "ignored" or not it.get("issue") or it.get("fixed_in") or not self.fuyu:
+                continue
+            try:
+                s = self.fuyu.status(it["issue"])
+            except Exception:
+                continue
+            if f"包含在 {tag}（" in s:
+                out.append(it)
+        return out
+
+    def mark_fixed(self, items: list[dict], tag: str) -> None:
+        with self._lock:
+            for it in items:
+                it["fixed_in"], it["status"] = tag, "fixed"
+            self._save()
+
     def progress(self, it: dict) -> str:
         """给主人看的进度（带 issue 编号）。"""
         if it.get("issue") and self.fuyu:
@@ -325,13 +346,15 @@ class Feedback:
                 return self.fuyu.status(it["issue"])
             except Exception:
                 pass
-        return {"new": "新问题，GitHub 上还没有对应 issue", "answered": "群里已解答",
+        return {"new": "新问题，GitHub 上还没有对应 issue", "answered": "群里已解答", "fixed": f"已在 {it.get('fixed_in')} 修复",
                 "ignored": "已忽略"}.get(it["status"], it["status"])
 
     def public_state(self, it: dict) -> str:
         """给群里看的处理状态：不带 issue 编号和人名。"""
         if it["status"] == "answered":
             return "已在群里解答"
+        if it["status"] == "fixed" and it.get("fixed_in"):
+            return f"已在 {it['fixed_in']} 修复，更新到最新版即可"
         if it.get("issue") and self.fuyu:
             try:
                 s = self.fuyu.status(it["issue"])
@@ -418,7 +441,7 @@ class Feedback:
             for i in group:
                 n += 1
                 out.append(f"{n}. {i['title']} —— {self.public_state(i)}")
-        out.append("\n谢谢大家！还有遗漏的，直接在群里说就行。")
+        out.append("\n谢谢大家！有问题或想法随时在群里说，@我也行，我 24 小时在线，都会整理给作者。")
         return "\n".join(out)
 
     def due(self, kind: str, at: str, now: float | None = None) -> bool:

@@ -191,6 +191,7 @@ class WiringTest(unittest.TestCase):
                                                  "messages": [1], "answered": False}]}),
                           json.dumps({"matches": [{"id": 1, "issue": 1234}]}))
         b.feedback = fb.Feedback(os.path.join(d, "fb"), complete=model, fuyu=FakeFuyu())
+        b.outreach = mock.Mock()
         self.b, self.c, self.mock = b, control.Control(b), mock
 
     def msg(self, n, text, sender="wxid_a", chat="g@chatroom", ts=None):

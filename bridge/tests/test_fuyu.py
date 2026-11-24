@@ -164,6 +164,7 @@ class WiringTest(unittest.TestCase):
         st.setUp()
         b.fuyu = st.f
         b.send = mock.Mock(return_value=mock.Mock(ok=True))
+        b.outreach = mock.Mock()
         self.b, self.c, self.mock = b, control.Control(b), mock
 
     def test_command(self):

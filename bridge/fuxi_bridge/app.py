@@ -29,7 +29,7 @@ import time
 from dataclasses import dataclass, field
 
 from . import messages, store
-from . import announce, care, control, feedback, fuyu, images, knowledge, settings, timing, voice
+from . import announce, care, control, feedback, fuyu, images, knowledge, outreach, settings, timing, voice
 from .allow import AllowList
 from .kernel import Kernel, KernelError
 from .messages import Message
@@ -145,6 +145,7 @@ class Bridge:
         self.feedback = feedback.Feedback(os.path.join(state, "feedback"),
                                           complete=lambda system, text: self.kernel.complete(system, text, 2500),
                                           fuyu=self.fuyu)
+        self.outreach = outreach.Outreach(self, os.path.join(state, "outreach"))
         self.handoffs: collections.deque[tuple[float, str]] = collections.deque(maxlen=50)
         self.control = control.Control(self)
         self.apply_settings()
@@ -589,6 +590,10 @@ class Bridge:
     def _collect(self, new: list[Message]) -> None:
         """反馈群的每条消息都记下来（不管白名单、静默、有没有 @ bot），整理交给 feedback.py。"""
         for m in new:
+            try:
+                self.outreach.observe(m)
+            except Exception:
+                log.exception("群营业观察消息出错")
             if m.type in ("system", "revoke") or not m.text.strip():
                 continue
             if m.is_self:
@@ -615,6 +620,10 @@ class Bridge:
         if not self.cfg.get("feedback_groups"):
             return
         fb, now = self.feedback, now or time.time()
+        try:
+            self.outreach.tick(now)
+        except Exception:
+            log.exception("群营业定时任务出错")
         digest_due = fb.due("digest", self.cfg.get("digest_time"), now)
         group_due = fb.due("group", self.cfg.get("group_summary_time"), now)
         if digest_due or group_due or now - float(fb.meta.get("classified_at") or 0) >= feedback.CLASSIFY_EVERY:
@@ -647,12 +656,16 @@ class Bridge:
                     continue
                 job = self.send(SendJob(chat=chat, text=text, source="control"))
                 if job.ok:
+                    self.outreach.bot_posted(chat, now)
                     log.info("群小结已发到 %s", self.name_of(chat))
                 else:
                     log.warning("群小结没发到 %s：%s", self.name_of(chat), job.error)
 
     def _fuyu_events(self, events: list[dict]) -> None:
-        """浮屿仓库同步发现变化：按「浮屿动态」设置私聊主人（文件传输助手）。"""
+        """浮屿仓库同步发现变化：发正式版时通知群里的反馈人（见 outreach.py）；按「浮屿动态」设置私聊主人（文件传输助手）。"""
+        for e in events:
+            if e.get("type") == "new_release" and not e.get("prerelease") and self.cfg.get("outreach"):
+                threading.Thread(target=self.outreach.on_release, args=(e["tag"],), name="fix-notify", daemon=True).start()
         mode = self.cfg.get("fuyu_notify")
         if mode == "off":
             return

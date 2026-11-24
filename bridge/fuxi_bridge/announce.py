@@ -89,7 +89,8 @@ class Announcer:
             return sorted((i for i in self.items.values() if i["status"] == "pending"), key=lambda i: i["created"])
 
     # ---- 新建：存起来、发预览 ----
-    def create(self, key: str, chat: str, text: str | None, image: bytes | None, image_ext: str = ".png") -> tuple[dict, bool]:
+    def create(self, key: str, chat: str, text: str | None, image: bytes | None, image_ext: str = ".png",
+               at: str = "") -> tuple[dict, bool]:
         """返回 (记录, 是否新建)。同 key 已存在时原样返回，不再预览。"""
         key = (key or "").strip()
         if not key or len(key) > 128:
@@ -109,7 +110,8 @@ class Announcer:
                 with open(img_path, "wb") as f:
                     f.write(image)
             it = {"key": key, "code": code, "chat_id": chat, "to": self.b.name_of(chat), "text": text or "",
-                  "image": img_path, "status": "pending", "created": time.time(), "updated": time.time()}
+                  "image": img_path, "status": "pending", "created": time.time(), "updated": time.time(),
+                  "at": at}
             self.items[key] = it
             self._save()
         try:
@@ -127,7 +129,8 @@ class Announcer:
         if it.get("image"):
             jobs.append(SendJob(chat="filehelper", image=it["image"], source="control"))
         if it.get("text"):
-            jobs.append(SendJob(chat="filehelper", text=it["text"], source="control"))
+            prefix = f"@{it['at']} " if it.get("at") else ""   # 预览里用文字表示，真发时是真 @
+            jobs.append(SendJob(chat="filehelper", text=prefix + it["text"], source="control"))
         for j in jobs:
             r = self.b.send(j)
             if not r.ok:
@@ -162,7 +165,7 @@ class Announcer:
         if it.get("image"):
             results.append(self.b.send(SendJob(chat=chat, image=it["image"], source="api")))
         if it.get("text") and all(r.ok for r in results):
-            results.append(self.b.send(SendJob(chat=chat, text=it["text"], source="api")))
+            results.append(self.b.send(SendJob(chat=chat, text=it["text"], at=it.get("at") or "", source="api")))
         err = "; ".join(r.error for r in results if r.error)
         with self._lock:
             if all(r.ok for r in results):

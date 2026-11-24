@@ -18,6 +18,8 @@
   /反馈              最近 7 天整理出的群反馈；/反馈 3 看详情和原话；/反馈 整理 立即整理；
                      /反馈 摘要 预览给主人的摘要；/反馈 小结 预览今晚的群小结（只预览，不发）
   /忽略 编号          这条反馈不再出现在摘要和群小结里
+  /营业              反馈群营业状态（冷场多久、今天说过没、待欢迎）；/营业 试写 生成一条冷场发言看看（不发）；
+                     /营业 欢迎 看欢迎语；/营业 修复 v0.3.14 预览这个版本的修复通知（不发）
   /浮屿              浮屿版本、issue 统计和最近动态；/浮屿 123 查进度；/浮屿 搜 问题 找相关 issue；/浮屿 同步
   /设置              查看全部设置；/设置 看图 看说明；/设置 看图 只看私聊 修改（立即生效）
 """
@@ -285,6 +287,27 @@ class Control:
                 else "还没设置反馈群（/设置 反馈群 群名）\n")
         return head + b.feedback.listing()
 
+    def outreach(self, arg: str) -> str:
+        b = self.b
+        cmd, _, rest = arg.strip().partition(" ")
+        if cmd == "试写":
+            return "冷场时会发类似这样的一条：\n" + b.outreach.idle_text()
+        if cmd == "欢迎":
+            text, at = b.outreach.welcome_text("", [{"wxid": "", "name": "新朋友"}])
+            return f"@{at} {text}"
+        if cmd == "修复":
+            tag = rest.strip()
+            if not tag:
+                return "用法：/营业 修复 v0.3.14"
+            notes = b.outreach.fix_notes(tag)
+            if not notes:
+                return f"{tag} 没有对应的群反馈（或都已通知过）。"
+            return "\n\n".join(f"→ {b.name_of(c)}：{'@' + at + ' ' if at else ''}{t}" for c, t, at, _ in notes)
+        if not b.cfg.get("outreach"):
+            return "群营业已关闭（/设置 群营业 开）"
+        return (f"群营业：{b.outreach.brief()}\n营业时段 {b.cfg.get('open_hours')}，冷场 {b.cfg.get('idle_hours')} 小时，"
+                f"修复通知{b.cfg.get('fix_notify') and {'preview': '先预览', 'direct': '直接发', 'off': '关闭'}[b.cfg.get('fix_notify')]}")
+
     def ignore(self, arg: str) -> str:
         n = arg.strip().lstrip("#")
         if not n.isdigit():
@@ -384,4 +407,5 @@ COMMANDS = {
     "/浮屿": "fuyu",
     "/反馈": "feedback",
     "/忽略": "ignore",
+    "/营业": "outreach",
 }

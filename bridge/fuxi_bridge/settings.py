@@ -60,6 +60,11 @@ ITEMS: list[Item] = [
          "（群名或 chat_id，多个用逗号；空 = 不收集）"),
     Item("digest_time", "反馈摘要时间", "text", "12:00", "每天几点私聊主人发反馈摘要（过去 24 小时）；空 = 不发"),
     Item("group_summary_time", "群小结时间", "text", "20:00", "每天几点在反馈群发当天的反馈小结（不带人名，没有反馈不发）；空 = 不发"),
+    Item("outreach", "群营业", "bool", True, "在反馈群里：新人进群欢迎、冷场时每天说一句、修好后 @ 反馈人"),
+    Item("idle_hours", "冷场时长", "int", 2, "反馈群多少小时没人说话算冷场（每天最多说一次）", min=1, max=12),
+    Item("open_hours", "营业时段", "text", "10:00-21:30", "进群欢迎和冷场发言只在这段时间里发，如 10:00-21:30"),
+    Item("fix_notify", "修复通知", "choice", "preview", "浮屿发正式版时 @ 当初反馈这些问题的人",
+         {"preview": "先预览", "direct": "直接发", "off": "关闭"}),
     Item("fuyu_sync", "浮屿同步", "bool", True, "每 30 分钟同步浮屿仓库的版本、issue、PR 到 /state/fuyu（仓库同「资料仓库」），"
          "用来查进度、反馈查重"),
     Item("fuyu_notify", "浮屿动态", "choice", "release", "同步发现变化时私聊主人（发到文件传输助手）",
@@ -125,8 +130,8 @@ def parse(item: Item, raw) -> object:
         return ""
     if item.key in ("digest_time", "group_summary_time") and not re.fullmatch(r"([01]?\d|2[0-3]):[0-5]\d", s):
         raise ValueError(f"{item.label} 格式：12:00")
-    if item.key == "quiet" and not _QUIET.match(s):
-        raise ValueError("静默时段格式：00:30-07:30")
+    if item.key in ("quiet", "open_hours") and not _QUIET.match(s):
+        raise ValueError(f"{item.label} 格式：00:30-07:30")
     return s
 
 

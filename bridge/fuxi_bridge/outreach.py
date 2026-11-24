@@ -255,8 +255,9 @@ class Outreach:
             out["_tip_title"] = c.title
         week = [i for i in self.b.feedback.items if now - i["last_seen"] < 7 * 86400 and i["status"] != "ignored"]
         fixed = [i for i in week if i.get("fixed_in") or "包含在" in (self.b.feedback.progress(i) if i.get("issue") else "")]
-        out["invite"] = (f"最近 7 天群里整理了 {len(week)} 条反馈，其中 {len(fixed)} 条已经修好发版。" if week
-                         else "最近群里还没有人提反馈。")
+        # 没有反馈时不提数字（「没人提反馈」读起来像在抱怨），只邀请大家聊聊用得怎么样
+        out["invite"] = (f"最近 7 天群里整理了 {len(week)} 条反馈，其中 {len(fixed)} 条已经修好发版。谢谢大家，欢迎继续提。"
+                         if fixed else "邀请大家聊聊最近用浮屿的感受：哪里好用、哪里别扭、还想要什么功能。")
         return out
 
     def _tip_chunks(self) -> list:

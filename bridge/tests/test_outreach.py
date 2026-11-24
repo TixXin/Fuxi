@@ -137,7 +137,7 @@ class IdleTest(unittest.TestCase):
         mats = b.outreach._materials(DAY + 10 * 3600)
         self.assertIn("v0.3.14", mats["fixes"])
         self.assertIn("剪贴板", mats["tip"], "只拿 README / docs/features 当小技巧")
-        self.assertIn("最近群里还没有人提反馈", mats["invite"])
+        self.assertIn("聊聊最近用浮屿的感受", mats["invite"])
         b.kernel.complete.side_effect = RuntimeError("模型挂了")
         self.assertEqual(b.outreach.idle_text(DAY), ot.IDLE_FALLBACK)
 

@@ -260,6 +260,19 @@ class MessageReader:
         finally:
             con.close()
 
+    def member_name(self, room: str, wxid: str) -> str:
+        """群成员在群里显示的名字：群昵称，没设就是微信昵称（@ 弹窗按这个过滤）。"""
+        con = self.cache.connect("contact/contact.db")
+        try:
+            r = con.execute("SELECT ext_buffer FROM chat_room WHERE username=?", (room,)).fetchone()
+            for member in _room_members(r["ext_buffer"] if r else b""):
+                if member.get(1) == wxid and member.get(2):
+                    return member[2]
+            r = con.execute("SELECT nick_name FROM contact WHERE username=?", (wxid,)).fetchone()
+            return (r and r["nick_name"]) or ""
+        finally:
+            con.close()
+
     # ---- 联系人 / 群 ----
     def contacts(self) -> list[dict]:
         con = self.cache.connect("contact/contact.db")
@@ -300,6 +313,51 @@ class MessageReader:
 
 
 _AT_LIST = re.compile(r"<atuserlist>\s*(?:<!\[CDATA\[)?([^<\]]*)")
+
+
+def _varint(b: bytes, i: int) -> tuple[int, int]:
+    r = shift = 0
+    while True:
+        c = b[i]
+        i += 1
+        r |= (c & 0x7F) << shift
+        shift += 7
+        if c < 0x80:
+            return r, i
+
+
+def _pb_fields(b: bytes):
+    """极简 protobuf 解码：逐个返回 (字段号, 线型, 值)。"""
+    i = 0
+    while i < len(b):
+        key, i = _varint(b, i)
+        f, t = key >> 3, key & 7
+        if t == 0:
+            v, i = _varint(b, i)
+        elif t == 2:
+            n, i = _varint(b, i)
+            v, i = b[i:i + n], i + n
+        elif t == 5:
+            v, i = b[i:i + 4], i + 4
+        elif t == 1:
+            v, i = b[i:i + 8], i + 8
+        else:
+            return
+        yield f, t, v
+
+
+def _room_members(buf: bytes) -> list[dict]:
+    """chat_room.ext_buffer → [{1: wxid, 2: 群昵称}, ...]（字段 1 重复，每个是一个成员）。"""
+    out = []
+    try:
+        for f, t, v in _pb_fields(buf or b""):
+            if f == 1 and t == 2:
+                m = {sf: sv.decode("utf-8", "replace") for sf, st, sv in _pb_fields(v) if st == 2 and sf in (1, 2)}
+                if m.get(1):
+                    out.append(m)
+    except IndexError:
+        pass
+    return out
 
 
 def at_users(source: str) -> list[str]:

@@ -67,6 +67,7 @@ class SendJob:
     source: str = "bot"     # bot（自动回复，受限速）| reminder | api
     image: str | None = None
     sticker: str | None = None  # 表情包文件（按文件粘贴，GIF 保持动图）
+    at: str = ""                # 群里真 @ 的对象（成员在群里的显示名）；用不上真 @ 时退回文字「@名字」
     verify: bool = True
     done: threading.Event = field(default_factory=threading.Event)
     ok: bool = False
@@ -223,7 +224,10 @@ class Bridge:
             job.t_start = time.monotonic()
             self.sender.last_open = 0.0
             name = self.name_of(job.chat)
-            if job.text is not None:
+            if job.text is not None and job.at:
+                self.sent_hashes.append(_h(job.text))
+                self.sender.send_text_at(name, job.at, job.text)
+            elif job.text is not None:
                 self.sent_hashes.append(_h(job.text))
                 self.sender.send_text(name, job.text)
             if job.image:
@@ -265,6 +269,8 @@ class Bridge:
                         return True
                     if job.text is not None and _squash(text) == want:
                         return True
+                    if job.at and _squash(text).startswith("@") and _squash(text).endswith(want):
+                        return True   # 真 @ 存库是「@群昵称\u2005正文」
             except Exception:
                 log.debug("核对读取失败", exc_info=True)
             time.sleep(0.5)
@@ -444,7 +450,12 @@ class Bridge:
             if not self.rate_ok(chat):
                 log.warning("超过发送频率上限，丢弃 %s 的剩余 %d 条回复", self.name_of(chat), len(bubbles) - i)
                 return False
-            text = f"@{mention} {b}" if (i == 0 and mention and chat.endswith("@chatroom")) else b
+            at, text = "", b
+            if i == 0 and mention and chat.endswith("@chatroom"):
+                at = self._mention_name(chat, batch, mention)
+                head = text.lstrip()
+                if head.startswith("@" + mention):   # 模型自己写了「@名字」开头：去掉，换成真 @
+                    text = head[len(mention) + 1:].lstrip(" \u2005：:，,") or text
             delay = self.first_delay(text, tr.s["kernel"]) if i == 0 else self.typing_delay(text)
             time.sleep(delay)
             tr.add("typing", delay)
@@ -452,7 +463,7 @@ class Bridge:
                 log.info("%s 在生成回复期间撤回了消息，放弃这次回复", self.name_of(chat))
                 return False
             self.sent_times.append((time.time(), chat))
-            job = self.send(SendJob(chat=chat, text=text))
+            job = self.send(SendJob(chat=chat, text=text, at=at))
             if not job.ok:
                 return False
             if job.t_sent:
@@ -462,6 +473,23 @@ class Bridge:
                 tr.add("verify", job.t_done - job.t_sent)
                 tr.bubble_sent(time.time() - (time.monotonic() - job.t_sent))
         return True
+
+    def _mention_name(self, chat: str, batch: list[Message], mention: str) -> str:
+        """内核给的 @ 对象（名字）→ 该成员在群里的显示名（@ 弹窗按它过滤）。
+        认不出是这批消息里的谁，就原样用内核给的名字（多半会退回文字 @）。"""
+        for m in reversed(batch):
+            if not m.sender or m.sender == self.self_wxid:
+                continue
+            try:
+                shown = self.reader.member_name(chat, m.sender)
+            except Exception:
+                log.debug("读群昵称失败", exc_info=True)
+                shown = ""
+            names = [n for n in (shown, self.name_of(m.sender)) if n]
+            # 内核取 @ 名字时遇空格截断（「tixxin - 建议…」→「tixxin」），所以前缀也算
+            if mention == m.sender or any(n == mention or n.startswith(mention) for n in names):
+                return shown or mention
+        return mention
 
     def _sticker_file(self, path: str) -> str:
         """内核容器里的路径（/app/data/...）→ 桥接这边只读挂载的同一个文件。"""

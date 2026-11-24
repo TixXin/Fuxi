@@ -350,6 +350,81 @@ class Sender:
         except SendError as e:
             raise SendError(f"粘贴前出错（未发出）：{e}，放弃发送") from e
 
+    # ---- 真 @ ----
+    def _insert_mention(self, name: str) -> bool:
+        """在（已聚焦、已清空的）输入框里打「@名字」，从成员弹窗里点选，成为真正的 @。
+
+        只在弹窗过滤到恰好一行、且 OCR 出的名字与目标一致时才点；用点击不用回车，
+        弹窗万一已关也不会把半句话发出去。返回 False 时调用方清空输入框改用文字 @。
+        """
+        # 过滤词只取第一个空格 / @ 之前：空格会关掉成员框，@ 会再弹一个。完整名字靠 OCR 核对
+        query = re.split(r"[\s@]", name.strip(), maxsplit=1)[0]
+        if len(_norm(query)) < 1:
+            return False
+        w = self.window()
+        before = self._capture(w).bgr
+        self._run("xdotool", "type", "--delay", "60", "@")
+        time.sleep(0.35)
+        self._clip_text(query)
+        self._run("xdotool", "key", "--clearmodifiers", "ctrl+v")
+        box, prev = None, None
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:     # 等弹窗过滤稳定
+            time.sleep(0.3)
+            after = self._capture(w).bgr
+            cur = popup_box(before, after)
+            if cur is not None and cur == prev:
+                box = cur
+                break
+            prev = cur
+        if box is None:
+            log.info("真 @：没等到唯一的成员弹窗（%s），改用文字 @", name)
+            return False
+        x0, y0, x1, y1 = box
+        if not (40 <= y1 - y0 <= 110):
+            log.info("真 @：弹窗里不止一个候选（%s），改用文字 @", name)
+            return False
+        res, _ = _ocr()(np.ascontiguousarray(after[y0:y1, x0 + 60:x1]), use_cls=False)
+        text = " ".join(r[1] for r in (res or []))
+        if not title_matches(name, text):
+            log.info("真 @：弹窗里是「%s」，不是「%s」，改用文字 @", text, name)
+            return False
+        self._run("xdotool", "mousemove", "--window", w, str((x0 + x1) // 2), str((y0 + y1) // 2), "click", "1")
+        time.sleep(0.35)
+        # 点完核对输入框：应当恰好是「@完整名字」，残留了过滤词等就算失败
+        img = self._capture(w).bgr
+        hh, ww = img.shape[:2]
+        res, _ = _ocr()(np.ascontiguousarray(img[hh - 275:hh - 190, 630:ww - 30]), use_cls=False)
+        got = "".join(r[1] for r in (res or []))
+        if _norm(got) != _norm(name):
+            log.info("真 @：点选后输入框是「%s」，不对，改用文字 @", got)
+            return False
+        return True
+
+    def send_text_at(self, chat: str, name: str, text: str) -> bool:
+        """群里 @name 并发送 text。返回是否用上了真 @（否则发的是「@name text」纯文字）。"""
+        with self._lock, self._fresh_on_error():
+            self._open_or_abort(chat)
+            try:
+                self._focus_input()
+                self._run("xdotool", "key", "--clearmodifiers", "--delay", "40", "ctrl+a", "BackSpace")
+                real = self._insert_mention(name)
+                if real:
+                    self._clip_text(text)
+                    self._run("xdotool", "key", "--clearmodifiers", "ctrl+v")   # 不能全选，会盖掉 @
+                else:
+                    for _ in range(2):   # 第一下可能只是关掉弹窗（不能按 Esc：会把微信藏到托盘）
+                        self._run("xdotool", "key", "--clearmodifiers", "--delay", "40", "ctrl+a", "BackSpace")
+                        time.sleep(0.15)
+                    self._clip_text(f"@{name} {text}")
+                    self._run("xdotool", "key", "--clearmodifiers", "--delay", "40", "ctrl+a", "ctrl+v")
+            except SendError as e:
+                raise SendError(f"粘贴前出错（未发出）：{e}，放弃发送") from e
+            time.sleep(self.delay)
+            self._key("Return")
+            log.info("已发送文本到 %s（%s@%s，%d 字）", chat, "" if real else "文字", name, len(text))
+            return real
+
     def send_text(self, chat: str, text: str) -> None:
         with self._lock, self._fresh_on_error():
             self._open_or_abort(chat)
@@ -442,6 +517,28 @@ def title_crop(img, gap: int = 60, pad: int = 8):
     return np.ascontiguousarray(img[max(0, y0 - pad):min(h, y1 + pad), max(0, x0 - pad):min(w, x1 + pad)])
 
 
+def popup_box(before, after, min_px: int = 4):
+    """@ 成员弹窗的位置 (x0, y0, x1, y1)：比较打 @ 前后的截图，取输入框上方新出现的一块。
+
+    弹窗贴着输入框上沿（输入区约 y ≥ h-280），宽 250~600 像素；变化区域不像弹窗
+    （比如恰好来了新消息、整块聊天区在动）就返回 None，调用方会退回文字 @。
+    """
+    if before.shape != after.shape:
+        return None
+    h = before.shape[0]
+    top = h - 282
+    diff = (np.abs(before[70:top].astype(np.int16) - after[70:top].astype(np.int16)).max(axis=2) > 24)
+    rows = np.where(diff.sum(axis=1) >= min_px)[0]
+    cols = np.where(diff.sum(axis=0) >= min_px)[0]
+    if not len(rows) or not len(cols):
+        return None
+    y0, y1 = int(rows[0]) + 70, int(rows[-1]) + 71
+    x0, x1 = int(cols[0]), int(cols[-1]) + 1
+    if top - y1 > 40 or not (250 <= x1 - x0 <= 600) or y1 - y0 > 700:
+        return None
+    return x0, y0, x1, y1
+
+
 def section_name(ocr: str, names: tuple[str, ...]) -> str:
     """OCR 出的分区标题 → 分区名。左侧图标常被识别成 1~2 个杂字（如「群聊」→「君群聊」），
     所以允许分区名前后共有至多 3 个杂字；更长的文字是结果行（如网络联想「xx群聊」），不算。
@@ -463,11 +560,11 @@ def title_matches(target: str, ocr: str) -> bool:
     """OCR 出的聊天标题是否就是目标会话。
 
     标题右侧图标会被识别成噪声，先按 3 个以上空格切掉；群标题带「(成员数)」，去掉；
-    只比较汉字/字母/数字（表情符号 OCR 不出来）。过长被截断（以 … 结尾）时按前缀比较。
+    只比较汉字/字母/数字（表情符号 OCR 不出来）。过长被截断（以 … / ... / .. 结尾）时按前缀比较。
     宁可误拒（不发），不可误放。
     """
     head = re.split(r"\s{3,}", ocr.strip())[0] if ocr.strip() else ""
-    truncated = head.rstrip().endswith(("…", "..."))
+    truncated = head.rstrip().endswith(("…", ".."))   # OCR 常把「…」读成 ... 或 ..
     head = _MEMBER_COUNT.sub("", head)
     t, h = _norm(target), _norm(head)
     if not t or not h:

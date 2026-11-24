@@ -108,6 +108,8 @@ class TitleTest(unittest.TestCase):
             ("小明", "小", False),
             ("浮屿", "浮屿用户交流群(23)", False),
             ("浮屿用户交流群", "浮屿用户交流…", True),
+            ("tixxin - 建议反馈可以@我", "tixxin - 建议反馈..", True),
+            ("tixxin - 建议反馈可以@我", "tixxin - 建议反馈", False),
             ("A🔥群", "A群", True),
             ("", "x", False),
             ("小明", "", False),

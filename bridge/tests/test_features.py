@@ -361,6 +361,68 @@ class StickerTest(unittest.TestCase):
         self.assertEqual(messages.emoji_url('<msg><emoji md5="a" len="9"/></msg>'), "")
 
 
+def _pb(field: int, data: bytes) -> bytes:
+    assert len(data) < 128
+    return bytes([(field << 3) | 2, len(data)]) + data
+
+
+class MentionTest(unittest.TestCase):
+    def test_room_members(self):
+        buf = (_pb(1, _pb(1, b"wxid_a") + b"\x18\x01")
+               + _pb(1, _pb(1, b"wxid_b") + _pb(2, "小红在此".encode()) + b"\x18\x11"))
+        self.assertEqual(messages._room_members(buf), [{1: "wxid_a"}, {1: "wxid_b", 2: "小红在此"}])
+        self.assertEqual(messages._room_members(b"\x0a\x50abc"), [])   # 截断的数据不炸
+
+    def test_popup_box(self):
+        from fuxi_bridge.sender import popup_box
+        h, w = 1280, 1712
+        before = np.full((h, w, 3), 240, np.uint8)
+        after = before.copy()
+        after[925:998, 563:897] = 200          # 贴着输入框上沿的一行弹窗
+        self.assertEqual(popup_box(before, after), (563, 925, 897, 998))
+        after2 = before.copy()
+        after2[300:500, 700:1600] = 100        # 聊天区来了新消息：太宽、离输入框太远
+        self.assertIsNone(popup_box(before, after2))
+        self.assertIsNone(popup_box(before, before.copy()))
+
+    def bridge(self):
+        b = bare_bridge()
+        b.reader.member_name = lambda room, wxid: {"wxid_a": "小明同学"}.get(wxid, "")
+        return b
+
+    def test_mention_name_resolution(self):
+        b = self.bridge()
+        batch = [msg(sender="wxid_a", text="你好")]
+        self.assertEqual(b._mention_name("g@chatroom", batch, "小明"), "小明同学")     # 内核用的是备注名
+        self.assertEqual(b._mention_name("g@chatroom", batch, "小明同"), "小明同学")   # 被空格截断的前缀
+        self.assertEqual(b._mention_name("g@chatroom", batch, "路人"), "路人")
+
+    @mock.patch("fuxi_bridge.app.time.sleep")
+    def test_dispatch_strips_text_at_and_uses_real_at(self, _sleep):
+        b = self.bridge()
+        b.chat_locks = collections.defaultdict(__import__("threading").Lock)
+        b.paused = False
+        b.reader.revoked = mock.Mock(return_value=set())
+        b.kernel = mock.Mock()
+        b.kernel.webhook.return_value = {"action": "reply", "bubbles": ["@小明 别闹了", "真的"], "mention": "小明"}
+        b.kernel.send_permission.return_value = (True, "")
+        b.rate_ok = lambda chat: True
+        b.first_delay = lambda t, s: 0
+        b.typing_delay = lambda t: 0
+        b.sent_times = collections.deque()
+        b.send = mock.Mock(return_value=mock.Mock(ok=True, t_sent=None))
+        b._dispatch_traced("g@chatroom", [msg(sender="wxid_a", text="哈哈")], timing.Trace(0, 0))
+        first, second = (c[0][0] for c in b.send.call_args_list)
+        self.assertEqual((first.text, first.at), ("别闹了", "小明同学"))
+        self.assertEqual((second.text, second.at), ("真的", ""))
+
+    def test_verify_accepts_real_at(self):
+        b = bare_bridge()
+        b.reader.self_sent_since = lambda chat, t0: [("text", "@小明同学\u2005别闹了")]
+        job = __import__("fuxi_bridge.app", fromlist=["SendJob"]).SendJob(chat="g@chatroom", text="别闹了", at="小明同学")
+        self.assertTrue(b._verify(job, 0, wait=0.5))
+
+
 class SpeedTest(unittest.TestCase):
     def test_section_name_tolerates_icon_noise(self):
         names = Sender.SECTIONS_ALL

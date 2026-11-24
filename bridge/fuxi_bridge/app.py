@@ -29,7 +29,7 @@ import time
 from dataclasses import dataclass, field
 
 from . import messages, store
-from . import announce, care, control, feedback, fuyu, images, knowledge, outreach, settings, timing, voice
+from . import announce, care, control, feedback, fuyu, images, issues, knowledge, outreach, settings, timing, voice
 from .allow import AllowList
 from .kernel import Kernel, KernelError
 from .messages import Message
@@ -146,6 +146,7 @@ class Bridge:
                                           complete=lambda system, text: self.kernel.complete(system, text, 2500),
                                           fuyu=self.fuyu)
         self.outreach = outreach.Outreach(self, os.path.join(state, "outreach"))
+        self.fixflow = issues.FixFlow(self.feedback, issues.Issues(lambda: self.cfg.get("knowledge_repo") or self.fuyu.repo))
         self.handoffs: collections.deque[tuple[float, str]] = collections.deque(maxlen=50)
         self.control = control.Control(self)
         self.apply_settings()
@@ -686,17 +687,23 @@ class Bridge:
         for e in events:
             if e.get("type") == "new_release" and not e.get("prerelease") and self.cfg.get("outreach"):
                 threading.Thread(target=self.outreach.on_release, args=(e["tag"],), name="fix-notify", daemon=True).start()
+        texts = []
+        for e in events:   # /修 派给代理的 issue 出了 PR：不管「浮屿动态」怎么设都告诉主人
+            if e.get("type") == "pr_opened":
+                for it in self.feedback.agent_items(e.get("refs") or []):
+                    texts.append(f"【代理出 PR 了】反馈 #{it['id']}「{it['title']}」→ issue #{it['issue']}\n"
+                                 f"PR #{e['number']}：{e['title']}\n{e['url']}\n看过没问题就在 GitHub 上转正式并合并。")
         mode = self.cfg.get("fuyu_notify")
-        if mode == "off":
-            return
         if mode == "release":
             events = [e for e in events if e.get("type") == "new_release"]
-        if not events:
+        if events and mode != "off":
+            lines = [fuyu.render_event(e) for e in events[:12]]
+            if len(events) > 12:
+                lines.append(f"……还有 {len(events) - 12} 条（/浮屿 看最近动态）")
+            texts.append("【浮屿动态】\n" + "\n".join("- " + x for x in lines))
+        if not texts:
             return
-        lines = [fuyu.render_event(e) for e in events[:12]]
-        if len(events) > 12:
-            lines.append(f"……还有 {len(events) - 12} 条（/浮屿 看最近动态）")
-        text = "【浮屿动态】\n" + "\n".join("- " + x for x in lines)
+        text = "\n\n".join(texts)
 
         def go():   # 同步线程还拿着锁，发送可能要等几十秒，放到别的线程里
             job = self.send(SendJob(chat="filehelper", text=text, source="control"))

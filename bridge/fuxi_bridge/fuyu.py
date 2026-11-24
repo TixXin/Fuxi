@@ -12,7 +12,7 @@
                    comments, body}]，body 截到 2000 字
   prs.json       同上，另有 merged_at
   meta.json      repo、synced_at、releases_etag、since、error
-  events.json    最近 200 条变化：new_release / issue_opened / issue_closed / pr_merged（第一次全量同步不算变化）
+  events.json    最近 200 条变化：new_release / issue_opened / issue_closed / pr_opened / pr_merged（第一次全量同步不算变化）
 
 「修好了没」：PR 标题或正文里写了 fixes/closes/修复/关闭 #N，或带着 issue 标题里的编号（如 [B93]），
 且已合并，就算修了；包含在合并之后发布的第一个版本里。
@@ -90,7 +90,7 @@ class Fuyu:
     def __init__(self, root: str, repo: str = "TixXin/Fuyu", token: str | None = None, http=None):
         self.root = root
         self.repo = repo
-        self.token = token if token is not None else os.environ.get("FUXI_GITHUB_TOKEN", "")
+        self.token = token if token is not None else (os.environ.get("FUXI_GITHUB_TOKEN") or os.environ.get("FUXI_GITHUB_ISSUE_TOKEN", ""))
         self.http = http or self._http
         os.makedirs(root, mode=0o700, exist_ok=True)
         self._lock = threading.Lock()
@@ -241,6 +241,9 @@ class Fuyu:
         if is_pr:
             if it.get("merged_at") and not (prev or {}).get("merged_at"):
                 return [{"type": "pr_merged", **base, "at": it["merged_at"]}]
+            if prev is None and it["state"] == "open":   # 新开的 PR（含 draft）；refs = 正文里关闭关键字指向的 issue
+                refs = sorted({int(n) for n in _CLOSE.findall(f"{it.get('title') or ''}\n{it.get('body') or ''}")})
+                return [{"type": "pr_opened", **base, "refs": refs, "user": it.get("user", ""), "at": it["created_at"]}]
             return []
         if prev is None:
             return [{"type": "issue_opened", **base, "at": it["created_at"]}]
@@ -371,6 +374,8 @@ def render_event(e: dict) -> str:
     t = e.get("type")
     if t == "new_release":
         return f"发布了{'测试版' if e.get('prerelease') else '正式版'} {e['tag']}"
+    if t == "pr_opened":
+        return f"新 PR #{e['number']}：{e['title']}"
     if t == "pr_merged":
         return f"合并 PR #{e['number']}：{e['title']}"
     if t == "issue_closed":

@@ -45,6 +45,7 @@ services:
       FUXI_KERNEL_TOKEN: ${FUXI_KERNEL_TOKEN}
       FUXI_API_TOKEN: ${FUXI_API_TOKEN:-}
       FUXI_API_PORT: "8790"
+      FUXI_GITHUB_ISSUE_TOKEN: ${FUXI_GITHUB_ISSUE_TOKEN:-}   # /修 开 issue 用（只授权浮屿仓库 Issues 读写）
       DISPLAY: ":1"
     volumes:
       - ${WX_CONFIG_DIR:?请在 .env 设置 WX_CONFIG_DIR}:/wxconfig:ro   # 微信数据，只读

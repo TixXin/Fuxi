@@ -274,7 +274,7 @@ class Knowledge:
     def _get(self, url: str, raw: bool = False, timeout: float = 30) -> bytes:
         accept = "application/vnd.github.raw" if raw else "application/vnd.github+json"
         headers = {"User-Agent": "fuxi-bridge", "Accept": accept, "X-GitHub-Api-Version": "2022-11-28"}
-        token = os.environ.get("FUXI_GITHUB_TOKEN", "")
+        token = (os.environ.get("FUXI_GITHUB_TOKEN") or os.environ.get("FUXI_GITHUB_ISSUE_TOKEN", ""))
         if token:
             headers["Authorization"] = "Bearer " + token
         req = urllib.request.Request(url, headers=headers)

@@ -18,6 +18,8 @@
   /反馈              最近 7 天整理出的群反馈；/反馈 3 看详情和原话；/反馈 整理 立即整理；
                      /反馈 摘要 预览给主人的摘要；/反馈 小结 预览今晚的群小结（只预览，不发）
   /忽略 编号          这条反馈不再出现在摘要和群小结里
+  /修 编号 [补充]      预览要在浮屿仓库开的 issue（已脱敏）；/修 3 确认 开出并交给云端代理修，出 draft PR 后通知你
+  /开issue 编号 [补充] 同上，但只开 issue 不派代理；反馈已对上现有 issue 时改为补评论（/修 还会打 claude-fix）
   /营业              反馈群营业状态（冷场多久、今天说过没、待欢迎）；/营业 试写 生成一条冷场发言看看（不发）；
                      /营业 欢迎 看欢迎语；/营业 修复 v0.3.14 预览这个版本的修复通知（不发）
   /浮屿              浮屿版本、issue 统计和最近动态；/浮屿 123 查进度；/浮屿 搜 问题 找相关 issue；/浮屿 同步
@@ -310,6 +312,12 @@ class Control:
         return (f"群营业：{b.outreach.brief()}\n营业时段 {b.cfg.get('open_hours')}，冷场 {b.cfg.get('idle_hours')} 小时，"
                 f"修复通知{b.cfg.get('fix_notify') and {'preview': '先预览', 'direct': '直接发', 'off': '关闭'}[b.cfg.get('fix_notify')]}")
 
+    def fix(self, arg: str) -> str:
+        return self.b.fixflow.handle(arg, fix=True)
+
+    def open_issue(self, arg: str) -> str:
+        return self.b.fixflow.handle(arg, fix=False)
+
     def ignore(self, arg: str) -> str:
         n = arg.strip().lstrip("#")
         if not n.isdigit():
@@ -409,5 +417,7 @@ COMMANDS = {
     "/浮屿": "fuyu",
     "/反馈": "feedback",
     "/忽略": "ignore",
+    "/修": "fix",
+    "/开issue": "open_issue",
     "/营业": "outreach",
 }

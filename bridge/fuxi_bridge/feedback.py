@@ -339,6 +339,20 @@ class Feedback:
                 it["fixed_in"], it["status"] = tag, "fixed"
             self._save()
 
+    def mark_issue(self, it: dict, number: int, agent: bool = False) -> None:
+        """/修、/开issue 开出（或对上）issue 后记下；agent=True 表示已打 claude-fix 交给云端代理。"""
+        with self._lock:
+            it["issue"], it["issue_score"] = number, 1
+            if it["status"] in ("new", "answered"):
+                it["status"] = "known"
+            if agent:
+                it["agent_at"] = time.time()
+            self._save()
+
+    def agent_items(self, refs: list[int]) -> list[dict]:
+        """派给代理、对应 issue 在 refs 里的条目（代理出 draft PR 时通知主人用）。"""
+        return [i for i in self.items if i.get("agent_at") and i.get("issue") in set(refs)]
+
     def progress(self, it: dict) -> str:
         """给主人看的进度（带 issue 编号）。"""
         if it.get("issue") and self.fuyu:
@@ -383,7 +397,9 @@ class Feedback:
                  f"平台：{it.get('platform') or '未知'}；提到 {it['count']} 次；反馈人：{who}",
                  f"首次 {time.strftime('%m-%d %H:%M', time.localtime(it['first_seen']))}，"
                  f"最近 {time.strftime('%m-%d %H:%M', time.localtime(it['last_seen']))}",
-                 "进度：" + self.progress(it)]
+                 "进度：" + self.progress(it)
+                 + (f"（{time.strftime('%m-%d %H:%M', time.localtime(it['agent_at']))} 已交给云端代理）"
+                    if it.get("agent_at") else "")]
         if it["quotes"]:
             lines.append("原话：\n" + "\n".join("  " + q for q in it["quotes"][-5:]))
         return "\n".join(x for x in lines if x)

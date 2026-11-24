@@ -68,10 +68,10 @@
       类型/默认值/说明），改了立即生效；遥控 `/设置`、API `GET/POST /settings`（管理台用）。内核管的项
       （表情包）只转发。旧环境变量只在第一次生成文件时搬一次。
 
-- [ ] **链接读取改进（S）**：现在只抽 og 标题/简介 + 前几个 `<p>`，截 600 字，GitHub 页抽到的全是导航。
-      在 `kernel/fuxi/preload.js` 里替换内核的 `linkReader`（不改上游）：正文提取换 Readability 一类的库、
-      上限提到 2000~3000 字；GitHub 取 README 原文、B 站取简介。第三方阅读服务做成设置项默认关。
-      详见 [feedback-loop.md](feedback-loop.md) 第一节。
+- [x] **链接读取改进（S）**：原来只抽 og 标题/简介 + 前几个 `<p>` 截 600 字，GitHub 页抽到的全是导航。
+      `kernel/fuxi/links.js` 替换上游 `links` 的导出（不改上游）：普通网页 Readability 抽正文（线程里跑、保留段落），
+      GitHub issue / PR / release 走 API 拿状态和正文，短视频交回上游；读不到时给中文原因。
+      受上游 `linkBlock` 1200 字截断限制，长文注明「只是开头」。详见 [feedback-loop.md](feedback-loop.md) 第一节。
 
 ## P2 · 与浮屿打通
 

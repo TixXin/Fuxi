@@ -95,7 +95,7 @@
       「修了没」：PR 写了 fixes/修复 #N 或带 issue 编号（如 [B93]）且已合并 → 推出包含它的版本。
       遥控 `/浮屿`（版本与动态）、`/浮屿 123`（进度）、`/浮屿 搜 文字`（找相关 issue）；`/状态` 一行；API `GET /fuyu`。
       设置：`浮屿同步`（开）、`浮屿动态`（默认只把发版私聊主人）。
-  - [ ] 群里问「新版本 / 修了没」时 bot 按缓存回答：由产品助手 `_assist` 接 `version_brief()` / `find()` / `status()`。
+  - [x] 群里问「新版本 / 修了没」时 bot 按缓存回答：产品助手 `_assist` 已接（e856ab6）。
   - [x] 修复发版后回群告诉原反馈人：见「群里营业」。
 - [ ] **F3 批准后开 issue + agent 修复（L）**：遥控 `/修 N` `/忽略 N`；批准后脱敏开 issue（`from-wechat`，
       写 token 与只读 token 分开）；浮屿仓库装 Claude Code Action 出 draft PR；可选 Mac 守护进程领
@@ -124,7 +124,8 @@
 ## P4 · 工程
 
 - [ ] 私有远程仓库 + CI（测试、密钥扫描）。
-- [ ] 版本号与镜像标签，部署可回滚（目前只有 `dev`）。
+- [x] 版本号与镜像标签，部署可回滚：镜像按 git 提交号打标签，`deploy.sh rollback <服务> [版本]`、`deploy.sh versions`，
+      `/状态` 与 `/healthz` 显示版本（见 docs/deploy.md「版本与回滚」）。
 - [ ] 上游 whale_girl 同步脚本，并校验 webhook 契约是否变化。
 - [ ] 若公开发布：AGPL 源码获取方式（bot 可回复仓库地址）。
 

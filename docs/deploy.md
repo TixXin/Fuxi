@@ -250,6 +250,21 @@ FUXI_HOST=<host> FUXI_DIR=<fuxi-dir> scripts/deploy.sh bridge   # 只改了 brid
 FUXI_HOST=<host> FUXI_DIR=<fuxi-dir> scripts/deploy.sh          # 改了 kernel/ 或不确定
 ```
 
+### 版本与回滚
+
+每次部署的镜像都以 git 提交号为标签（如 `fuxi-bridge:e17da99`；工作区里 bridge/ kernel/ watchdog/ deploy/
+有没提交的改动时记成 `e17da99-dirty11242037`，最好先提交再部署）。compose 一直用 `:dev`，部署和回滚就是把 `:dev`
+指向某个版本再重建容器。服务器上 `<fuxi-dir>/deploys.log` 记每次部署，每个服务保留最近 5 个版本的镜像。
+
+```bash
+FUXI_HOST=<host> FUXI_DIR=<fuxi-dir> scripts/deploy.sh versions              # 部署记录、服务器上有哪些版本
+FUXI_HOST=<host> FUXI_DIR=<fuxi-dir> scripts/deploy.sh rollback bridge       # 退回上一个版本
+FUXI_HOST=<host> FUXI_DIR=<fuxi-dir> scripts/deploy.sh rollback kernel e17da99   # 换到指定版本
+```
+
+当前版本也能在遥控 `/状态`（「版本：…」）和 `GET /healthz` 的 `version` 里看到。改了数据格式（状态卷里的 JSON）
+的版本回滚前先看一眼提交说明；目前各模块读到不认识的字段都会忽略，回滚是安全的。
+
 更新 kernel 时 bridge 也会被重建（它共用内核的网络命名空间）。bridge 重建后约 30 秒扫描密钥，
 期间不收消息；启动后会**补处理停机期间**的消息，但只补 `FUXI_STALE_SEC`（默认 120 秒）以内的，
 更早的不回，避免上线时乱回旧消息。

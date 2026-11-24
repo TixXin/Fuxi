@@ -250,7 +250,7 @@ function formatForPrompt(info) {
   if (article.length <= room) return [...head, '正文：', article].join('\n');
   const total = Math.max(article.length, Number(info.fullLength) || 0);
   const size = total > MAX_ARTICLE ? `超过 ${MAX_ARTICLE}` : `约 ${total}`;
-  return [...head, `（正文${size}字，下面只是开头一段，不是全文）`, '正文：',
+  return [...head, `（正文${size} 字，下面只是开头一段，不是全文）`, '正文：',
     article.slice(0, room) + '…'].join('\n');
 }
 

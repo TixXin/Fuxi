@@ -136,7 +136,7 @@
 - [x] 版本号与镜像标签，部署可回滚：镜像按 git 提交号打标签，`deploy.sh rollback <服务> [版本]`、`deploy.sh versions`，
       `/状态` 与 `/healthz` 显示版本（见 docs/deploy.md「版本与回滚」）。
 - [ ] 上游 whale_girl 同步脚本，并校验 webhook 契约是否变化。
-- [ ] 若公开发布：AGPL 源码获取方式（bot 可回复仓库地址）。
+- [x] AGPL 源码获取：私聊或群里 @ bot 问源码 / 开源时，桥接直接回 `source_url`（默认本仓库地址，空 = 不回），不经模型；问浮屿开不开源的不算。
 
 ## 暂不做
 

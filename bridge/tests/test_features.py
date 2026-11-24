@@ -626,3 +626,26 @@ class HumanWaitTest(unittest.TestCase):
                 self.assertEqual(s.human_idle(), 1.0)      # bot 之后又有人动过
             with mock.patch.object(sender_mod, "x_idle_seconds", lambda d: None):
                 self.assertIsNone(s.human_idle())          # 查不到就当没人
+
+
+class SourceAskTest(unittest.TestCase):
+    """AGPL：有人问 bot 的源码时直接回仓库地址。"""
+
+    def _bridge(self, url="https://example.invalid/repo"):
+        b = object.__new__(Bridge)
+        b.cfg = mock.Mock()
+        b.cfg.get.side_effect = {"source_url": url}.get
+        return b
+
+    def _p(self, text, group=False, at=False):
+        return {"chat_type": "group" if group else "private", "text": text, "at_me": at,
+                "reply_to_bot": False, "self_names": ["浮汐"]}
+
+    def test_asks(self):
+        b = self._bridge()
+        self.assertTrue(b._source_asked(self._p("你的源码在哪")))
+        self.assertTrue(b._source_asked(self._p("@浮汐 你开源吗", group=True, at=True)))
+        self.assertFalse(b._source_asked(self._p("你开源吗", group=True)))              # 群里没叫 bot
+        self.assertFalse(b._source_asked(self._p("@浮汐 浮屿开源吗", group=True, at=True)))   # 问的是浮屿
+        self.assertFalse(b._source_asked(self._p("今天吃什么")))
+        self.assertFalse(self._bridge("")._source_asked(self._p("源码呢")))              # 关掉了

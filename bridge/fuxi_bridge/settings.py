@@ -55,6 +55,8 @@ ITEMS: list[Item] = [
          env="FUXI_SELF_NAMES"),
     Item("assistant_groups", "产品助手群", "list", [], "这些群里有人 @ bot 提问时，先从浮屿资料里找相关段落给内核参考；"
          "找不到又像是提问，就私聊主人（群名或 chat_id，多个用逗号）"),
+    Item("source_url", "源码地址", "text", "https://github.com/TixXin/Fuxi",
+         "有人问 bot 的源码时直接回这个地址（内核是 AGPL-3.0，要让对话的人拿得到源码）；空 = 不回"),
     Item("knowledge_repo", "资料仓库", "text", "TixXin/Fuyu", "产品助手的资料来源：公开 GitHub 仓库（owner/name），每 6 小时同步一次"),
     Item("feedback_groups", "反馈群", "list", [], "收集这些群里对浮屿的反馈（bug / 建议 / 提问），整理后发摘要和群小结"
          "（群名或 chat_id，多个用逗号；空 = 不收集）"),

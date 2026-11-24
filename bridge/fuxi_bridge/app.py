@@ -60,6 +60,7 @@ def _brief(text: str) -> str:
 
 VERSION_Q = re.compile(r"版本|新版|更新|升级|发版|最新|release|v\d+\.\d+", re.I)
 BUG_Q = re.compile(r"修(了|好|复)|bug|问题|没反应|不行|不了|不能|看不到|打不开|闪退|崩|卡|报错|失败|异常|不显示|没效果", re.I)
+SOURCE_Q = re.compile(r"源码|源代码|开源|source ?code|代码在哪", re.I)
 
 
 @dataclass
@@ -544,6 +545,11 @@ class Bridge:
             self._understand(chat, batch, tr)
             k0 = time.monotonic()
             payload = self._payload(chat, batch)
+            if self._source_asked(payload):
+                url = self.cfg.get("source_url")
+                log.info("%s 问源码，回仓库地址", self.name_of(chat))
+                self._deliver(chat, batch, {"action": "reply", "reply": f"我是开源的：{url}\n（AGPL-3.0，对话内核来自 whale_girl）"}, tr, k0)
+                return
             self._assist(chat, payload)
             log.info("→ 内核 %s [%s] %s", payload["chat_title"] or self.name_of(chat), payload["senderName"],
                      _brief(payload["text"]))
@@ -560,6 +566,17 @@ class Bridge:
             finally:
                 if sticker:
                     self._send_sticker(chat, sticker, delivered)
+
+    def _source_asked(self, payload: dict) -> bool:
+        """有人直接问 bot 的源码（私聊，或群里 @ / 引用 bot）。问浮屿开不开源的不算。"""
+        if not self.cfg.get("source_url"):
+            return False
+        if payload["chat_type"] == "group" and not (payload.get("at_me") or payload.get("reply_to_bot")):
+            return False
+        text = payload["text"]
+        for n in payload.get("self_names") or []:
+            text = text.replace(f"@{n}", " ")
+        return bool(SOURCE_Q.search(text)) and not re.search(r"浮屿|fuyu", text, re.I) and len(text.strip()) <= 40
 
     # ---------- 产品助手 ----------
     def is_assistant_group(self, chat: str) -> bool:

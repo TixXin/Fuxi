@@ -174,6 +174,8 @@ class MessageReader:
                     if app:
                         mtype, text = app["kind"], app["text"]
                         extra = {"quote": app.get("quote") or {}, "patted": app.get("patted", "")}
+                elif mtype in MEDIA_KINDS:
+                    text = parse_media(mtype, text)
                 out.append(Message(
                     chat=chat, local_id=r["local_id"], sort_seq=r["sort_seq"], type=mtype,
                     sender=sender, is_self=(sender == self.self_wxid), create_time=r["create_time"],
@@ -183,6 +185,36 @@ class MessageReader:
         if out:
             self.watermarks[chat] = out[-1].sort_seq
             self._save()
+        return out
+
+    def revoked(self, msgs: list[Message]) -> set[str]:
+        """已撤回的消息（msg_id）。微信撤回是原地改写：那一行变成 type 10000 的 revokemsg；
+        行不见了也当作撤回。读失败时返回空集（宁可照常回复）。"""
+        out: set[str] = set()
+        by_shard: dict[tuple[str, str], list[Message]] = {}
+        for m in msgs:
+            by_shard.setdefault((m.chat, m.shard), []).append(m)
+        for (chat, shard), ms in by_shard.items():
+            table = "Msg_" + hashlib.md5(chat.encode()).hexdigest()
+            try:
+                con = self.cache.connect(f"message/{shard}")
+            except Exception:
+                continue
+            try:
+                ids = [m.local_id for m in ms]
+                rows = con.execute(
+                    f'SELECT local_id, local_type, message_content, compress_content FROM "{table}" '
+                    f"WHERE local_id IN ({','.join('?' * len(ids))})", ids).fetchall()
+            except Exception:
+                continue
+            finally:
+                con.close()
+            now = {r["local_id"]: r for r in rows}
+            for m in ms:
+                r = now.get(m.local_id)
+                if r is None or ((r["local_type"] & 0xFFFFFFFF) == 10000
+                                 and "revokemsg" in _decode(r["message_content"], r["compress_content"])):
+                    out.add(m.msg_id)
         return out
 
     def sessions(self, limit: int = 200) -> list[dict]:
@@ -301,6 +333,44 @@ def _quoted_text(ref) -> str:
 def _clip(s: str, n: int) -> str:
     s = " ".join(s.split())
     return s if len(s) <= n else s[: n - 1] + "…"
+
+
+# ---- 图片 / 语音 / 视频 / 表情 / 位置 / 名片：内核看不到内容，转成占位文字交给它 ----
+
+MEDIA_KINDS = ("image", "voice", "video", "emoji", "location", "card")
+
+
+def _attr(root, tag: str, name: str) -> str:
+    el = root if root is not None and root.tag == tag else (root.find(tag) if root is not None else None)
+    return ((el.get(name) if el is not None else None) or "").strip()
+
+
+def _secs(v: str, ms: bool = False) -> str:
+    if not v.isdigit() or int(v) <= 0:
+        return ""
+    n = round(int(v) / 1000) if ms else int(v)
+    return f" {max(1, n)}秒"
+
+
+def parse_media(mtype: str, text: str) -> str:
+    """媒体消息的占位文字，例如「[语音 5秒]」「[位置] 西湖 杭州市西湖区」。XML 解析失败时退回纯占位。"""
+    root = _xml(text)
+    if mtype == "image":
+        return "[图片]"
+    if mtype == "voice":
+        return f"[语音{_secs(_attr(root, 'voicemsg', 'voicelength'), ms=True)}]"
+    if mtype == "video":
+        return f"[视频{_secs(_attr(root, 'videomsg', 'playlength'))}]"
+    if mtype == "emoji":
+        return "[动画表情]"
+    if mtype == "location":
+        poi, label = _attr(root, "location", "poiname"), _attr(root, "location", "label")
+        where = " ".join(x for x in (poi, label if label != poi else "") if x)
+        return f"[位置] {where}".rstrip()
+    if mtype == "card":
+        nick = _attr(root, "msg", "nickname")
+        return f"[名片] {nick}".rstrip()
+    return f"[{mtype}]"
 
 
 def parse_appmsg(text: str) -> dict | None:

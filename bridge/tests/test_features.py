@@ -76,6 +76,92 @@ def bare_bridge() -> Bridge:
     return b
 
 
+class MediaTest(unittest.TestCase):
+    def test_placeholders(self):
+        pm = messages.parse_media
+        self.assertEqual(pm("image", '<?xml version="1.0"?><msg><img aeskey="x"/></msg>'), "[图片]")
+        self.assertEqual(pm("voice", '<msg><voicemsg voicelength="4600" length="9"/></msg>'), "[语音 5秒]")
+        self.assertEqual(pm("voice", "坏数据"), "[语音]")
+        self.assertEqual(pm("video", '<msg><videomsg playlength="12"/></msg>'), "[视频 12秒]")
+        self.assertEqual(pm("emoji", '<msg><emoji md5="a"/></msg>'), "[动画表情]")
+        self.assertEqual(pm("location", '<msg><location x="1" poiname="西湖" label="杭州市西湖区"/></msg>'),
+                         "[位置] 西湖 杭州市西湖区")
+        self.assertEqual(pm("card", '<?xml version="1.0"?>\n<msg username="wxid_c" nickname="小红"/>'), "[名片] 小红")
+
+    def test_private_chat_sender_prefix(self):
+        # 私聊里自己发的图片内容也带「wxid:\n」前缀
+        self.assertEqual(messages.parse_media("voice", 'wxid_a:\n<msg><voicemsg voicelength="900"/></msg>'),
+                         "[语音 1秒]")
+
+    def test_media_is_accepted(self):
+        from fuxi_bridge import app
+        for k in ("image", "voice", "emoji"):
+            self.assertIn(k, app.ACCEPT_TYPES)
+
+
+class RevokeTest(unittest.TestCase):
+    def setUp(self):
+        import hashlib
+        import sqlite3
+        self.tmp = tempfile.mkdtemp()
+        path = os.path.join(self.tmp, "v.db")
+        con = sqlite3.connect(path)
+        table = "Msg_" + hashlib.md5(b"g@chatroom").hexdigest()
+        con.execute(f'CREATE TABLE "{table}" (local_id, local_type, message_content, compress_content)')
+        con.executemany(f'INSERT INTO "{table}" VALUES (?,?,?,?)', [
+            (1, 1, "还在", None),
+            (2, 10000, '<sysmsg type="revokemsg"><revokemsg><content>"小明" 撤回了一条消息</content></revokemsg></sysmsg>', None),
+        ])
+        con.commit()
+        con.close()
+
+        def connect(rel):
+            c = sqlite3.connect(path)
+            c.row_factory = sqlite3.Row
+            return c
+        self.reader = object.__new__(messages.MessageReader)
+        self.reader.cache = mock.Mock(connect=connect)
+
+    def test_revoked_and_missing_rows(self):
+        ms = [msg(local_id=1), msg(local_id=2), msg(local_id=3)]
+        self.assertEqual(self.reader.revoked(ms), {ms[1].msg_id, ms[2].msg_id})
+
+    def dispatch(self, revoked_seq):
+        b = bare_bridge()
+        b.chat_locks = collections.defaultdict(__import__("threading").Lock)
+        b.paused = False
+        b.reader.revoked = mock.Mock(side_effect=revoked_seq)
+        b.kernel = mock.Mock()
+        b.kernel.webhook.return_value = {"action": "reply", "bubbles": ["好的"]}
+        b.kernel.send_permission.return_value = (True, "")
+        b.rate_ok = lambda chat: True
+        b.first_delay = lambda text, spent: 0
+        b.sent_times = collections.deque()
+        b.send = mock.Mock(return_value=mock.Mock(ok=True, t_sent=None))
+        tr = timing.Trace(0, 0)
+        return b, tr
+
+    def test_revoked_before_kernel_is_dropped(self):
+        m1, m2 = msg(local_id=1, text="你好"), msg(local_id=2, text="骂人的话")
+        b, tr = self.dispatch([{m2.msg_id}, set()])
+        b._dispatch_traced("g@chatroom", [m1, m2], tr)
+        self.assertEqual(b.kernel.webhook.call_args[0][0]["text"], "你好")
+        b.send.assert_called_once()
+
+    def test_all_revoked_skips_kernel(self):
+        m = msg(local_id=1, text="发错了")
+        b, tr = self.dispatch([{m.msg_id}])
+        b._dispatch_traced("g@chatroom", [m], tr)
+        b.kernel.webhook.assert_not_called()
+
+    def test_revoked_while_thinking_cancels_reply(self):
+        m = msg(local_id=1, text="发错了")
+        b, tr = self.dispatch([set(), {m.msg_id}])
+        b._dispatch_traced("g@chatroom", [m], tr)
+        b.kernel.webhook.assert_called_once()
+        b.send.assert_not_called()
+
+
 class PayloadTest(unittest.TestCase):
     def test_quote_of_bot_sets_reply_to_bot(self):
         b = bare_bridge()

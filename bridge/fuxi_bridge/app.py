@@ -40,7 +40,7 @@ from .sender import Sender, SendError
 log = logging.getLogger("fuxi")
 
 # 交给内核的消息类型：文本 + 解析过的 appmsg（引用、链接、文件、拍一拍…）
-ACCEPT_TYPES = ("text",) + messages.APP_KINDS
+ACCEPT_TYPES = ("text",) + messages.APP_KINDS + messages.MEDIA_KINDS
 
 
 def _h(text: str) -> str:
@@ -388,6 +388,12 @@ class Bridge:
 
     def _dispatch_traced(self, chat: str, batch: list[Message], tr: "timing.Trace") -> None:
         with self.chat_locks[chat]:
+            gone = self._revoked(batch)
+            if gone:
+                batch = [m for m in batch if m.msg_id not in gone]
+                log.info("%s 撤回了 %d 条消息，不再回复它们", self.name_of(chat), len(gone))
+                if not batch:
+                    return
             k0 = time.monotonic()
             payload = self._payload(chat, batch)
             log.info("→ 内核 %s [%s] %s", payload["chat_title"] or self.name_of(chat), payload["senderName"],
@@ -417,6 +423,9 @@ class Bridge:
                 delay = self.first_delay(text, tr.s["kernel"]) if i == 0 else self.typing_delay(text)
                 time.sleep(delay)
                 tr.add("typing", delay)
+                if i == 0 and self._revoked(batch):
+                    log.info("%s 在生成回复期间撤回了消息，放弃这次回复", self.name_of(chat))
+                    return
                 self.sent_times.append((time.time(), chat))
                 job = self.send(SendJob(chat=chat, text=text))
                 if job.ok and job.t_sent:
@@ -425,6 +434,13 @@ class Bridge:
                     tr.add("paste", job.t_sent - job.t_start - job.open_s)
                     tr.add("verify", job.t_done - job.t_sent)
                     tr.bubble_sent(time.time() - (time.monotonic() - job.t_sent))
+
+    def _revoked(self, batch: list[Message]) -> set[str]:
+        try:
+            return self.reader.revoked(batch)
+        except Exception:
+            log.exception("检查撤回失败")
+            return set()
 
     # ---------- 健康 ----------
     def problems(self) -> list[str]:

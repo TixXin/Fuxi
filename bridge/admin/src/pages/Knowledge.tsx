@@ -1,8 +1,8 @@
-import { BookOpen, RefreshCw, Search } from "lucide-react";
+import { BookOpen, Pencil, Plus, RefreshCw, Search, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { Switch, Tag } from "../components/controls";
 import { Button, Card, Dot, ErrorNote, Group, PageHead, Row, Skeleton } from "../components/ui";
-import { api, type KnowledgeSearch } from "../lib/api";
+import { api, type FaqItem, type KnowledgeSearch } from "../lib/api";
 import { useBridgeEvent } from "../lib/bus";
 import { ago, clock } from "../lib/format";
 import { useApi } from "../lib/useApi";
@@ -12,7 +12,8 @@ export function Knowledge({ onMenu, onNavigate }: { onMenu: () => void; onNaviga
   const info = useApi(api.knowledge);
   const [syncMsg, setSyncMsg] = useState("");
   useBridgeEvent(["knowledge"], (e) => {
-    setSyncMsg(String(e.result ?? ""));
+    const msg = String(e.result ?? "");
+    if (msg) setSyncMsg(msg);
     void info.reload();
   });
 
@@ -40,7 +41,7 @@ export function Knowledge({ onMenu, onNavigate }: { onMenu: () => void; onNaviga
         <Group
           title="同步"
           meta={d.repo}
-          footer="产品助手群里有人 @ 浮汐提问时，从这里找相关段落给模型参考；找不到就转人工。每 6 小时自动同步一次，只下载变了的文件。"
+          footer="产品助手群里有人提问时，从这里找相关段落给模型参考；被 @ 但找不到时会转人工。每 6 小时自动同步一次，只下载变了的文件。"
         >
           <Card>
             <Row
@@ -70,8 +71,130 @@ export function Knowledge({ onMenu, onNavigate }: { onMenu: () => void; onNaviga
           </Card>
         </Group>
       )}
+      <FaqSection />
       <TrySearch />
     </div>
+  );
+}
+
+function FaqSection() {
+  const list = useApi(api.knowledgeFaqs);
+  const [editing, setEditing] = useState<number | "new" | null>(null);
+  const [q, setQ] = useState("");
+  const [a, setA] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  useBridgeEvent(["knowledge"], () => void list.reload());
+
+  function openNew() {
+    setEditing("new");
+    setQ("");
+    setA("");
+    setError("");
+  }
+
+  function openEdit(it: FaqItem) {
+    setEditing(it.id);
+    setQ(it.q);
+    setA(it.a);
+    setError("");
+  }
+
+  async function save() {
+    if (!q.trim() || !a.trim()) {
+      setError("问题和回答都要填");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      await api.saveFaq(q.trim(), a.trim(), editing === "new" || editing === null ? undefined : editing);
+      setEditing(null);
+      setQ("");
+      setA("");
+      await list.reload();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function remove(id: number) {
+    setBusy(true);
+    setError("");
+    try {
+      await api.deleteFaq(id);
+      if (editing === id) setEditing(null);
+      await list.reload();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const items = list.data?.items ?? [];
+  return (
+    <Group
+      title="自定义常见问答"
+      meta={`${items.length} 条 · 优先于仓库文档`}
+      footer="群里反复问到、但仓库文档没写或问法口语化的问题，直接在这里补一条，保存立即参与检索。"
+    >
+      <Card>
+        <div className="faq__bar">
+          <span className="faq__hint">用来补足口语问法、临时已知问题或群内高频答疑</span>
+          {editing === null && (
+            <Button icon={<Plus size={14} />} onClick={openNew}>
+              新增问答
+            </Button>
+          )}
+        </div>
+        {error && <ErrorNote message={error} />}
+        {editing !== null && (
+          <div className="faq__form">
+            <input
+              className="field faq__q"
+              placeholder="群友常怎么问？比如：Mac 提示已损坏打不开怎么办"
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+            />
+            <textarea
+              className="field faq__a"
+              rows={3}
+              placeholder="简短准确的回答（含具体步骤或命令）"
+              value={a}
+              onChange={(e) => setA(e.target.value)}
+            />
+            <div className="faq__actions">
+              <Button variant="primary" busy={busy} onClick={save}>
+                {editing === "new" ? "添加" : "保存修改"}
+              </Button>
+              <Button onClick={() => setEditing(null)}>取消</Button>
+            </div>
+          </div>
+        )}
+        {items.length === 0 && editing === null && (
+          <div className="faq__empty">还没有自定义问答；遇到答不准的高频问题随时补一条。</div>
+        )}
+        {items.map((it) => (
+          <div className="faq__item" key={it.id}>
+            <div className="faq__item-head">
+              <b>{it.q}</b>
+              <div className="faq__item-ops">
+                <Button icon={<Pencil size={13} />} onClick={() => openEdit(it)}>
+                  改
+                </Button>
+                <Button icon={<Trash2 size={13} />} busy={busy} onClick={() => remove(it.id)}>
+                  删
+                </Button>
+              </div>
+            </div>
+            <div className="faq__item-a">{it.a}</div>
+          </div>
+        ))}
+      </Card>
+    </Group>
   );
 }
 

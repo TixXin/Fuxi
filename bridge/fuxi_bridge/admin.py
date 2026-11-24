@@ -136,6 +136,8 @@ def make_handler(bridge: "Bridge", token: str, static_dir: str, ping: float = PI
                 return
             if u.path == "/api/knowledge":
                 return self._json(200, {"ok": True, **handlers.knowledge_info(bridge)})
+            if u.path == "/api/knowledge/faq":
+                return self._json(200, {"ok": True, "items": handlers.knowledge_faq_list(bridge)})
             if u.path == "/api/knowledge/search":
                 try:
                     return self._json(200, {"ok": True, **handlers.knowledge_search(
@@ -230,6 +232,10 @@ def make_handler(bridge: "Bridge", token: str, static_dir: str, ping: float = PI
                 if path == "/api/knowledge/sync":
                     handlers.knowledge_sync(bridge)
                     return self._json(202, {"ok": True, "started": True})
+                if path == "/api/knowledge/faq":
+                    return self._json(200, {"ok": True, "items": handlers.knowledge_faq_save(bridge, body)})
+                if path == "/api/knowledge/faq/delete":
+                    return self._json(200, {"ok": True, "items": handlers.knowledge_faq_delete(bridge, body)})
                 if self._post_more(path, body):
                     return
             except handlers.HandlerError as e:

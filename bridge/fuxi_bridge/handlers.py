@@ -147,7 +147,8 @@ def knowledge_info(b: "Bridge") -> dict:
     m = k.meta
     sources: dict[str, int] = {}
     for c in k.index.chunks:
-        kind = ("版本说明" if c.source.startswith("docs/releases/") else
+        kind = ("常见问答" if c.source == "local/faq" or c.source.lower() == "docs/faq.md" else
+                "版本说明" if c.source.startswith("docs/releases/") else
                 "功能说明" if c.source.startswith("docs/features/") else "其他")
         sources[kind] = sources.get(kind, 0) + 1
     return {"repo": m.get("repo") or b.cfg.get("knowledge_repo"), "synced_at": m.get("synced_at"),
@@ -155,6 +156,40 @@ def knowledge_info(b: "Bridge") -> dict:
             "sources": sources, "error": m.get("error", ""), "failed_at": m.get("failed_at"),
             "syncing": getattr(k, "syncing", False), "enabled": bool(b.cfg.get("assistant_groups")),
             "groups": b.cfg.get("assistant_groups") or []}
+
+
+def knowledge_faq_list(b: "Bridge") -> list[dict]:
+    return b.knowledge.faq_list()
+
+
+def knowledge_faq_save(b: "Bridge", body: dict) -> list[dict]:
+    fid = body.get("id")
+    if fid is not None and not isinstance(fid, int):
+        try:
+            fid = int(fid)
+        except (TypeError, ValueError):
+            raise HandlerError("编号不对") from None
+    try:
+        items = b.knowledge.faq_save(str(body.get("q") or ""), str(body.get("a") or ""), fid=fid)
+    except ValueError as e:
+        raise HandlerError(str(e)) from None
+    log.warning("常见问答经管理台%s（共 %d 条）", "修改" if fid is not None else "新增", len(items))
+    b.events.publish("knowledge", {"result": ""})
+    return items
+
+
+def knowledge_faq_delete(b: "Bridge", body: dict) -> list[dict]:
+    try:
+        fid = int(body.get("id"))
+    except (TypeError, ValueError):
+        raise HandlerError("编号不对") from None
+    try:
+        items = b.knowledge.faq_delete(fid)
+    except ValueError as e:
+        raise HandlerError(str(e), 404) from None
+    log.warning("常见问答 #%d 经管理台删除（剩 %d 条）", fid, len(items))
+    b.events.publish("knowledge", {"result": ""})
+    return items
 
 
 def knowledge_sync(b: "Bridge") -> None:
@@ -189,10 +224,9 @@ def knowledge_search(b: "Bridge", q: str, judge: bool = False) -> dict:
     judged = None
     if judge and picked:
         judged = [c.title for c in b._judge(q, picked)]
-    cq = kn.clean(q)
     return {"query": q, "question": kn.is_question(q), "floor": k.floor, "cover": k.cover,
             "picked": [c.title for c in picked], "judged": judged,
-            "candidates": [{"score": round(s, 1), "coverage": round(k.index.coverage(cq, c), 2),
+            "candidates": [{"score": round(s, 1), "coverage": round(k.coverage(q, c), 2),
                             "source": c.source, "title": c.title, "text": c.text[:400]} for s, c in cands]}
 
 

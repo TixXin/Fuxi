@@ -132,6 +132,13 @@ export interface KnowledgeInfo {
   groups: string[];
 }
 
+export interface FaqItem {
+  id: number;
+  q: string;
+  a: string;
+  updated?: number;
+}
+
 export interface KnowledgeSearch {
   query: string;
   question: boolean;
@@ -276,6 +283,10 @@ export const api = {
   saveSetting: (key: string, value: SettingValue) => request<{ items: Setting[] }>("POST", "/api/settings", { [key]: value }),
   knowledge: () => request<KnowledgeInfo>("GET", "/api/knowledge"),
   knowledgeSync: () => request<{ started: boolean }>("POST", "/api/knowledge/sync"),
+  knowledgeFaqs: () => request<{ items: FaqItem[] }>("GET", "/api/knowledge/faq"),
+  saveFaq: (q: string, a: string, id?: number) =>
+    request<{ items: FaqItem[] }>("POST", "/api/knowledge/faq", id !== undefined ? { id, q, a } : { q, a }),
+  deleteFaq: (id: number) => request<{ items: FaqItem[] }>("POST", "/api/knowledge/faq/delete", { id }),
   allow: () => request<{ items: Chat[] }>("GET", "/api/allow"),
   recentChats: () => request<{ items: Chat[] }>("GET", "/api/chats/recent"),
   searchChats: (q: string) => request<{ items: Chat[] }>("GET", `/api/chats?q=${encodeURIComponent(q)}`),

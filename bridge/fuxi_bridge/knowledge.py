@@ -42,6 +42,34 @@ STOP = set("怎么 什么 可以 浮屿 一下 这个 那个 能不 不能 为�
            "一个 现在 还是 就是 的话 吗？ 了吗 么样 在哪 哪里 知道 问一 问下 支持 功能 设置".split())
 NOISE = re.compile(r"怎么用|怎么样|怎么办|怎么|如何|为什么|为啥|能不能|可不可以|会不会|有没有|是不是|是否|请问|一下|吗|呢|吧|啊|呀|会|要|能|的")
 QUESTION = re.compile(r"[?？]|吗|怎么|如何|为什么|为啥|能不能|可不可以|有没有|哪里|在哪|怎样|咋|是否|求助|请问|什么|多久|多少|多大|哪个|哪些|几个|报错|不行|失败|打不开|闪退|没反应|崩溃|用不了")
+# 群友口语问法 → 文档里的规范词；既用于 BM25 扩展召回，也用于覆盖率计算（命中任一同义词即视为覆盖该口语概念）
+SYNONYMS: tuple[tuple[re.Pattern, tuple[str, ...]], ...] = (
+    (re.compile(r"已损坏|损毁|打不开|无法打开|拦住|拦截|信任|验签|废纸篓"),
+     ("无法验证", "仍要打开", "quarantine", "SmartScreen", "未知发布者")),
+    (re.compile(r"未知发布者|报毒|杀毒|安全警告|风险提示"),
+     ("SmartScreen", "未知发布者", "仍要运行", "代码签名")),
+    (re.compile(r"(?:^|[^a-z])mac(?:os)?|苹果电脑|苹果", re.I),
+     ("macOS", "Mac", "应用程序")),
+    (re.compile(r"(?:^|[^a-z])win(?:dows|10|11)?|微软", re.I),
+     ("Windows",)),
+    (re.compile(r"收费|付费|免费|价格|多少钱|卖多少"),
+     ("开源协议", "AGPL")),
+    (re.compile(r"贴屏|钉在屏幕|固定在屏幕|置顶截图"),
+     ("贴图", "截图")),
+    (re.compile(r"复制记录|粘贴板|剪切板"),
+     ("剪贴板", "剪贴板历史")),
+    (re.compile(r"热键|按键|组合键"),
+     ("快捷键",)),
+    (re.compile(r"云端|上传|隐私|安全吗|本地保存|数据在哪|存在哪"),
+     ("隐私", "本地", "家目录")),
+    (re.compile(r"灵动岛|小岛|顶部岛|胶囊"),
+     ("浮屿", "悬浮岛")),
+    (re.compile(r"linux|ubuntu|debian|arch", re.I),
+     ("Linux", "Windows", "macOS")),
+    (re.compile(r"卸载|删掉|删除软件"),
+     ("卸载", "废纸篓")),
+)
+MAX_FAQS = 200
 
 
 def _version_key(name: str) -> tuple:
@@ -54,7 +82,7 @@ def _version_key(name: str) -> tuple:
 
 def pick(paths: list[str]) -> list[str]:
     """仓库文件列表里挑出要进知识库的。"""
-    out = [p for p in paths if p in ("README.md", "docs/privacy.md")
+    out = [p for p in paths if p in ("README.md", "docs/privacy.md", "docs/faq.md", "docs/FAQ.md")
            or re.fullmatch(r"docs/features/[\w.-]+\.md", p)]
     rel = {p: _version_key(p.rsplit("/", 1)[1]) for p in paths if re.fullmatch(r"docs/releases/v[\w.-]+\.md", p)}
     rel = {p: k for p, k in rel.items() if k}
@@ -120,8 +148,10 @@ def chunk_file(path: str, md: str, about: bool = False) -> list[Chunk]:
             if len(h.group(1)) == 1 and not doc_title:
                 doc_title = head
                 title = head
-            else:
+            elif head:
                 title = f"{doc_title} › {head}" if doc_title else head
+            else:
+                title = doc_title or name
             continue
         buf.append(line)
     if buf:
@@ -261,7 +291,56 @@ class Knowledge:
                     chunks += chunk_file(path, f.read(), about=path == latest)
             except OSError:
                 continue
+        for it in self._read_faqs():
+            chunks.append(Chunk("local/faq", f"常见问答 · {it['q']}", f"问：{it['q']}\n答：{it['a']}"))
         self.index = Index(chunks)
+
+    # ---- 本地自定义 FAQ（管理台维护，优先级高于功能/版本文档） ----
+    def _read_faqs(self) -> list[dict]:
+        if not getattr(self, "root", ""):
+            return []
+        raw = self._read("faq.json", [])
+        if not isinstance(raw, list):
+            return []
+        return [it for it in raw if isinstance(it, dict) and it.get("q") and it.get("a")]
+
+    def faq_list(self) -> list[dict]:
+        with self._lock:
+            items = self._read_faqs()
+        return sorted(items, key=lambda i: -int(i.get("id") or 0))
+
+    def faq_save(self, q: str, a: str, fid: int | None = None) -> list[dict]:
+        q, a = str(q or "").strip(), str(a or "").strip()
+        if not q or len(q) > 120:
+            raise ValueError("问题不能为空，且不超过 120 字")
+        if not a or len(a) > 1000:
+            raise ValueError("回答不能为空，且不超过 1000 字")
+        with self._lock:
+            items = self._read_faqs()
+            now = int(time.time())
+            if fid is not None:
+                hit = next((it for it in items if int(it.get("id") or 0) == int(fid)), None)
+                if not hit:
+                    raise ValueError(f"没有编号为 {fid} 的问答")
+                hit["q"], hit["a"], hit["updated"] = q, a, now
+            else:
+                if len(items) >= MAX_FAQS:
+                    raise ValueError(f"自定义问答最多 {MAX_FAQS} 条")
+                nid = max((int(it.get("id") or 0) for it in items), default=0) + 1
+                items.append({"id": nid, "q": q, "a": a, "updated": now})
+            self._write("faq.json", items)
+            self._rebuild()
+        return self.faq_list()
+
+    def faq_delete(self, fid: int) -> list[dict]:
+        with self._lock:
+            items = self._read_faqs()
+            kept = [it for it in items if int(it.get("id") or 0) != int(fid)]
+            if len(kept) == len(items):
+                raise ValueError(f"没有编号为 {fid} 的问答")
+            self._write("faq.json", kept)
+            self._rebuild()
+        return self.faq_list()
 
     def brief(self) -> str:
         n = len({c.source for c in self.index.chunks})
@@ -352,24 +431,58 @@ class Knowledge:
     # ---- 检索 ----
     # 这里只粗筛、宁多勿漏：资料到底能不能回答，由桥接再让模型判断一次（Bridge._judge）。
     floor = 5.0    # BM25 分数下限
-    cover = 0.5    # 最相关那段至少覆盖问句一半（按 idf 加权）
+    cover = 0.5    # 至少覆盖问句一半（按 idf 加权，含同义词概念）
     boost = 1.6    # 功能说明比版本说明优先：版本说明段落多，按词频容易挤到前面
+    faq_boost = 2.2  # 人工维护的常见问答优先级最高
+
+    def _weight(self, c: Chunk) -> float:
+        if c.source == "local/faq" or c.source.lower() == "docs/faq.md":
+            return self.faq_boost
+        return 1.0 if c.source.startswith("docs/releases/") else self.boost
+
+    def coverage(self, query: str, chunk: Chunk) -> float:
+        """问句对 chunk 的覆盖率：先按原词算，若问句命中了口语同义词组、且 chunk 命中该组任一规范词，
+        也计入覆盖（避免「Mac 已损坏」因文档写的是「无法验证/仍要打开」被覆盖率误杀）。"""
+        cq = clean(query)
+        base = self.index.coverage(cq, chunk)
+        have = set(tokens(chunk.title + "\n" + chunk.text))
+        matched_spans: list[tuple[str, tuple[str, ...]]] = []
+        for pat, syns in SYNONYMS:
+            ms = [m.group(0) for m in pat.finditer(cq)]
+            if ms:
+                matched_spans.append((" ".join(ms), syns))
+        if not matched_spans:
+            return base
+        # 把命中的同义词组对应的口语词视作「只要 chunk 命中任一规范词就算覆盖」
+        syn_covered: set[str] = set()
+        for span_text, syns in matched_spans:
+            if any(set(tokens(s)) <= have and tokens(s) for s in syns):
+                syn_covered.update(tokens(span_text))
+        if not syn_covered:
+            return base
+        q_toks = [t for t in set(tokens(cq)) if t in self.index.idf]
+        total = sum(self.index.idf[t] for t in q_toks)
+        if not total:
+            return base
+        covered = sum(self.index.idf[t] for t in q_toks if t in have or t in syn_covered)
+        return max(base, covered / total)
 
     def candidates(self, query: str, k: int = 4) -> list[tuple[float, Chunk]]:
-        """粗筛的候选（已按功能说明优先加权、从高到低）；管理台「试搜」也用它看分数。"""
-        hits = [((s if c.source.startswith("docs/releases/") else s * self.boost), c)
-                for s, c in self.index.search(clean(query), 40)]
+        """粗筛的候选（同义词扩展 + 按来源加权、从高到低）；管理台「试搜」也用它看分数。"""
+        expanded = expand(clean(query))
+        hits = [(s * self._weight(c), c) for s, c in self.index.search(expanded, 40)]
         hits.sort(key=lambda h: -h[0])
         return hits[:k]
 
     def search(self, query: str, k: int = 4, budget: int = 1200) -> list[Chunk]:
-        hits = self.candidates(query, k)
-        query = clean(query)
-        if not hits or hits[0][0] < self.floor or self.index.coverage(query, hits[0][1]) < self.cover:
+        cands = self.candidates(query, max(k * 2, 8))
+        passed = [(s, c) for s, c in cands if s >= self.floor and self.coverage(query, c) >= self.cover]
+        if not passed:
             return []
+        top = passed[0][0]
         out, used = [], 0
-        for s, c in hits:
-            if s < hits[0][0] * 0.45 or used + len(c.text) > budget:
+        for s, c in passed:
+            if len(out) >= k or s < top * 0.45 or used + len(c.text) > budget:
                 continue
             out.append(c)
             used += len(c.text)
@@ -379,6 +492,15 @@ class Knowledge:
 def clean(query: str) -> str:
     """去掉问句里的「怎么、吗、能」之类：它们和前后字拼出的二元组（如「么用」）会误中标题里的「怎么用」。"""
     return NOISE.sub(" ", query)
+
+
+def expand(query: str) -> str:
+    """按浮屿常见口语同义词表扩展检索词，用于 BM25 召回。"""
+    extra: list[str] = []
+    for pat, syns in SYNONYMS:
+        if pat.search(query):
+            extra.extend(syns)
+    return f"{query} {' '.join(dict.fromkeys(extra))}" if extra else query
 
 
 def is_question(text: str) -> bool:

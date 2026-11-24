@@ -76,6 +76,44 @@ class SearchTest(unittest.TestCase):
         self.assertEqual(self.k.search("今天晚上吃什么"), [])
         self.assertEqual(self.k.search("你好"), [])
 
+    def test_synonym_and_per_candidate_coverage(self):
+        k = object.__new__(kn.Knowledge)
+        mac_doc = kn.Chunk(
+            "docs/features/macos-install.md",
+            "在 Mac 上安装浮屿 › 第一次打开",
+            "系统会提示无法验证这个应用，点完成，去系统设置里点仍要打开，或者执行 xattr -dr com.apple.quarantine /Applications/Fuyu.app",
+        )
+        # 故意放一篇只匹配了「Mac」的低覆盖文档，检验不会一票否决后面的真正命中
+        noisy = kn.Chunk("docs/features/other.md", "Mac 权限", "在 Mac 上需要开几个权限")
+        filler = [kn.Chunk("x", f"其他功能{i}", f"待办事项第{i}条，日历提醒会议，音乐歌词同步") for i in range(30)]
+        k.index = kn.Index([mac_doc, noisy] + filler)
+        hits = k.search("Mac 提示已损坏打不开怎么办")
+        self.assertTrue(hits)
+        self.assertEqual(hits[0].title, mac_doc.title)
+
+    def test_empty_heading_and_faq_pick(self):
+        cs = kn.chunk_file("docs/features/a.md", "# 总标题\n\n## ![img](x.png)\n\n正文内容需要超过二十个字符才能通过切段函数的最小长度门槛")
+        self.assertEqual(cs[0].title, "总标题")
+        self.assertIn("docs/faq.md", kn.pick(["README.md", "docs/faq.md"]))
+
+    def test_local_faq_crud_and_search(self):
+        root = tempfile.mkdtemp()
+        k = kn.Knowledge(root, "o/r")
+        self.assertEqual(k.faq_list(), [])
+        items = k.faq_save("支持 Linux 吗", "目前只支持 Windows 10/11 和 macOS 15+（Apple Silicon），暂不支持 Linux。")
+        self.assertEqual(len(items), 1)
+        fid = items[0]["id"]
+        # 重启后仍在索引里，且能被搜到
+        k2 = kn.Knowledge(root, "o/r")
+        k2.floor = 1.0
+        self.assertEqual(k2.search("支持 Linux 吗")[0].source, "local/faq")
+        # 修改与删除
+        items = k2.faq_save("支持 Linux 系统吗", "暂不支持 Linux，支持 Win 和 Mac。", fid=fid)
+        self.assertEqual(items[0]["q"], "支持 Linux 系统吗")
+        self.assertEqual(k2.faq_delete(fid), [])
+        with self.assertRaises(ValueError):
+            k2.faq_delete(fid)
+
     def test_is_question(self):
         self.assertTrue(kn.is_question("这个能关掉吗"))
         self.assertTrue(kn.is_question("怎么设置"))

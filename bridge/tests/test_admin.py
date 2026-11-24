@@ -192,6 +192,23 @@ class AdminServerTest(unittest.TestCase):
         owners = next(i for i in body["items"] if i["key"] == "owners")
         self.assertEqual(owners["labels"], {"wxid_z": "我"})
 
+    def test_knowledge_faq_api(self):
+        from fuxi_bridge import knowledge as kn
+        self.b.knowledge = kn.Knowledge(tempfile.mkdtemp(), "o/r")
+        code, body, _ = self.req("GET", "/api/knowledge/faq")
+        self.assertEqual((code, body["items"]), (200, []))
+        self.assertEqual(self.req("POST", "/api/knowledge/faq", {"q": "", "a": "x"})[0], 400)
+        code, body, _ = self.req("POST", "/api/knowledge/faq", {"q": "支持 Linux 吗", "a": "暂不支持 Linux"})
+        self.assertEqual((code, len(body["items"])), (200, 1))
+        fid = body["items"][0]["id"]
+        code, body, _ = self.req("POST", "/api/knowledge/faq", {"id": fid, "q": "支持 Linux 吗？", "a": "目前支持 Win 和 Mac"})
+        self.assertEqual((code, body["items"][0]["a"]), (200, "目前支持 Win 和 Mac"))
+        _, info, _ = self.req("GET", "/api/knowledge")
+        self.assertEqual(info["sources"].get("常见问答"), 1)
+        code, body, _ = self.req("POST", "/api/knowledge/faq/delete", {"id": fid})
+        self.assertEqual((code, body["items"]), (200, []))
+        self.assertEqual(self.req("POST", "/api/knowledge/faq/delete", {"id": fid})[0], 404)
+
     def test_allow(self):
         self.b.name_of.side_effect = lambda x: {"g@chatroom": "浮屿用户交流群", "wxid_a": "阿青"}.get(x, x)
         self.b.resolve_chat.side_effect = lambda n: "g@chatroom"

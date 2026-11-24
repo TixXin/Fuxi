@@ -14,6 +14,7 @@
   /存表情 [分类]      把 10 分钟内发到这里的最新一个表情存进表情包库（分类默认「开心」，还有傲娇、炸毛）
   /搭话              立即检查一次主动搭话（仍受内核时间窗/间隔/上限约束），回报结果
   /待发              列出等确认的发版公告；/发布 [编号] 发出，/取消 [编号] 放弃
+  /资料              产品助手资料库状态；/资料 同步 立即同步；/资料 搜 问题 看会检索到哪几段
   /设置              查看全部设置；/设置 看图 看说明；/设置 看图 只看私聊 修改（立即生效）
 """
 
@@ -100,6 +101,8 @@ class Control:
                          + ("，只看私聊" if b.vision_mode == "private" else ""))
         if b.voice_mode != "off":
             lines.append("语音转文字：开" + ("（只听私聊）" if b.voice_mode == "private" else ""))
+        if b.cfg.get("assistant_groups"):
+            lines.append(f"产品助手：{len(b.cfg.get('assistant_groups'))} 个群；资料 {b.knowledge.brief()}")
         up = int(time.time() - b.started)
         lines.append(f"已运行：{up // 3600} 小时 {up % 3600 // 60} 分")
         lines.append("问题：" + ("；".join(p for p in probs if not p.startswith("已熔断")) or "无"))
@@ -237,6 +240,24 @@ class Control:
             return f"内核没改成：{e}"
         return f"已设置 {it.label}：{self._show_setting(it, v)}"
 
+    def knowledge(self, arg: str) -> str:
+        b = self.b
+        cmd, _, rest = arg.strip().partition(" ")
+        if cmd == "同步":
+            try:
+                return b.knowledge.sync(b.cfg.get("knowledge_repo"))
+            except Exception as e:
+                return f"同步失败：{e}"
+        if cmd == "搜":
+            if not rest.strip():
+                return "用法：/资料 搜 浮屿怎么在 Mac 上安装"
+            hits = b.knowledge.search(rest)
+            if not hits:
+                return "没找到够相关的资料（群里会按「不确定、转主人」处理）。"
+            return "会附上这几段：\n" + "\n".join(f"- {h.title}：{h.text[:60]}…" for h in hits)
+        return f"资料库：{b.knowledge.brief()}（来源 {b.cfg.get('knowledge_repo')}）\n" \
+               f"产品助手群：{'、'.join(b.cfg.get('assistant_groups')) or '未设置（/设置 产品助手群 群名）'}"
+
     def announce_list(self, _arg: str) -> str:
         return self.b.announcer.listing()
 
@@ -301,4 +322,5 @@ COMMANDS = {
     "/待发": "announce_list",
     "/发布": "announce_publish",
     "/取消": "announce_cancel",
+    "/资料": "knowledge",
 }

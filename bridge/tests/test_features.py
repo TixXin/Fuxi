@@ -8,7 +8,7 @@ from unittest import mock
 
 import numpy as np
 
-from fuxi_bridge import care, control, messages, timing
+from fuxi_bridge import care, control, messages, settings, timing
 from fuxi_bridge.allow import AllowList
 from fuxi_bridge.app import Bridge
 from fuxi_bridge.messages import Message, parse_appmsg
@@ -74,6 +74,7 @@ def bare_bridge() -> Bridge:
     b.extra_names = ["鲸鲸"]
     b.names_cache = {"wxid_a": "小明", "g@chatroom": "测试群", SELF: "我"}
     b.reader = mock.Mock(self_names=lambda: [])
+    b.cfg = settings.Settings(os.path.join(tempfile.mkdtemp(), "settings.json"), {})
     return b
 
 
@@ -208,6 +209,7 @@ class ControlTest(unittest.TestCase):
         b.latency = timing.LatencyStats()
         b.care_on = False
         b.vision_mode = b.voice_mode = "off"
+        b.cfg = settings.Settings(os.path.join(d, "settings.json"), {})
         self.b, self.c = b, control.Control(b)
 
     def test_only_self_in_filehelper(self):

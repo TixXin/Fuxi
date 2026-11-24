@@ -53,6 +53,9 @@ ITEMS: list[Item] = [
          env="FUXI_OWNER_WXIDS"),
     Item("self_names", "bot名字", "list", [], "群里有人 @ 这些名字也算 @ bot（微信昵称和群昵称会自动加上）",
          env="FUXI_SELF_NAMES"),
+    Item("assistant_groups", "产品助手群", "list", [], "这些群里有人 @ bot 提问时，先从浮屿资料里找相关段落给内核参考；"
+         "找不到又像是提问，就私聊主人（群名或 chat_id，多个用逗号）"),
+    Item("knowledge_repo", "资料仓库", "text", "TixXin/Fuyu", "产品助手的资料来源：公开 GitHub 仓库（owner/name），每 6 小时同步一次"),
     Item("announce_to", "发版群", "text", "", "发版公告（POST /announce）默认发到哪个群：群名或 chat_id；空 = 调用方必须指定"),
     Item("quiet", "静默时段", "text", "", "这段时间不自动回复、不主动搭话，如 00:30-07:30；空 = 不静默",
          env="FUXI_QUIET"),

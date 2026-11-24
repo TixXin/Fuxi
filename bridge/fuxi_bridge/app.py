@@ -28,7 +28,7 @@ import time
 from dataclasses import dataclass, field
 
 from . import messages, store
-from . import announce, care, control, images, settings, timing, voice
+from . import announce, care, control, images, knowledge, settings, timing, voice
 from .allow import AllowList
 from .kernel import Kernel, KernelError
 from .messages import Message
@@ -134,6 +134,8 @@ class Bridge:
         self.voices = voice.Voices(self.cache)
         self.media_cache: collections.OrderedDict[str, str] = collections.OrderedDict()   # 看图/语音结果
         self.announcer = announce.Announcer(self, os.path.join(state, "announce"))
+        self.knowledge = knowledge.Knowledge(os.path.join(state, "knowledge"))
+        self.handoffs: collections.deque[tuple[float, str]] = collections.deque(maxlen=50)
         self.control = control.Control(self)
         self.apply_settings()
 
@@ -480,6 +482,7 @@ class Bridge:
             self._understand(chat, batch, tr)
             k0 = time.monotonic()
             payload = self._payload(chat, batch)
+            self._assist(chat, payload)
             log.info("→ 内核 %s [%s] %s", payload["chat_title"] or self.name_of(chat), payload["senderName"],
                      _brief(payload["text"]))
             try:
@@ -494,6 +497,50 @@ class Bridge:
             finally:
                 if sticker:
                     self._send_sticker(chat, sticker, delivered)
+
+    # ---------- 产品助手 ----------
+    def is_assistant_group(self, chat: str) -> bool:
+        groups = self.cfg.get("assistant_groups")
+        return bool(groups) and chat.endswith("@chatroom") and (chat in groups or self.name_of(chat) in groups)
+
+    def _assist(self, chat: str, payload: dict) -> None:
+        """产品助手群里被 @ / 被回复时：从浮屿资料里找相关段落附在消息后面给内核参考；
+        找不到又像是提问时，提示内核如实说不确定，并私聊主人。"""
+        if not self.is_assistant_group(chat) or not (payload.get("at_me") or payload.get("reply_to_bot")):
+            return
+        q = payload["text"]
+        for n in payload.get("self_names") or []:
+            q = q.replace(f"@{n}", " ")
+        q = q.strip()
+        try:
+            hits = self.knowledge.search(q)
+        except Exception as e:   # 检索出错不能挡住回复
+            log.warning("资料检索出错：%s", e)
+            return
+        if hits:
+            payload["text"] += ("\n\n（以下是浮屿的说明资料，回答浮屿用法问题时以它为准；资料里没写的不要编，"
+                                "就说不确定、已经转给主人了）\n" + knowledge.render(hits))
+            log.info("产品助手 %s：附上 %d 段资料（%s）", self.name_of(chat), len(hits), "、".join(h.title[:20] for h in hits))
+        elif knowledge.is_question(q):
+            payload["text"] += "\n\n（浮屿资料里没找到这个问题的答案。不确定就直说，告诉对方已经转给主人了，不要编）"
+            self._handoff(chat, payload, q)
+
+    def _handoff(self, chat: str, payload: dict, q: str) -> None:
+        now = time.time()
+        recent = [t for t, c in self.handoffs if now - t < 3600]
+        if len(recent) >= 10 or any(c == chat and now - t < 180 for t, c in self.handoffs):
+            log.info("产品助手 %s：转人工太频繁，这次不私聊主人", self.name_of(chat))
+            return
+        self.handoffs.append((now, chat))
+        text = (f"【浮屿群求助】{payload.get('senderName') or '有人'} 在「{self.name_of(chat)}」问：\n{q[:300]}\n"
+                "资料里没找到相关内容，可能需要你来回。")
+
+        def go():
+            job = self.send(SendJob(chat="filehelper", text=text, source="control"))
+            if not job.ok:
+                log.warning("转人工通知没发出去：%s", job.error)
+        threading.Thread(target=go, name="handoff", daemon=True).start()
+        log.info("产品助手 %s：资料里没找到，已转主人", self.name_of(chat))
 
     def _understand(self, chat: str, batch: list[Message], tr: "timing.Trace") -> None:
         """图片、语音交给内核前先看懂/听懂：「[图片]（图片内容：…）」「[语音 5秒]（语音内容：…）」。
@@ -724,6 +771,8 @@ class Bridge:
         if self.vision_mode != "off":
             threading.Thread(target=self.images.ensure_key, name="imgkey", daemon=True).start()
         threading.Thread(target=self.care.loop, name="care", daemon=True).start()   # 关着时 tick 直接跳过
+        threading.Thread(target=self.knowledge.loop, name="knowledge", daemon=True,
+                         args=(lambda: self.cfg.get("knowledge_repo"), lambda: bool(self.cfg.get("assistant_groups")))).start()
         threading.Thread(target=self._heartbeat_loop, name="heartbeat", daemon=True).start()
         threading.Thread(target=self._sync_contacts, name="contacts", daemon=True).start()
         from .sender import _ocr

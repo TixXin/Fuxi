@@ -81,6 +81,7 @@ class UnderstandVoiceTest(unittest.TestCase):
         from fuxi_bridge.app import Bridge
         b = object.__new__(Bridge)
         b.vision_mode, b.voice_mode = "off", "all"
+        b.cfg = __import__("fuxi_bridge.settings").settings.Settings(os.path.join(tempfile.mkdtemp(), "s.json"), {})
         b.voices = mock.Mock()
         b.voices.load.return_value = b"RIFF" + b"\0" * 40
         b.kernel = mock.Mock()

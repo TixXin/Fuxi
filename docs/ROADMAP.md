@@ -78,9 +78,12 @@
 群反馈闭环的完整设计见 [feedback-loop.md](feedback-loop.md)。已定：只收集浮屿用户群一个群；
 修复默认走云端 GitHub Action，需要本机构建的走 Mac 本地；开 issue、合并、发版都要主人点头。
 
-- [ ] **F1 反馈收集 + 每日摘要（M）**：桥接把浮屿用户群的消息（含图片描述、语音转文字）攒批交给 DeepSeek，
-      分成 bug / 建议 / 提问 / 无关并合并同一问题，存 `/state` 反馈库；每天私聊主人一份带编号的摘要。
-      先只出摘要，跑一两周看分类准确度。
+- [x] **F1 反馈收集 + 每日摘要 + 群小结（M）**：`bridge/fuxi_bridge/feedback.py`。反馈群（浮屿用户交流群
+      `58017233233@chatroom`）每条消息都记下（不管白名单、静默、有没有 @），看图 / 语音结果补写；每小时交给内核模型
+      （新扩展 `POST /api/fuxi/complete`，沿用内核模型配置）分成 bug / 建议 / 提问并合并同一问题，反馈人按消息序号反查、
+      不让模型写人名；用 F2 缓存查相关 issue。每天 12:00 私聊主人摘要，20:00 在群里发当天小结（只有标题和处理状态，
+      没有反馈不发，错过 2 小时不补）。遥控 `/反馈`、`/反馈 编号`、`/反馈 整理|摘要|小结`、`/忽略 编号`。
+      设置：`反馈群`、`反馈摘要时间`、`群小结时间`。先跑一两周看分类准确度，再接 F3。
 - [x] **F2 浮屿仓库只读同步（M）**：`bridge/fuxi_bridge/fuyu.py` 每 30 分钟同步 Releases（ETag）、Issues / PR（增量）
       到 `/state/fuyu/`，机房直连 GitHub API 即可、不用 token；记录发版 / PR 合并 / issue 开关事件。
       「修了没」：PR 写了 fixes/修复 #N 或带 issue 编号（如 [B93]）且已合并 → 推出包含它的版本。
@@ -91,7 +94,6 @@
 - [ ] **F3 批准后开 issue + agent 修复（L）**：遥控 `/修 N` `/忽略 N`；批准后脱敏开 issue（`from-wechat`，
       写 token 与只读 token 分开）；浮屿仓库装 Claude Code Action 出 draft PR；可选 Mac 守护进程领
       `fix-local` 的 issue，起 T3 Code / `claude -p` 在独立 worktree 修。群友原话只作问题描述，agent 无密钥、不自动合并。
-- [ ] **待补信息**：用户群 chat_id、摘要发送时间与去处。（浮屿仓库：TixXin/Fuyu，公开，main）
 
 - [x] **发版自动发群（S）**：`POST /announce {key, text, image_base64}` 先把内容发到文件传输助手预览，
       主人回 `/发布 编号` 才发群（`/取消`、`/待发`；24 小时过期）；key 幂等，状态存状态卷，重跑不重复预览/发群。

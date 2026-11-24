@@ -56,6 +56,10 @@ ITEMS: list[Item] = [
     Item("assistant_groups", "产品助手群", "list", [], "这些群里有人 @ bot 提问时，先从浮屿资料里找相关段落给内核参考；"
          "找不到又像是提问，就私聊主人（群名或 chat_id，多个用逗号）"),
     Item("knowledge_repo", "资料仓库", "text", "TixXin/Fuyu", "产品助手的资料来源：公开 GitHub 仓库（owner/name），每 6 小时同步一次"),
+    Item("feedback_groups", "反馈群", "list", [], "收集这些群里对浮屿的反馈（bug / 建议 / 提问），整理后发摘要和群小结"
+         "（群名或 chat_id，多个用逗号；空 = 不收集）"),
+    Item("digest_time", "反馈摘要时间", "text", "12:00", "每天几点私聊主人发反馈摘要（过去 24 小时）；空 = 不发"),
+    Item("group_summary_time", "群小结时间", "text", "20:00", "每天几点在反馈群发当天的反馈小结（不带人名，没有反馈不发）；空 = 不发"),
     Item("fuyu_sync", "浮屿同步", "bool", True, "每 30 分钟同步浮屿仓库的版本、issue、PR 到 /state/fuyu（仓库同「资料仓库」），"
          "用来查进度、反馈查重"),
     Item("fuyu_notify", "浮屿动态", "choice", "release", "同步发现变化时私聊主人（发到文件传输助手）",
@@ -119,6 +123,8 @@ def parse(item: Item, raw) -> object:
     s = str(raw).strip()
     if s.lower() in _EMPTY:
         return ""
+    if item.key in ("digest_time", "group_summary_time") and not re.fullmatch(r"([01]?\d|2[0-3]):[0-5]\d", s):
+        raise ValueError(f"{item.label} 格式：12:00")
     if item.key == "quiet" and not _QUIET.match(s):
         raise ValueError("静默时段格式：00:30-07:30")
     return s

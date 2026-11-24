@@ -10,5 +10,6 @@ const original = routes.createRouter;
 routes.createRouter = function createRouter(runtime) {
   const router = original(runtime);
   require('./asr')(router);
+  require('./complete')(router);
   return router;
 };

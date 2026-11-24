@@ -15,6 +15,9 @@
   /搭话              立即检查一次主动搭话（仍受内核时间窗/间隔/上限约束），回报结果
   /待发              列出等确认的发版公告；/发布 [编号] 发出，/取消 [编号] 放弃
   /资料              产品助手资料库状态；/资料 同步 立即同步；/资料 搜 问题 看会检索到哪几段
+  /反馈              最近 7 天整理出的群反馈；/反馈 3 看详情和原话；/反馈 整理 立即整理；
+                     /反馈 摘要 预览给主人的摘要；/反馈 小结 预览今晚的群小结（只预览，不发）
+  /忽略 编号          这条反馈不再出现在摘要和群小结里
   /浮屿              浮屿版本、issue 统计和最近动态；/浮屿 123 查进度；/浮屿 搜 问题 找相关 issue；/浮屿 同步
   /设置              查看全部设置；/设置 看图 看说明；/设置 看图 只看私聊 修改（立即生效）
 """
@@ -104,6 +107,8 @@ class Control:
             lines.append("语音转文字：开" + ("（只听私聊）" if b.voice_mode == "private" else ""))
         if b.cfg.get("assistant_groups"):
             lines.append(f"产品助手：{len(b.cfg.get('assistant_groups'))} 个群；资料 {b.knowledge.brief()}")
+        if b.cfg.get("feedback_groups"):
+            lines.append(f"群反馈：{b.feedback.brief()}")
         if b.cfg.get("fuyu_sync"):
             lines.append(f"浮屿仓库：{b.fuyu.brief()}")
         up = int(time.time() - b.started)
@@ -261,6 +266,31 @@ class Control:
         return f"资料库：{b.knowledge.brief()}（来源 {b.cfg.get('knowledge_repo')}）\n" \
                f"产品助手群：{'、'.join(b.cfg.get('assistant_groups')) or '未设置（/设置 产品助手群 群名）'}"
 
+    def feedback(self, arg: str) -> str:
+        b = self.b
+        cmd = arg.strip().lstrip("#")
+        if cmd.isdigit():
+            return b.feedback.detail(int(cmd))
+        if cmd == "整理":
+            try:
+                return b.feedback.classify()
+            except Exception as e:
+                return f"整理失败：{e}"
+        if cmd == "摘要":
+            return b.feedback.digest(since=time.time() - 86400)
+        if cmd == "小结":
+            return b.feedback.group_summary() or "今天还没有反馈，今晚不会发群小结。"
+        groups = b.cfg.get("feedback_groups")
+        head = (f"反馈群：{'、'.join(groups)}；{b.feedback.brief()}\n" if groups
+                else "还没设置反馈群（/设置 反馈群 群名）\n")
+        return head + b.feedback.listing()
+
+    def ignore(self, arg: str) -> str:
+        n = arg.strip().lstrip("#")
+        if not n.isdigit():
+            return "用法：/忽略 3"
+        return self.b.feedback.ignore(int(n))
+
     def fuyu(self, arg: str) -> str:
         from .fuyu import render_event
         b = self.b
@@ -352,4 +382,6 @@ COMMANDS = {
     "/取消": "announce_cancel",
     "/资料": "knowledge",
     "/浮屿": "fuyu",
+    "/反馈": "feedback",
+    "/忽略": "ignore",
 }

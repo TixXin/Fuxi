@@ -15,6 +15,7 @@
 | `docker-entrypoint.js` | 容器启动时把 `FUXI_KERNEL_TOKEN`、端口写入 `data/config.json`（并默认关闭 `log.traceRaw`），随后 `exec node -r ./fuxi/preload.js server.js` |
 | `fuxi/preload.js` | 预加载：包一层 `createRouter`，追加浮汐自己的接口；安装链接阅读增强（不改上游文件） |
 | `fuxi/asr.js` | `POST /api/fuxi/asr`：WAV → 文字，用内核的 voice 配置（调用方式同上游「测试语音」，返回完整文本） |
+| `fuxi/complete.js` | `POST /api/fuxi/complete {system, text, maxTokens}`：用内核的聊天模型配置做一次非流式补全（关思考），给桥接整理群反馈用 |
 | `fuxi/links.js`、`fuxi/linkWorker.js` | 链接阅读增强：替换 `src/adapters/links.js` 导出的 `describeLink` / `formatForPrompt`。普通网页用 Readability 抽正文（线程里跑），GitHub issue / PR / release 走 API，短视频交回上游；输出控制在上游 `linkBlock` 的 1200 字截断内 |
 | `fuxi/package.json`、`fuxi/test/` | 扩展依赖（`@mozilla/readability`、`linkedom`，镜像里 `npm ci`）与单元测试（`node --test kernel/fuxi/test/`） |
 | `Dockerfile` | node:22-slim 镜像，装 `fuxi/` 依赖，`data/` 为卷 |

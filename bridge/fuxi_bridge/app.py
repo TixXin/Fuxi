@@ -29,7 +29,7 @@ import time
 from dataclasses import dataclass, field
 
 from . import messages, store
-from . import announce, care, control, fuyu, images, knowledge, settings, timing, voice
+from . import announce, care, control, feedback, fuyu, images, knowledge, settings, timing, voice
 from .allow import AllowList
 from .kernel import Kernel, KernelError
 from .messages import Message
@@ -142,6 +142,9 @@ class Bridge:
         self.knowledge = knowledge.Knowledge(os.path.join(state, "knowledge"))
         self.fuyu = fuyu.Fuyu(os.path.join(state, "fuyu"))
         self.fuyu.on_events = self._fuyu_events
+        self.feedback = feedback.Feedback(os.path.join(state, "feedback"),
+                                          complete=lambda system, text: self.kernel.complete(system, text, 2500),
+                                          fuyu=self.fuyu)
         self.handoffs: collections.deque[tuple[float, str]] = collections.deque(maxlen=50)
         self.control = control.Control(self)
         self.apply_settings()
@@ -408,6 +411,8 @@ class Bridge:
                 log.exception("读取 %s 失败", chat)
                 continue
             cmds = [m for m in new if control.is_command(m, self.self_wxid)]
+            if new and self.is_feedback_group(chat):
+                self._collect(new)
             for m in cmds:
                 if m.create_time >= time.time() - self.stale:
                     self.pool.submit(self._run_command, m.text)
@@ -576,6 +581,76 @@ class Bridge:
         threading.Thread(target=go, name="handoff", daemon=True).start()
         log.info("产品助手 %s：资料里没找到，已转主人", self.name_of(chat))
 
+    # ---------- 群反馈（F1） ----------
+    def is_feedback_group(self, chat: str) -> bool:
+        groups = self.cfg.get("feedback_groups")
+        return bool(groups) and chat.endswith("@chatroom") and (chat in groups or self.name_of(chat) in groups)
+
+    def _collect(self, new: list[Message]) -> None:
+        """反馈群的每条消息都记下来（不管白名单、静默、有没有 @ bot），整理交给 feedback.py。"""
+        for m in new:
+            if m.type in ("system", "revoke") or not m.text.strip():
+                continue
+            if m.is_self:
+                role, name = "bot", "浮汐"
+            else:
+                role = "owner" if m.sender in self.masters else ""
+                name = self.name_of(m.sender) if m.sender else "群友"
+            try:
+                self.feedback.add(m.msg_id, float(m.create_time), m.chat, m.sender, name, self._render(m), role)
+            except OSError as e:
+                log.warning("反馈收集写入失败：%s", e)
+
+    def _feedback_loop(self) -> None:
+        """每分钟看一次：整点前后整理（每小时）、到点发摘要和群小结。"""
+        time.sleep(60)
+        while True:
+            try:
+                self._feedback_tick()
+            except Exception:
+                log.exception("群反馈定时任务出错")
+            time.sleep(60)
+
+    def _feedback_tick(self, now: float | None = None) -> None:
+        if not self.cfg.get("feedback_groups"):
+            return
+        fb, now = self.feedback, now or time.time()
+        digest_due = fb.due("digest", self.cfg.get("digest_time"), now)
+        group_due = fb.due("group", self.cfg.get("group_summary_time"), now)
+        if digest_due or group_due or now - float(fb.meta.get("classified_at") or 0) >= feedback.CLASSIFY_EVERY:
+            try:
+                msg = fb.classify(now)
+                if msg != "没有新消息":
+                    log.info("群反馈：%s", msg)
+            except Exception as e:   # 整理失败也照样发（用已有的条目），错误会写在摘要末尾
+                log.warning("群反馈整理失败：%s", e)
+        if digest_due:
+            since = float(fb.meta.get("digest_at") or 0) or now - 86400
+            text = fb.digest(since=max(since, now - 3 * 86400))
+            to = self.masters[0] if self.masters else "filehelper"
+            fb.mark("digest", now)
+            job = self.send(SendJob(chat=to, text=text, source="control"))
+            if job.ok:
+                log.info("反馈摘要已发给主人")
+            else:
+                log.warning("反馈摘要没发出去：%s", job.error)
+        if group_due:
+            fb.mark("group", now)
+            text = fb.group_summary()
+            if not text:
+                log.info("群反馈：今天没有反馈，不发群小结")
+                return
+            day = feedback._day(now)
+            chats = {c for i in fb.items if feedback._day(i["last_seen"]) == day for c in i["chats"]}
+            for chat in sorted(chats):
+                if not self.is_feedback_group(chat) or not self._allowed_chat(chat):
+                    continue
+                job = self.send(SendJob(chat=chat, text=text, source="control"))
+                if job.ok:
+                    log.info("群小结已发到 %s", self.name_of(chat))
+                else:
+                    log.warning("群小结没发到 %s：%s", self.name_of(chat), job.error)
+
     def _fuyu_events(self, events: list[dict]) -> None:
         """浮屿仓库同步发现变化：按「浮屿动态」设置私聊主人（文件传输助手）。"""
         mode = self.cfg.get("fuyu_notify")
@@ -622,6 +697,8 @@ class Bridge:
                         self.media_cache.popitem(last=False)
                 if got:
                     m.text = f"{m.text}（{label}：{got}）"
+                    if self.is_feedback_group(chat):
+                        self.feedback.annotate(m.msg_id, self._render(m))
         if did:
             tr.add("vision", time.monotonic() - t0)
 
@@ -829,6 +906,7 @@ class Bridge:
                          args=(lambda: self.cfg.get("knowledge_repo"), lambda: bool(self.cfg.get("assistant_groups")))).start()
         threading.Thread(target=self.fuyu.loop, name="fuyu", daemon=True,
                          args=(lambda: self.cfg.get("knowledge_repo"), lambda: bool(self.cfg.get("fuyu_sync")))).start()
+        threading.Thread(target=self._feedback_loop, name="feedback", daemon=True).start()
         threading.Thread(target=self._heartbeat_loop, name="heartbeat", daemon=True).start()
         threading.Thread(target=self._sync_contacts, name="contacts", daemon=True).start()
         from .sender import _ocr

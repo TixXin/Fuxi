@@ -125,6 +125,7 @@ class SeeImagesTest(unittest.TestCase):
         from fuxi_bridge.app import Bridge
         b = object.__new__(Bridge)
         b.vision_mode = "all"
+        b.cfg = __import__("fuxi_bridge.settings").settings.Settings(os.path.join(tempfile.mkdtemp(), "s.json"), {})
         b.images = mock.Mock()
         b.images.load.return_value = (b"jpg", "full")
         b.kernel = mock.Mock()

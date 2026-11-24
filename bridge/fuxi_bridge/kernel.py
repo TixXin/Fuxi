@@ -118,6 +118,14 @@ class Kernel:
             raise KernelError(f"语音识别失败：{r.get('error')}")
         return str(r.get("text") or "").strip()
 
+    def complete(self, system: str, text: str, max_tokens: int = 1500) -> str:
+        """后台整理用的大模型调用（浮汐内核扩展 /api/fuxi/complete，沿用内核的聊天模型配置）。"""
+        r = self._req("POST", "/api/fuxi/complete", {"system": system, "text": text, "maxTokens": max_tokens},
+                      timeout=130)
+        if not r.get("ok"):
+            raise KernelError(f"模型调用失败：{r.get('error')}")
+        return str(r.get("text") or "").strip()
+
     def config(self) -> dict:
         return self._req("GET", "/api/config", timeout=10).get("config") or {}
 

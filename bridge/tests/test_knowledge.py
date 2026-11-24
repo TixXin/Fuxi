@@ -153,12 +153,97 @@ class AssistTest(unittest.TestCase):
         self.assertIn("【截图 › 贴图】", p["text"])
         self.assertTrue(p["text"].startswith("@浮汐 截图怎么贴到屏幕上\n\n（以下是浮屿的说明资料"))
 
-    def test_only_when_addressed_in_assistant_group(self):
+    def test_non_assistant_group_ignored(self):
         b = assist_bridge()
-        for chat, p in (("g@chatroom", payload("截图怎么贴到屏幕上", at=False)), ("h@chatroom", payload("@浮汐 截图怎么贴"))):
+        p = payload("@浮汐 截图怎么贴")
+        before = p["text"]
+        b._assist("h@chatroom", p)
+        self.assertEqual(p["text"], before)
+
+    def test_proactive_qa_wakes_and_attaches_when_answerable(self):
+        b = assist_bridge()
+        p = payload("截图怎么贴到屏幕上", at=False)
+        with mock.patch("fuxi_bridge.assist.random.random", return_value=0.0):
+            b._assist("g@chatroom", p)
+        self.assertTrue(p["at_me"])
+        self.assertIn("【截图 › 贴图】", p["text"])
+        self.assertIn("没直接 @ 你", p["text"])
+        b.send.assert_not_called()                                    # 主动答疑不转人工
+
+    def test_proactive_qa_stays_silent_when_unanswerable(self):
+        b = assist_bridge()
+        p = payload("浮屿能导出到 Notion 吗", at=False)
+        before = p["text"]
+        with mock.patch("fuxi_bridge.assist.random.random", return_value=0.0):
+            b._assist("g@chatroom", p)
+        self.assertFalse(p["at_me"])
+        self.assertEqual(p["text"], before)
+        b.send.assert_not_called()
+
+    def test_proactive_skips_when_talking_to_others(self):
+        b = assist_bridge()
+        for extra in ({"at_other": True}, {"reply_to_user_id": "wxid_b"}, {"mentioned_names": ["小红"]}):
+            p = {**payload("截图怎么贴到屏幕上", at=False), **extra}
             before = p["text"]
-            b._assist(chat, p)
+            with mock.patch("fuxi_bridge.assist.random.random", return_value=0.0):
+                b._assist("g@chatroom", p)
+            self.assertFalse(p["at_me"])
             self.assertEqual(p["text"], before)
+
+    def test_proactive_fuyu_chat_respects_probability_and_cooldown(self):
+        b = assist_bridge()
+        b.cfg.set("fuyu_chat_pct", 20)
+        b.cfg.set("fuyu_chat_cooldown", 240)
+        # 非浮屿闲聊：完全不动，交给内核走 3%
+        p0 = payload("今天中午吃什么好呢", at=False)
+        with mock.patch("fuxi_bridge.assist.random.random", return_value=0.0):
+            b._assist("g@chatroom", p0)
+        self.assertFalse(p0["at_me"])
+
+        # 概率未命中（0.5 >= 0.20）
+        p1 = payload("浮屿这次更新真好用", at=False)
+        with mock.patch("fuxi_bridge.assist.random.random", return_value=0.5), \
+             mock.patch("fuxi_bridge.assist.time.monotonic", return_value=1000.0):
+            b._assist("g@chatroom", p1)
+        self.assertFalse(p1["at_me"])
+
+        # 概率命中（0.1 < 0.20）→ 唤醒并记录冷却
+        p2 = payload("浮屿这次更新真好用", at=False)
+        with mock.patch("fuxi_bridge.assist.random.random", return_value=0.1), \
+             mock.patch("fuxi_bridge.assist.time.monotonic", return_value=1000.0):
+            b._assist("g@chatroom", p2)
+        self.assertTrue(p2["at_me"])
+        self.assertIn("在聊浮屿", p2["text"])
+
+        # 冷却期内（+60s < 240s）不再主动插话
+        p3 = payload("浮屿的灵动岛很丝滑", at=False)
+        with mock.patch("fuxi_bridge.assist.random.random", return_value=0.0), \
+             mock.patch("fuxi_bridge.assist.time.monotonic", return_value=1060.0):
+            b._assist("g@chatroom", p3)
+        self.assertFalse(p3["at_me"])
+
+        # 冷却过后（+300s >= 240s）再次允许
+        p4 = payload("浮屿的灵动岛很丝滑", at=False)
+        with mock.patch("fuxi_bridge.assist.random.random", return_value=0.0), \
+             mock.patch("fuxi_bridge.assist.time.monotonic", return_value=1300.0):
+            b._assist("g@chatroom", p4)
+        self.assertTrue(p4["at_me"])
+
+    def test_proactive_generic_version_word_without_fuyu_ignored(self):
+        b = assist_bridge()
+        b.fuyu.latest.return_value = {"tag_name": "v0.3.13"}
+        b.fuyu.version_brief.return_value = "浮屿最新正式版 v0.3.13"
+        # 未 @ 且没提浮屿，泛泛说「微信更新了吗」不应误判为浮屿版本提问
+        p = payload("微信最新版本是多少？", at=False)
+        with mock.patch("fuxi_bridge.assist.random.random", return_value=0.0):
+            b._assist("g@chatroom", p)
+        self.assertFalse(p["at_me"])
+        # 提了浮屿就触发
+        p2 = payload("浮屿最新版本是多少？", at=False)
+        with mock.patch("fuxi_bridge.assist.random.random", return_value=0.0):
+            b._assist("g@chatroom", p2)
+        self.assertTrue(p2["at_me"])
+        self.assertIn("v0.3.13", p2["text"])
 
     def test_handoff_once(self):
         b = assist_bridge()

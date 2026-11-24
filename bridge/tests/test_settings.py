@@ -81,6 +81,9 @@ class BridgeSettingsTest(unittest.TestCase):
         self.assertTrue(b.get_setting("stickers"))
         b.set_setting("stickers", "关")
         b.kernel.patch_config.assert_called_once_with(("features", "stickers"), False)
+        b.set_setting("master_always_reply", "关")
+        b.kernel.patch_config.assert_called_with(("group", "masterAlwaysReply"), False)
+        self.assertEqual((b.get_setting("fuyu_qa_pct"), b.get_setting("fuyu_chat_pct"), b.get_setting("fuyu_chat_cooldown")), (90, 20, 240))
 
 
 class ControlSettingsTest(unittest.TestCase):

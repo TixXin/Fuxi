@@ -187,6 +187,39 @@ class PayloadTest(unittest.TestCase):
         p = b._payload("g@chatroom", [msg(type="pat", text="[拍一拍] 小明 拍了拍我", patted=SELF)])
         self.assertTrue(p["at_me"])
 
+    def test_other_at_sets_at_other_and_mentioned_names(self):
+        b = bare_bridge()
+        b.names_cache["wxid_b"] = "小红"
+        m = msg(text="@小红\u2005你看一下", source="<msgsource><atuserlist>wxid_b</atuserlist></msgsource>")
+        p = b._payload("g@chatroom", [m])
+        self.assertFalse(p["at_me"])
+        self.assertTrue(p["at_other"])
+        self.assertIn("小红", p["mentioned_names"])
+
+    def test_blind_media_in_group_skips_kernel(self):
+        b = bare_bridge()
+        b.chat_locks = collections.defaultdict(__import__("threading").Lock)
+        b.paused = False
+        b.reader.revoked = mock.Mock(return_value=set())
+        b.kernel = mock.Mock()
+        b.kernel.webhook.return_value = {"action": "ignore"}
+        tr = timing.Trace(0, 0)
+        # 群里纯 [图片]（未看图）且未 @ → 直接跳过内核，不盲猜
+        b._dispatch_traced("g@chatroom", [msg(type="image", text="[图片]")], tr)
+        b.kernel.webhook.assert_not_called()
+        self.assertIn("纯媒体", tr.reason)
+        # 看懂了的图片（带图片内容）→ 正常进内核
+        b._dispatch_traced("g@chatroom", [msg(type="image", text="[图片]（图片内容：一只猫）")], timing.Trace(0, 0))
+        b.kernel.webhook.assert_called_once()
+        # 私聊里的 [图片] → 正常进内核
+        b.kernel.webhook.reset_mock()
+        b._dispatch_traced("wxid_a", [msg(chat="wxid_a", type="image", text="[图片]")], timing.Trace(0, 0))
+        b.kernel.webhook.assert_called_once()
+        # 群里图片 + 文字同批 → 正常进内核
+        b.kernel.webhook.reset_mock()
+        b._dispatch_traced("g@chatroom", [msg(local_id=1, type="image", text="[图片]"), msg(local_id=2, text="看看这个")], timing.Trace(0, 0))
+        b.kernel.webhook.assert_called_once()
+
 
 class ControlTest(unittest.TestCase):
     def setUp(self):

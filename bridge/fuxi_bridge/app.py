@@ -20,6 +20,7 @@ import concurrent.futures as cf
 import logging
 import os
 import queue
+import re
 import threading
 import time
 
@@ -122,6 +123,7 @@ class Bridge(SendingMixin, ReplyMixin, AssistMixin, GroupWorkMixin):
         self.outreach = outreach.Outreach(self, os.path.join(state, "outreach"))
         self.fixflow = issues.FixFlow(self.feedback, issues.Issues(lambda: self.cfg.get("knowledge_repo") or self.fuyu.repo))
         self.handoffs: collections.deque[tuple[float, str]] = collections.deque(maxlen=50)
+        self._fuyu_proactive_at: dict[str, float] = {}
         self.control = control.Control(self)
         self.apply_settings()
 
@@ -314,6 +316,20 @@ class Bridge(SendingMixin, ReplyMixin, AssistMixin, GroupWorkMixin):
         if job.error:
             log.error("遥控回报发送失败：%s", job.error)
 
+    @staticmethod
+    def _is_blind_media(batch: list[Message]) -> bool:
+        """这批消息（最后发言人）是否全是未看懂/未听懂的纯媒体（如群里关着看图时的 [图片]、[视频]、[动画表情]、[语音]）。"""
+        last = batch[-1]
+        mine = [m for m in batch if m.sender == last.sender]
+        if not mine:
+            return False
+        for m in mine:
+            if m.type not in ("image", "video", "emoji", "voice") or m.quote:
+                return False
+            if "（图片内容：" in m.text or "（语音内容：" in m.text:
+                return False
+        return True
+
     def _payload(self, chat: str, batch: list[Message]) -> dict:
         last = batch[-1]
         names = self.self_names()
@@ -323,6 +339,12 @@ class Bridge(SendingMixin, ReplyMixin, AssistMixin, GroupWorkMixin):
         at_me = (any(self.self_wxid in messages.at_users(m.source) for m in batch)
                  or any(f"@{n}" in bare for n in names)
                  or any(m.type == "pat" for m in mine))
+        other_uids = [u for m in mine for u in messages.at_users(m.source) if u != self.self_wxid]
+        self_lower = {n.lower() for n in names}
+        text_ats = [m.group(1) for m in re.finditer(r"(?:^|[\s，,。！？!?])@([^\s@，,。！？!?\u2005]+)", bare)]
+        other_text = [a for a in text_ats if a.lower() not in self_lower and not any(a.lower() in s or s in a.lower() for s in self_lower)]
+        other_names = [self.name_of(u) for u in other_uids if u != "notify@all"] + other_text
+        mentioned = list(dict.fromkeys([n for n in names if f"@{n}" in bare] + other_names))
         quote = next((m.quote for m in reversed(mine) if m.quote), {})
         sender_name = self.name_of(last.sender) if last.sender else ""
         return {
@@ -333,10 +355,11 @@ class Bridge(SendingMixin, ReplyMixin, AssistMixin, GroupWorkMixin):
             "text": text,
             "msg_id": f"{chat}:{last.shard}:" + "|".join(str(m.local_id) for m in batch),
             "at_me": at_me,
+            "at_other": bool(other_uids or other_text),
             "reply_to_bot": quote.get("sender") == self.self_wxid if quote else False,
             "reply_to_name": quote.get("name", ""),
             "reply_to_user_id": quote.get("sender", ""),
-            "mentioned_names": [n for n in names if f"@{n}" in bare],
+            "mentioned_names": mentioned,
             "self_names": names,
             "chat_title": self.name_of(chat) if last.is_group else "",
         }
@@ -381,6 +404,13 @@ class Bridge(SendingMixin, ReplyMixin, AssistMixin, GroupWorkMixin):
             self._understand(chat, batch, tr)
             k0 = time.monotonic()
             payload = self._payload(chat, batch)
+            if payload["chat_type"] == "group" and self._is_blind_media(batch):
+                if not payload["at_me"] and not payload["reply_to_bot"]:
+                    log.info("跳过群里纯媒体（未看图/未听语音且未 @）：%s [%s]",
+                             payload["chat_title"] or self.name_of(chat), payload["senderName"])
+                    tr.reason = "群里纯媒体未看懂，跳过"
+                    return
+                payload["text"] += "\n（提示：当前群聊未开启看图/听语音，你看不到这段媒体的具体内容，不要凭空猜测，自然说明看不到即可）"
             if self._source_asked(payload):
                 url = self.cfg.get("source_url")
                 log.info("%s 问源码，回仓库地址", self.name_of(chat))

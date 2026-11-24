@@ -30,7 +30,7 @@ export const NAV: { label: string; items: NavItem[] }[] = [
   {
     label: "机器人",
     items: [
-      { id: "chats", label: "会话", icon: Users, phase: "C" },
+      { id: "chats", label: "会话", icon: Users },
       { id: "persona", label: "人设", icon: Sparkles, phase: "D" },
       { id: "settings", label: "设置", icon: SlidersHorizontal },
     ],
@@ -38,8 +38,8 @@ export const NAV: { label: string; items: NavItem[] }[] = [
   {
     label: "浮屿",
     items: [
-      { id: "announce", label: "发版公告", icon: Megaphone, phase: "C" },
-      { id: "feedback", label: "群反馈", icon: Inbox, phase: "C" },
+      { id: "announce", label: "发版公告", icon: Megaphone },
+      { id: "feedback", label: "群反馈", icon: Inbox },
       { id: "knowledge", label: "资料库", icon: BookOpen },
     ],
   },

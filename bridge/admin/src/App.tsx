@@ -6,6 +6,9 @@ import { applyTheme, savedTheme, toggleTheme } from "./lib/theme";
 import { useApi } from "./lib/useApi";
 import { ALL } from "./nav";
 import { Overview } from "./pages/Overview";
+import { Announce } from "./pages/Announce";
+import { Chats } from "./pages/Chats";
+import { Feedback } from "./pages/Feedback";
 import { Knowledge } from "./pages/Knowledge";
 import { Placeholder } from "./pages/Placeholder";
 import { Settings } from "./pages/Settings";
@@ -73,7 +76,10 @@ export function App() {
         {page === "stream" && <Stream live={live} onMenu={openNav} />}
         {page === "settings" && <Settings onMenu={openNav} />}
         {page === "knowledge" && <Knowledge onMenu={openNav} onNavigate={navigate} />}
-        {!["overview", "stream", "settings", "knowledge"].includes(page) && (
+        {page === "chats" && <Chats onMenu={openNav} />}
+        {page === "announce" && <Announce onMenu={openNav} />}
+        {page === "feedback" && <Feedback onMenu={openNav} />}
+        {!["overview", "stream", "settings", "knowledge", "chats", "announce", "feedback"].includes(page) && (
           <Placeholder title={item.label} phase={item.phase} onMenu={openNav} />
         )}
       </main>

@@ -76,7 +76,7 @@ class AdminServerTest(unittest.TestCase):
         try:
             return r.status, json.loads(raw), r
         except ValueError:
-            return r.status, raw.decode(), r
+            return r.status, raw.decode(errors="replace"), r
 
     def test_token_required(self):
         for tok in (None, "", "wrong"):
@@ -190,6 +190,76 @@ class AdminServerTest(unittest.TestCase):
         _, body, _ = self.req("GET", "/api/settings")
         owners = next(i for i in body["items"] if i["key"] == "owners")
         self.assertEqual(owners["labels"], {"wxid_z": "我"})
+
+    def test_allow(self):
+        self.b.name_of.side_effect = lambda x: {"g@chatroom": "浮屿用户交流群", "wxid_a": "阿青"}.get(x, x)
+        self.b.resolve_chat.side_effect = lambda n: "g@chatroom"
+        self.b.cfg.set("assistant_groups", ["浮屿用户交流群"])
+        saved = {}
+        self.b.allowlist.set.side_effect = lambda items, names: (saved.update(names), setattr(self.b.allowlist, "items", items))
+        _, body, _ = self.req("GET", "/api/allow")
+        g = next(i for i in body["items"] if i["chat_id"] == "g@chatroom")
+        self.assertEqual((g["name"], g["group"], g["roles"]), ("浮屿用户交流群", True, ["产品助手"]))
+        code, body, _ = self.req("POST", "/api/allow", {"add": ["wxid_a"]})
+        self.assertEqual(code, 200)
+        self.assertIn("wxid_a", self.b.allowlist.items)
+        code, body, _ = self.req("POST", "/api/allow", {"remove": ["wxid_a"]})
+        self.assertEqual(code, 400)                                           # 移出要确认
+        self.assertIn("wxid_a", self.b.allowlist.items)
+        code, _, _ = self.req("POST", "/api/allow", {"remove": ["wxid_a"], "confirm": True})
+        self.assertNotIn("wxid_a", self.b.allowlist.items)
+        self.assertEqual(self.req("POST", "/api/allow", {"add": ["../x y"]})[0], 400)
+        self.b.reader.sessions.return_value = [{"username": "gh_news", "last_timestamp": 3},
+                                               {"username": "wxid_a", "last_timestamp": 2},
+                                               {"username": "g@chatroom", "last_timestamp": 1}]
+        _, body, _ = self.req("GET", "/api/chats/recent")
+        self.assertEqual([(i["chat_id"], i["allowed"]) for i in body["items"]], [("wxid_a", False), ("g@chatroom", True)])
+        self.assertNotIn("summary", body["items"][0])                         # 不带消息摘要
+        self.b.reader.contacts.return_value = [{"username": "wxid_a", "name": "阿青", "remark": "", "alias": ""}]
+        _, body, _ = self.req("GET", "/api/chats?q=%E9%98%BF")
+        self.assertEqual(body["items"][0]["chat_id"], "wxid_a")
+
+    def test_announce(self):
+        from fuxi_bridge.announce import Announcer
+        self.b.name_of.side_effect = lambda x: "浮屿用户交流群"
+        self.b.send.side_effect = lambda job: setattr(job, "ok", True) or setattr(job, "error", "") or job
+        self.b.allowlist.allows.return_value = True
+        a = Announcer(self.b, tempfile.mkdtemp())
+        self.b.announcer = a
+        it, _ = a.create("fuyu-v1", "g@chatroom", "新版本来了", b"\x89PNG fake", ".png")
+        _, body, _ = self.req("GET", "/api/announce")
+        self.assertEqual((body["pending"][0]["code"], body["pending"][0]["has_image"]), (it["code"], True))
+        code, data, r = self.req("GET", f"/api/announce/{it['code']}/image")
+        self.assertEqual((code, r.getheader("Content-Type")), (200, "image/png"))
+        self.assertEqual(self.req("POST", f"/api/announce/{it['code']}/publish", {})[0], 400)   # 要确认
+        code, body, _ = self.req("POST", f"/api/announce/{it['code']}/publish", {"confirm": True})
+        self.assertEqual((code, body["item"]["status"]), (200, "sent"))
+        self.assertEqual(self.req("POST", f"/api/announce/{it['code']}/cancel", {})[0], 400)    # 已经发了
+        self.assertEqual(self.req("GET", f"/api/announce/{it['code']}/image")[0], 404)
+
+    def test_feedback(self):
+        from fuxi_bridge.feedback import Feedback
+        fb = object.__new__(Feedback)
+        fb.items = [{"id": 1, "category": "bug", "title": "全屏时提醒看不到", "detail": "", "platform": "macOS",
+                     "status": "new", "first_seen": time.time(), "last_seen": time.time(), "count": 2,
+                     "reporters": [{"wxid": "wxid_a", "name": "阿青"}], "quotes": ["看不到提醒"], "issue": None}]
+        fb.meta, fb.fuyu = {}, None
+        fb._lock = threading.RLock()
+        fb._save = lambda: None
+        done = threading.Event()
+        fb.classify = lambda: (done.wait(2), "整理了 3 条消息")[1]
+        self.b.feedback = fb
+        _, body, _ = self.req("GET", "/api/feedback")
+        it = body["items"][0]
+        self.assertEqual((it["category_zh"], it["reporters"], it["progress"]), ("问题", ["阿青"], "新问题，GitHub 上还没有对应 issue"))
+        self.assertEqual(self.req("POST", "/api/feedback/1/ignore", {})[1]["status"], "ignored")
+        self.assertEqual(self.req("GET", "/api/feedback")[1]["items"], [])
+        self.assertEqual(len(self.req("GET", "/api/feedback?ignored=1")[1]["items"]), 1)
+        self.assertEqual(self.req("POST", "/api/feedback/1/unignore", {})[1]["status"], "new")
+        self.assertEqual(self.req("POST", "/api/feedback/9/ignore", {})[0], 404)
+        self.assertEqual(self.req("POST", "/api/feedback/classify", {})[0], 202)
+        self.assertEqual(self.req("POST", "/api/feedback/classify", {})[0], 409)
+        done.set()
 
 
 class EventsTest(unittest.TestCase):

@@ -1,4 +1,4 @@
-import { Menu } from "lucide-react";
+import { Menu, TriangleAlert } from "lucide-react";
 import type { ReactNode } from "react";
 import type { Level } from "../lib/api";
 import "./ui.css";
@@ -87,4 +87,20 @@ export function ErrorNote({ message, onRetry }: { message: string; onRetry?: () 
 
 export function Skeleton({ height = 52 }: { height?: number }) {
   return <div className="skeleton" style={{ height }} />;
+}
+
+// 危险操作的确认条：在那一行下面展开，说清后果，再点一次才执行（docs/design/admin.md「组件」）。
+export function ConfirmBar({ text, action, busy, onConfirm, onCancel }: { text: ReactNode; action: string; busy?: boolean; onConfirm: () => void; onCancel: () => void }) {
+  return (
+    <div className="confirm" role="alertdialog">
+      <TriangleAlert size={16} className="confirm__icon" />
+      <span className="confirm__text">{text}</span>
+      <Button onClick={onCancel} disabled={busy}>
+        取消
+      </Button>
+      <Button variant="danger" busy={busy} onClick={onConfirm} autoFocus>
+        {action}
+      </Button>
+    </div>
+  );
 }

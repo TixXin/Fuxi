@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import os
 import time
 from typing import TYPE_CHECKING
@@ -193,3 +194,184 @@ def knowledge_search(b: "Bridge", q: str, judge: bool = False) -> dict:
             "picked": [c.title for c in picked], "judged": judged,
             "candidates": [{"score": round(s, 1), "coverage": round(k.index.coverage(cq, c), 2),
                             "source": c.source, "title": c.title, "text": c.text[:400]} for s, c in cands]}
+
+
+# ---- 会话与白名单 ----
+def _chat_row(b: "Bridge", cid: str, allowed: set[str], **extra) -> dict:
+    return {"chat_id": cid, "name": "全部会话" if cid == "*" else b.name_of(cid),
+            "group": cid.endswith("@chatroom"), "allowed": cid in allowed or "*" in allowed, **extra}
+
+
+def allow_list(b: "Bridge") -> list[dict]:
+    items = list(b.allowlist.items)
+    roles = _roles(b)
+    return [_chat_row(b, c, set(items), roles=roles.get(c, [])) for c in items]
+
+
+def _roles(b: "Bridge") -> dict[str, list[str]]:
+    """会话在各功能里的角色（产品助手群、反馈群、发版群），会话页上做小标签。"""
+    out: dict[str, list[str]] = {}
+    for key, label in (("assistant_groups", "产品助手"), ("feedback_groups", "收集反馈")):
+        for name in b.cfg.get(key) or []:
+            try:
+                out.setdefault(b.resolve_chat(name), []).append(label)
+            except Exception:
+                pass
+    if b.cfg.get("announce_to"):
+        try:
+            out.setdefault(b.resolve_chat(b.cfg.get("announce_to")), []).append("发版群")
+        except Exception:
+            pass
+    return out
+
+
+def recent_chats(b: "Bridge", limit: int = 60) -> list[dict]:
+    """微信会话列表里最近有动静的（不含公众号），给会话页「最近说过话」用；不带消息摘要。"""
+    allowed = set(b.allowlist.items)
+    roles = _roles(b)
+    out = []
+    for s in b.reader.sessions(limit * 2):
+        cid = s["username"]
+        if not cid or cid.startswith("gh_") or cid.endswith("@openim") or "@" in cid and not cid.endswith("@chatroom"):
+            continue
+        out.append(_chat_row(b, cid, allowed, last=s.get("last_timestamp") or 0, roles=roles.get(cid, [])))
+        if len(out) >= limit:
+            break
+    return out
+
+
+def search_chats(b: "Bridge", q: str) -> list[dict]:
+    q = q.strip()
+    if not q:
+        return []
+    allowed = set(b.allowlist.items)
+    hits = [c for c in b.reader.contacts() if not c["username"].startswith("gh_")
+            and (q in c["name"] or q in c["remark"] or q == c["alias"])][:30]
+    return [_chat_row(b, c["username"], allowed) for c in hits]
+
+
+def allow_change(b: "Bridge", add: list, remove: list, confirm: bool = False) -> list[dict]:
+    """按 chat_id 增删白名单。移出要 confirm（移出后不再回复，主动搭话也停）。"""
+    def ids(xs):
+        out = []
+        for x in xs or []:
+            x = str(x).strip()
+            if not x:
+                continue
+            if not (x in ("*", "filehelper") or x.endswith("@chatroom") or x.startswith("wxid_") or re.fullmatch(r"[\w-]{6,}", x)):
+                raise HandlerError(f"不认识的会话 ID：{x}")
+            out.append(x)
+        return out
+    add, remove = ids(add), ids(remove)
+    if remove and not confirm:
+        raise HandlerError("移出白名单需要确认", 400)
+    cur = list(b.allowlist.items)
+    new = [i for i in cur if i not in remove] + [i for i in add if i not in cur]
+    names = {i: b.name_of(i) for i in new if i != "*"}
+    b.allowlist.set(new, names)
+    log.warning("白名单经管理台修改：+%d -%d", len(add), len(remove))
+    b.events.publish("allow", {"count": len(new)})
+    return allow_list(b)
+
+
+# ---- 发版公告 ----
+def announce_list(b: "Bridge") -> dict:
+    a = b.announcer
+    pending = a.pending()
+    with a._lock:
+        done = sorted((i for i in a.items.values() if i["status"] != "pending"), key=lambda i: -i.get("updated", 0))[:20]
+
+    def row(it):
+        return {**a.public(it), "text": it.get("text", ""), "has_image": bool(it.get("image") and os.path.exists(it["image"]))}
+    return {"pending": [row(i) for i in pending], "recent": [row(i) for i in done], "target": b.name_of(t) if (t := b.cfg.get("announce_to")) else ""}
+
+
+def announce_image(b: "Bridge", code: str) -> tuple[bytes, str]:
+    for it in b.announcer.pending():
+        if it["code"] == code and it.get("image") and os.path.exists(it["image"]):
+            with open(it["image"], "rb") as f:
+                return f.read(), "image/jpeg" if it["image"].endswith(".jpg") else "image/png"
+    raise HandlerError("没有这张图（公告已发出、取消或过期后图片会删掉）", 404)
+
+
+def announce_act(b: "Bridge", code: str, action: str, confirm: bool = False) -> dict:
+    from .announce import AnnounceError
+    try:
+        if action == "publish":
+            if not confirm:
+                raise HandlerError("发布需要确认")
+            it = b.announcer.publish(code)
+        elif action == "cancel":
+            it = b.announcer.cancel(code)
+        else:
+            raise HandlerError("不支持的操作", 404)
+    except AnnounceError as e:
+        raise HandlerError(str(e), getattr(e, "code", 400)) from None
+    log.warning("公告 #%s 经管理台%s：%s", code, "发布" if action == "publish" else "取消", it["status"])
+    b.events.publish("announce", {"code": code, "status": it["status"]})
+    if it["status"] == "failed":
+        raise HandlerError(f"发送失败：{it.get('error') or '未知原因'}", 502)
+    return b.announcer.public(it)
+
+
+# ---- 群反馈 ----
+def feedback_list(b: "Bridge", days: int = 30, ignored: bool = False) -> dict:
+    from .feedback import CATEGORIES
+    fb = b.feedback
+    cut = time.time() - days * 86400
+    items = [i for i in fb.items if i["last_seen"] >= cut and (ignored or i["status"] != "ignored")]
+    items.sort(key=lambda i: -i["last_seen"])
+    rows = []
+    for it in items[:200]:
+        try:
+            progress = fb.progress(it)
+        except Exception:
+            progress = ""
+        rows.append({k: it.get(k) for k in ("id", "category", "title", "detail", "platform", "status", "first_seen",
+                                             "last_seen", "count", "issue", "fixed_in")}
+                    | {"category_zh": CATEGORIES.get(it["category"], it["category"]),
+                       "reporters": [r.get("name") or "" for r in it.get("reporters", [])],
+                       "quotes": it.get("quotes", [])[-5:], "progress": progress,
+                       "agent": fb._agent_line(it)})
+    return {"items": rows, "brief": fb.brief(), "groups": b.cfg.get("feedback_groups") or [],
+            "classifying": getattr(fb, "classifying", False), "last_error": fb.meta.get("last_error", ""),
+            "digest_time": b.cfg.get("digest_time"), "group_summary_time": b.cfg.get("group_summary_time")}
+
+
+def feedback_ignore(b: "Bridge", iid: int, on: bool = True) -> dict:
+    fb = b.feedback
+    it = fb.get(iid)
+    if not it:
+        raise HandlerError(f"没有 #{iid}", 404)
+    if on:
+        fb.ignore(iid)
+    else:
+        fb.set_fields(it, status="known" if it.get("issue") else "new")
+    b.events.publish("feedback", {"id": iid})
+    return {"id": iid, "status": it["status"]}
+
+
+def feedback_classify(b: "Bridge") -> None:
+    import threading
+    fb = b.feedback
+    if getattr(fb, "classifying", False):
+        raise HandlerError("正在整理，稍等", 409)
+    fb.classifying = True
+
+    def go():
+        try:
+            result = fb.classify()
+        except Exception as e:
+            result = f"整理失败：{e}"
+        finally:
+            fb.classifying = False
+        b.events.publish("feedback", {"result": result})
+    threading.Thread(target=go, name="feedback-classify", daemon=True).start()
+
+
+def feedback_preview(b: "Bridge", kind: str) -> str:
+    if kind == "digest":
+        return b.feedback.digest(since=time.time() - 86400)
+    if kind == "group":
+        return b.feedback.group_summary() or "今天还没有反馈，今晚不会发群小结。"
+    raise HandlerError("只有 digest / group", 404)

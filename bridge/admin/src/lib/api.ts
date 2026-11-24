@@ -34,7 +34,7 @@ export interface Overview {
 
 export interface BridgeEvent {
   id: number;
-  kind: "message" | "handoff" | "settings" | "status" | "knowledge";
+  kind: "message" | "handoff" | "settings" | "status" | "knowledge" | "allow" | "announce" | "feedback";
   ts: number;
   [key: string]: unknown;
 }
@@ -131,6 +131,58 @@ export interface KnowledgeSearch {
   candidates: { score: number; coverage: number; source: string; title: string; text: string }[];
 }
 
+export interface Chat {
+  chat_id: string;
+  name: string;
+  group: boolean;
+  allowed: boolean;
+  roles?: string[];
+  last?: number;
+}
+
+export interface Announcement {
+  key: string;
+  code: string;
+  chat_id: string;
+  to: string;
+  status: string;
+  status_zh: string;
+  error: string | null;
+  created: number;
+  updated: number;
+  text: string;
+  has_image: boolean;
+}
+
+export interface FeedbackItem {
+  id: number;
+  category: "bug" | "suggestion" | "question";
+  category_zh: string;
+  title: string;
+  detail: string;
+  platform: string;
+  status: string;
+  first_seen: number;
+  last_seen: number;
+  count: number;
+  issue: number | null;
+  fixed_in: string | null;
+  reporters: string[];
+  quotes: string[];
+  progress: string;
+  agent: string;
+}
+
+export interface FeedbackList {
+  items: FeedbackItem[];
+  brief: string;
+  groups: string[];
+  classifying: boolean;
+  last_error: string;
+  digest_time: string;
+  group_summary_time: string;
+}
+
 export const api = {
   overview: () => request<Overview>("GET", "/api/overview"),
   pause: () => request<{ paused: boolean }>("POST", "/api/pause"),
@@ -141,13 +193,25 @@ export const api = {
   saveSetting: (key: string, value: SettingValue) => request<{ items: Setting[] }>("POST", "/api/settings", { [key]: value }),
   knowledge: () => request<KnowledgeInfo>("GET", "/api/knowledge"),
   knowledgeSync: () => request<{ started: boolean }>("POST", "/api/knowledge/sync"),
+  allow: () => request<{ items: Chat[] }>("GET", "/api/allow"),
+  recentChats: () => request<{ items: Chat[] }>("GET", "/api/chats/recent"),
+  searchChats: (q: string) => request<{ items: Chat[] }>("GET", `/api/chats?q=${encodeURIComponent(q)}`),
+  changeAllow: (add: string[], remove: string[]) =>
+    request<{ items: Chat[] }>("POST", "/api/allow", { add, remove, confirm: remove.length > 0 }),
+  announce: () => request<{ pending: Announcement[]; recent: Announcement[]; target: string }>("GET", "/api/announce"),
+  announceAct: (code: string, action: "publish" | "cancel") =>
+    request<{ item: Announcement }>("POST", `/api/announce/${code}/${action}`, { confirm: action === "publish" }),
+  feedback: (ignored: boolean) => request<FeedbackList>("GET", `/api/feedback?days=30${ignored ? "&ignored=1" : ""}`),
+  feedbackIgnore: (id: number, on: boolean) => request<{ status: string }>("POST", `/api/feedback/${id}/${on ? "ignore" : "unignore"}`),
+  feedbackClassify: () => request<{ started: boolean }>("POST", "/api/feedback/classify"),
+  feedbackPreview: (kind: "digest" | "group") => request<{ text: string }>("GET", `/api/feedback/preview/${kind}`),
   knowledgeSearch: (q: string, judge: boolean) =>
     request<KnowledgeSearch>("GET", `/api/knowledge/search?q=${encodeURIComponent(q)}${judge ? "&judge=1" : ""}`),
 };
 
 export function subscribe(onEvent: (e: BridgeEvent) => void, onState: (live: boolean) => void): () => void {
   const es = new EventSource("/api/events");
-  const kinds = ["message", "handoff", "settings", "status", "knowledge"] as const;
+  const kinds = ["message", "handoff", "settings", "status", "knowledge", "allow", "announce", "feedback"] as const;
   const handler = (ev: MessageEvent) => {
     try {
       onEvent(JSON.parse(ev.data));

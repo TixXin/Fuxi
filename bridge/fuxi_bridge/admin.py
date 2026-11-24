@@ -6,10 +6,16 @@
   GET  /api/overview                 概览
   GET  /api/settings                 全部行为设置；POST {key: 值, ...} 修改
   GET  /api/messages?before=&limit=  对话流历史（内存里最近 500 条）
-  GET  /api/events                   SSE：message、handoff、settings、status、knowledge
+  GET  /api/events                   SSE：message、handoff、settings、status、knowledge、allow、announce、feedback
   POST /api/pause {} | /api/resume {}  暂停 / 恢复（恢复顺带解除熔断）
   GET  /api/knowledge                资料库状态；POST /api/knowledge/sync 后台同步一次
   GET  /api/knowledge/search?q=&judge=1  试搜：候选分数、会附给内核的段落（judge=1 再让模型筛）
+  GET  /api/allow | /api/chats/recent | /api/chats?q=   白名单、最近的会话、搜会话
+  POST /api/allow {add:[chat_id], remove:[chat_id], confirm}   移出要 confirm
+  GET  /api/announce                 待发和最近的公告；GET /api/announce/<编号>/image 预览图
+  POST /api/announce/<编号>/publish {confirm: true} | /cancel
+  GET  /api/feedback?days=&ignored=1  群反馈条目；GET /api/feedback/preview/digest|group 预览摘要/小结
+  POST /api/feedback/<id>/ignore | /unignore；POST /api/feedback/classify 后台立即整理
 
 所有请求要带 X-Fuxi-Admin 口令；非 GET 还要 Content-Type: application/json + X-Requested-With: fuxi-admin，
 Origin（有的话）要和 Host 一致。
@@ -23,6 +29,7 @@ import logging
 import mimetypes
 import os
 import queue
+import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlparse
@@ -121,6 +128,12 @@ def make_handler(bridge: "Bridge", token: str, static_dir: str, ping: float = PI
                     limit=max(1, min(200, int(limit) if limit.isdigit() else 50)))})
             if u.path == "/api/events":
                 return self._sse()
+            try:
+                got = self._get_more(u.path, qs)
+            except handlers.HandlerError as e:
+                return self._err(e.code, str(e))
+            if got is not None:
+                return
             if u.path == "/api/knowledge":
                 return self._json(200, {"ok": True, **handlers.knowledge_info(bridge)})
             if u.path == "/api/knowledge/search":
@@ -130,6 +143,46 @@ def make_handler(bridge: "Bridge", token: str, static_dir: str, ping: float = PI
                 except handlers.HandlerError as e:
                     return self._err(e.code, str(e))
             self._err(404, "没有这个接口")
+
+        def _get_more(self, path: str, qs: dict):
+            """C 期的读接口；处理了返回 True，不认识返回 None。"""
+            if path == "/api/allow":
+                return self._json(200, {"ok": True, "items": handlers.allow_list(bridge)}) or True
+            if path == "/api/chats/recent":
+                return self._json(200, {"ok": True, "items": handlers.recent_chats(bridge)}) or True
+            if path == "/api/chats":
+                return self._json(200, {"ok": True, "items": handlers.search_chats(bridge, (qs.get("q") or [""])[0])}) or True
+            if path == "/api/announce":
+                return self._json(200, {"ok": True, **handlers.announce_list(bridge)}) or True
+            m = re.fullmatch(r"/api/announce/(\d{3})/image", path)
+            if m:
+                data, ctype = handlers.announce_image(bridge, m.group(1))
+                return self._send(200, data, ctype) or True
+            if path == "/api/feedback":
+                days = (qs.get("days") or ["30"])[0]
+                return self._json(200, {"ok": True, **handlers.feedback_list(
+                    bridge, int(days) if days.isdigit() else 30, (qs.get("ignored") or [""])[0] == "1")}) or True
+            m = re.fullmatch(r"/api/feedback/preview/(digest|group)", path)
+            if m:
+                return self._json(200, {"ok": True, "text": handlers.feedback_preview(bridge, m.group(1))}) or True
+            return None
+
+        def _post_more(self, path: str, body: dict):
+            if path == "/api/allow":
+                return self._json(200, {"ok": True, "items": handlers.allow_change(
+                    bridge, body.get("add"), body.get("remove"), body.get("confirm") is True)}) or True
+            m = re.fullmatch(r"/api/announce/(\d{3})/(publish|cancel)", path)
+            if m:
+                return self._json(200, {"ok": True, "item": handlers.announce_act(
+                    bridge, m.group(1), m.group(2), body.get("confirm") is True)}) or True
+            m = re.fullmatch(r"/api/feedback/(\d+)/(ignore|unignore)", path)
+            if m:
+                return self._json(200, {"ok": True, **handlers.feedback_ignore(
+                    bridge, int(m.group(1)), m.group(2) == "ignore")}) or True
+            if path == "/api/feedback/classify":
+                handlers.feedback_classify(bridge)
+                return self._json(202, {"ok": True, "started": True}) or True
+            return None
 
         def do_POST(self):
             if not self._auth() or not self._write_ok():
@@ -146,6 +199,8 @@ def make_handler(bridge: "Bridge", token: str, static_dir: str, ping: float = PI
                 if path == "/api/knowledge/sync":
                     handlers.knowledge_sync(bridge)
                     return self._json(202, {"ok": True, "started": True})
+                if self._post_more(path, body):
+                    return
             except handlers.HandlerError as e:
                 return self._err(e.code, str(e), **e.extra)
             self._err(404, "没有这个接口")

@@ -1,0 +1,10 @@
+.chat-avatar {
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border-radius: 9px;
+  color: #06202c;
+  font-size: 12px;
+  font-weight: 600;
+}

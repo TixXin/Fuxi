@@ -373,7 +373,7 @@ class Feedback:
                 return self.fuyu.status(it["issue"])
             except Exception:
                 pass
-        return {"new": "新问题，GitHub 上还没有对应 issue", "answered": "群里已解答", "fixed": f"已在 {it.get('fixed_in')} 修复",
+        return {"new": "新问题，GitHub 上还没有对应 issue", "known": "已记下", "answered": "群里已解答", "fixed": f"已在 {it.get('fixed_in')} 修复",
                 "ignored": "已忽略"}.get(it["status"], it["status"])
 
     def public_state(self, it: dict) -> str:

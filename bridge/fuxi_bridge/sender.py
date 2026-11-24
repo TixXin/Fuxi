@@ -18,6 +18,8 @@ import subprocess
 import threading
 import time
 
+import numpy as np
+
 log = logging.getLogger(__name__)
 
 
@@ -32,6 +34,7 @@ class Sender:
         self._lock = threading.Lock()
         self._current_chat: str | None = None
         self.open_times: collections.deque[tuple[float, float, str]] = collections.deque(maxlen=50)
+        self.last_open = 0.0
 
     # ---- 底层 ----
     def _run(self, *args: str, stdin: bytes | None = None) -> str:
@@ -136,14 +139,15 @@ class Sender:
         RESULT_MIN 秒，才采信。
         """
         start = time.monotonic()
-        prev, since, hit = None, start, None
+        prev, since = None, start
         while True:
-            sig, hit = self._capture(w).search_state()
+            shot = self._capture(w)
+            sig, rows = shot.search_state()
             now = time.monotonic()
             if sig != prev:
                 prev, since = sig, now
             elif sig[1] and now - start >= self.RESULT_MIN and now - since >= self.RESULT_STABLE:
-                return hit
+                return self._pick(shot, rows)
             if now - start > max_wait:
                 log.warning("搜索结果 %.1f 秒内未稳定", max_wait)
                 return None
@@ -151,6 +155,39 @@ class Sender:
 
     RESULT_MIN = 0.45
     RESULT_STABLE = 0.25
+    # 可以点击的分区。「聊天记录」里也会出现标题与关键词完全相同的行（会话内容里提到了
+    # 会话名），点它打开的是记录检索而非会话；「搜索网络结果」更不能点。
+    SECTIONS_OK = ("联系人", "群聊", "功能", "最常使用")
+    SECTIONS_ALL = SECTIONS_OK + ("聊天记录", "搜索网络结果", "网络结果", "公众号", "小程序", "文章", "视频号", "服务")
+
+    def _pick(self, shot: "_Shot", rows: list[dict]) -> tuple[int, int] | None:
+        """在完全匹配行里只保留可点击分区的，恰好一行才返回其坐标。"""
+        ok = []
+        for r in rows:
+            sec = self._section_of(shot, r["y0"])
+            if sec in self.SECTIONS_OK:
+                ok.append(r)
+            else:
+                log.info("忽略「%s」分区里的完全匹配行", sec or "未知")
+        if len(ok) != 1:
+            if len(ok) > 1:
+                log.warning("搜索结果里有 %d 个可点击的完全匹配，无法确定目标", len(ok))
+            return None
+        return (400, (ok[0]["y0"] + ok[0]["y1"]) // 2)
+
+    def _section_of(self, shot: "_Shot", y: int) -> str:
+        """从 y 往上找最近的分区标题（左侧小字，OCR 识别），返回分区名；找不到返回空串。"""
+        for y0, y1 in shot.header_bands(y):
+            crop = shot.bgr[max(0, y0 - 6):y1 + 6, 160:600]
+            try:
+                res, _ = _ocr()(np.ascontiguousarray(crop), use_det=False, use_cls=False)
+            except Exception as e:
+                raise SendError(f"OCR 失败：{e}") from e
+            text = _norm(str(res[0][0])) if res else ""
+            for name in self.SECTIONS_ALL:
+                if text.startswith(name):
+                    return name
+        return ""
 
     def _search(self, name: str) -> tuple[str, tuple[int, int] | None]:
         w = self._activate()
@@ -213,6 +250,7 @@ class Sender:
     def _record(self, t0: float, mode: str) -> None:
         dt = time.monotonic() - t0
         self.open_times.append((time.time(), dt, mode))
+        self.last_open = dt
         log.info("进入会话耗时 %.2f 秒（%s）", dt, mode)
 
     def open_stats(self) -> dict:
@@ -454,8 +492,34 @@ class _Shot:
             lines.append(cur)
         return lines
 
-    def search_state(self) -> tuple[tuple, tuple[int, int] | None]:
-        """(下拉框内容签名, 唯一完全匹配行的点击坐标或 None)。签名用于判断结果是否已加载稳定。"""
+    HEADER_X = (160, 246)  # 分区标题（「联系人」「聊天记录」…）从 ~170 起，在头像列里
+
+    def header_bands(self, below: int) -> list[tuple[int, int]]:
+        """y < below 范围内、头像列里矮的一段段深色文字（候选分区标题），由近到远。
+        头像是 ~72px 的大方块，按高度排除；误判的由调用方 OCR 再筛。"""
+        import numpy as np
+
+        if below <= self.TOP_Y:
+            return []
+        x0, x1 = self.HEADER_X
+        a = self.bgr[self.TOP_Y:below, x0:x1].astype(np.int16)
+        mx, mn = a.max(axis=2), a.min(axis=2)
+        rows = ((mx < 190) & (mx - mn < 30)).any(axis=1)
+        bands, start, last = [], None, None
+        for i, v in enumerate(rows):
+            if v:
+                start = i if start is None else start
+                last = i
+            elif start is not None and i - last > 3:
+                bands.append((start, last))
+                start = None
+        if start is not None:
+            bands.append((start, last))
+        out = [(self.TOP_Y + a0, self.TOP_Y + a1 + 1) for a0, a1 in bands if 10 <= a1 - a0 + 1 <= 34]
+        return out[::-1]
+
+    def search_state(self) -> tuple[tuple, list[dict]]:
+        """(下拉框内容签名, 完全匹配的标题行)。签名用于判断结果是否已加载稳定。"""
         bottom = self.dropdown_bottom()
         lines = self.text_lines(bottom)
         sig = (bottom, tuple((l["y0"], l["y1"], l["xmin"], l["G"] > 0, l["D"] > 0) for l in lines))
@@ -464,12 +528,11 @@ class _Shot:
             if l["xmin"] >= self.LOCAL_TITLE_MIN_X and 15 <= l["y1"] - l["y0"] <= 40
             and l["G"] >= 40 and l["D"] == 0
         ]
-        if len(exact) != 1:
-            if exact:
-                log.warning("搜索结果里有 %d 个完全匹配，无法确定目标", len(exact))
-            return sig, None
-        l = exact[0]
-        return sig, (400, (l["y0"] + l["y1"]) // 2)
+        return sig, exact
 
     def exact_match_row(self) -> tuple[int, int] | None:
-        return self.search_state()[1]
+        """不分区地看：恰好一个完全匹配行时返回坐标（单元测试与调试用）。"""
+        exact = self.search_state()[1]
+        if len(exact) != 1:
+            return None
+        return (400, (exact[0]["y0"] + exact[0]["y1"]) // 2)

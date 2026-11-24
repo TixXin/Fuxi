@@ -69,6 +69,17 @@ class LocateTest(unittest.TestCase):
         self.assertEqual(s.exact_match_row(), (400, 671))
 
 
+class HeaderBandTest(unittest.TestCase):
+    def test_small_text_is_header_avatar_is_not(self):
+        c = Canvas()
+        c.rect(170, 167, 218, 189, (150, 150, 150))   # 「功能」小字
+        c.rect(170, 236, 242, 308, DARK)              # 72px 头像
+        c.rect(170, 359, 266, 381, (150, 150, 150))   # 「聊天记录」
+        s = _Shot(c.xwd())
+        self.assertEqual(s.header_bands(431), [(359, 381), (167, 189)])
+        self.assertEqual(s.header_bands(300), [(167, 189)])
+
+
 class TitleCropTest(unittest.TestCase):
     def test_title_bgr(self):
         c = Canvas()

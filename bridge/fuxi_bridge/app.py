@@ -31,7 +31,7 @@ import time
 from dataclasses import dataclass, field
 
 from . import messages, store
-from . import control
+from . import control, timing
 from .allow import AllowList
 from .kernel import Kernel, KernelError
 from .messages import Message
@@ -66,6 +66,12 @@ class SendJob:
     ok: bool = False
     verified: bool | None = None
     error: str = ""
+    # 耗时（time.monotonic）：入队、开始处理、回车发出、核对完成；进入会话用时（秒）
+    t_queued: float = 0.0
+    t_start: float = 0.0
+    t_sent: float = 0.0
+    t_done: float = 0.0
+    open_s: float = 0.0
 
 
 class Bridge:
@@ -99,6 +105,8 @@ class Bridge:
         self.sent_hashes: collections.deque[str] = collections.deque(maxlen=500)
         self.pending: dict[str, list[Message]] = {}
         self.pending_at: dict[str, float] = {}
+        self.pending_seen: dict[str, float] = {}   # 最后一条待处理消息被读到的时刻（time.time）
+        self.latency = timing.LatencyStats()
         self.chat_locks: dict[str, threading.Lock] = collections.defaultdict(threading.Lock)
         self.pool = cf.ThreadPoolExecutor(max_workers=4, thread_name_prefix="chat")
         self.session_seen: dict[str, int] = {}
@@ -156,8 +164,14 @@ class Bridge:
         """模拟打字：约每秒 6 字，0.8~6 秒，加随机抖动。"""
         return min(6.0, 0.8 + len(text) / 6) + random.uniform(0, 0.8)
 
+    @classmethod
+    def first_delay(cls, text: str, spent: float) -> float:
+        """第一个气泡：像人边想边打，模型已经花掉的时间算进打字时间里，至少留 0.3~0.8 秒。"""
+        return max(random.uniform(0.3, 0.8), cls.typing_delay(text) - spent)
+
     # ---------- 发送（单线程串行） ----------
     def send(self, job: SendJob, timeout: float = 90) -> SendJob:
+        job.t_queued = time.monotonic()
         self.sendq.put(job)
         job.done.wait(timeout)
         if not job.done.is_set():
@@ -174,6 +188,8 @@ class Bridge:
                 continue
             try:
                 t0 = int(time.time()) - 2
+                job.t_start = time.monotonic()
+                self.sender.last_open = 0.0
                 name = self.name_of(job.chat)
                 if job.text is not None:
                     self.sent_hashes.append(_h(job.text))
@@ -181,6 +197,8 @@ class Bridge:
                 if job.image:
                     self.sender.send_image(name, job.image)
                 job.ok = True
+                job.t_sent = time.monotonic()
+                job.open_s = self.sender.last_open
                 if job.verify:
                     job.verified = self._verify(job, t0)
                     if not job.verified:
@@ -199,6 +217,7 @@ class Bridge:
                 self.last_send_ok = False
                 log.error("发送到 %s 失败：%s", job.chat, e)
             finally:
+                job.t_done = time.monotonic()
                 job.done.set()
                 time.sleep(0.6)  # 气泡间隔
 
@@ -283,12 +302,14 @@ class Bridge:
             if acc:
                 self.pending.setdefault(chat, []).extend(acc)
                 self.pending_at[chat] = time.monotonic()
+                self.pending_seen[chat] = time.time()
         now = time.monotonic()
         for chat in [c for c, t in self.pending_at.items() if now - t >= self.settle]:
             batch = self.pending.pop(chat, [])
             self.pending_at.pop(chat, None)
+            seen = self.pending_seen.pop(chat, time.time())
             if batch:
-                self.pool.submit(self._dispatch, chat, batch)
+                self.pool.submit(self._dispatch, chat, batch, seen)
 
     def _render(self, m: Message) -> str:
         """交给内核的正文：引用消息在回复后面附上被引用的内容。"""
@@ -331,11 +352,22 @@ class Bridge:
             "chat_title": self.name_of(chat) if last.is_group else "",
         }
 
-    def _dispatch(self, chat: str, batch: list[Message]) -> None:
+    def _dispatch(self, chat: str, batch: list[Message], seen: float | None = None) -> None:
         if self.paused:
             log.info("已暂停，不处理 %s 的 %d 条消息", self.name_of(chat), len(batch))
             return
+        tr = timing.Trace(batch[-1].create_time, seen or time.time())
+        tr.add("settle", time.time() - tr.seen)
+        try:
+            self._dispatch_traced(chat, batch, tr)
+        finally:
+            if tr.bubbles:
+                self.latency.add(tr.result())
+                log.info("回复耗时 %s %s", self.name_of(chat), tr.summary())
+
+    def _dispatch_traced(self, chat: str, batch: list[Message], tr: "timing.Trace") -> None:
         with self.chat_locks[chat]:
+            k0 = time.monotonic()
             payload = self._payload(chat, batch)
             log.info("→ 内核 %s [%s] %s", payload["chat_title"] or self.name_of(chat), payload["senderName"],
                      _brief(payload["text"]))
@@ -352,6 +384,7 @@ class Bridge:
             if not allowed:
                 log.info("内核不允许在 %s 发言：%s", chat, reason)
                 return
+            tr.add("kernel", time.monotonic() - k0)
             mention = resp.get("mention") or ""
             for i, b in enumerate(bubbles):
                 if self.paused:
@@ -360,9 +393,17 @@ class Bridge:
                     log.warning("超过发送频率上限，丢弃 %s 的剩余 %d 条回复", self.name_of(chat), len(bubbles) - i)
                     return
                 text = f"@{mention} {b}" if (i == 0 and mention and chat.endswith("@chatroom")) else b
-                time.sleep(self.typing_delay(text))
+                delay = self.first_delay(text, tr.s["kernel"]) if i == 0 else self.typing_delay(text)
+                time.sleep(delay)
+                tr.add("typing", delay)
                 self.sent_times.append((time.time(), chat))
-                self.send(SendJob(chat=chat, text=text))
+                job = self.send(SendJob(chat=chat, text=text))
+                if job.ok and job.t_sent:
+                    tr.add("queue", job.t_start - job.t_queued)
+                    tr.add("open", job.open_s)
+                    tr.add("paste", job.t_sent - job.t_start - job.open_s)
+                    tr.add("verify", job.t_done - job.t_sent)
+                    tr.bubble_sent(time.time() - (time.monotonic() - job.t_sent))
 
     # ---------- 健康 ----------
     def problems(self) -> list[str]:

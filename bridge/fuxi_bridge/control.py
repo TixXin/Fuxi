@@ -71,6 +71,9 @@ class Control:
         st = b.sender.open_stats()
         if st.get("n"):
             lines.append(f"进入会话：中位 {st['p50']} 秒，最慢 {st['max']} 秒（近 {st['n']} 次）")
+        lat = b.latency.brief()
+        if lat:
+            lines.append(f"回复耗时：{lat}")
         up = int(time.time() - b.started)
         lines.append(f"已运行：{up // 3600} 小时 {up % 3600 // 60} 分")
         lines.append("问题：" + ("；".join(p for p in probs if not p.startswith("已熔断")) or "无"))

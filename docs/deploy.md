@@ -187,6 +187,8 @@ docker cp /tmp/allow.txt fuxi-bridge:/state/allow.txt && rm /tmp/allow.txt
 
 若上一条就是发往同一会话、且 OCR 标题仍一致，则跳过搜索直接粘贴。日志 `进入会话耗时 x 秒`
 记录每次耗时（目标 2 秒内，实测切换会话约 1.3~1.9 秒），`/healthz` 的 `open_chat` 有统计。
+每次自动回复另有一行 `回复耗时 … 首条 Xs / 全部 Ys：发现 合并 内核 打字 进会话 粘贴 核对`，
+`/healthz` 的 `latency` 是近 50 次的各段中位数。
 只测打开、不发送：`docker exec fuxi-bridge python -m fuxi_bridge.cli open --chat 文件传输助手 -n 3 --fresh`。
 
 ### 熔断与恢复

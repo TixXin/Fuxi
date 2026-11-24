@@ -8,7 +8,7 @@ from unittest import mock
 
 import numpy as np
 
-from fuxi_bridge import control, messages
+from fuxi_bridge import control, messages, timing
 from fuxi_bridge.allow import AllowList
 from fuxi_bridge.app import Bridge
 from fuxi_bridge.messages import Message, parse_appmsg
@@ -118,6 +118,7 @@ class ControlTest(unittest.TestCase):
         b.sender = mock.Mock()
         b.sender.open_stats.return_value = {"n": 3, "p50": 1.4, "max": 1.9, "last": 1.2}
         b.problems = lambda: []
+        b.latency = timing.LatencyStats()
         self.b, self.c = b, control.Control(b)
 
     def test_only_self_in_filehelper(self):
@@ -159,35 +160,76 @@ class SpeedTest(unittest.TestCase):
         self.assertEqual(c.shape, (25 + 16, 165 + 16, 3))
         self.assertIsNone(title_crop(np.full((70, 790, 3), 245, np.uint8)))
 
-    def _sender_with_frames(self, frames):
+    def _sender_with_frames(self, frames, section="功能"):
         s = object.__new__(Sender)
         seq = iter(frames)
         s._capture = lambda w: mock.Mock(search_state=lambda: next(seq))
+        s._section_of = lambda shot, y: section(y) if callable(section) else section
         return s
 
-    def test_wait_results_waits_for_stable_frames(self):
-        partial = ((335, (1,)), (400, 270))
-        full_ambiguous = ((1079, (1, 2)), None)
-        frames = [partial, partial] + [full_ambiguous] * 200
-        s = self._sender_with_frames(frames)
+    def _run_wait(self, s):
         with mock.patch("fuxi_bridge.sender.time.sleep", lambda x: None):
             clock = iter(i * 0.1 for i in range(1000))
             with mock.patch("fuxi_bridge.sender.time.monotonic", lambda: next(clock)):
-                # 前两帧相同但还没到 RESULT_MIN，不能采信那个「唯一匹配」
-                self.assertIsNone(s._wait_results("w", max_wait=3))
+                return s._wait_results("w", max_wait=3)
+
+    ROW_A = {"y0": 257, "y1": 284}
+    ROW_B = {"y0": 431, "y1": 458}
+
+    def test_wait_results_waits_for_stable_frames(self):
+        partial = ((335, (1,)), [self.ROW_A])
+        full_ambiguous = ((1079, (1, 2)), [self.ROW_A, self.ROW_B])
+        s = self._sender_with_frames([partial, partial] + [full_ambiguous] * 200)
+        # 前两帧相同但还没到 RESULT_MIN，不能采信那个「唯一匹配」
+        self.assertIsNone(self._run_wait(s))
 
     def test_wait_results_returns_when_stable(self):
-        full = ((1079, (1, 2)), (400, 270))
-        s = self._sender_with_frames([full] * 50)
-        with mock.patch("fuxi_bridge.sender.time.sleep", lambda x: None):
-            clock = iter(i * 0.1 for i in range(1000))
-            with mock.patch("fuxi_bridge.sender.time.monotonic", lambda: next(clock)):
-                self.assertEqual(s._wait_results("w"), (400, 270))
+        s = self._sender_with_frames([((1079, (1, 2)), [self.ROW_A])] * 50)
+        self.assertEqual(self._run_wait(s), (400, 270))
+
+    def test_chat_record_section_is_ignored(self):
+        frames = [((1079, (1, 2)), [self.ROW_A, self.ROW_B])] * 50
+        s = self._sender_with_frames(frames, section=lambda y: "功能" if y < 400 else "聊天记录")
+        self.assertEqual(self._run_wait(s), (400, 270))
+        s = self._sender_with_frames(frames, section=lambda y: "联系人" if y < 400 else "群聊")
+        self.assertIsNone(self._run_wait(s))          # 两个可点击分区都有 → 不唯一
+        s = self._sender_with_frames([((1079, (1,)), [self.ROW_A])] * 50, section="")
+        self.assertIsNone(self._run_wait(s))          # 认不出分区 → 不点
 
     def test_open_stats(self):
         s = object.__new__(Sender)
         s.open_times = collections.deque([(0, 1.0, "搜索"), (0, 2.0, "搜索"), (0, 0.1, "已在会话")])
         self.assertEqual(s.open_stats(), {"n": 2, "p50": 2.0, "max": 2.0, "last": 0.1})
+
+
+class TimingTest(unittest.TestCase):
+    def test_first_delay_subtracts_model_time(self):
+        text = "x" * 30                                     # 打字约 5.8~6.6 秒
+        self.assertLessEqual(Bridge.first_delay(text, 10), 0.8)
+        self.assertGreaterEqual(Bridge.first_delay(text, 10), 0.3)
+        d = Bridge.first_delay(text, 2)
+        self.assertTrue(3.8 <= d <= 4.6, d)
+
+    def test_trace_and_stats(self):
+        t = timing.Trace(msg_time=100.0, seen=100.6)
+        t.add("settle", 1.5)
+        t.add("kernel", 4.0)
+        for i in range(2):
+            t.add("typing", 2.0)
+            t.add("open", 1.4 if i == 0 else 0.1)
+            t.add("paste", 0.4)
+            t.add("verify", 1.0)
+        t.bubble_sent(110.0)
+        t.bubble_sent(115.0)
+        r = t.result()
+        self.assertEqual((r["first"], r["total"], r["bubbles"], r["discover"]), (10.0, 15.0, 2, 0.6))
+        self.assertIn("首条 10.0s", t.summary())
+        st = timing.LatencyStats()
+        st.add(r)
+        st.add(timing.Trace(0, 0).result())   # 没发出的不计
+        s = st.summary()
+        self.assertEqual((s["n"], s["first"], s["typing"], s["verify"]), (1, 10.0, 2.0, 1.0))
+        self.assertIn("首条中位 10.0 秒", st.brief())
 
 
 if __name__ == "__main__":

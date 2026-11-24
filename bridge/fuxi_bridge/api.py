@@ -68,7 +68,8 @@ def serve(bridge: "Bridge") -> None:
                 probs = bridge.problems()
                 return self._json(200, {"ok": True, "healthy": not probs, "problems": probs,
                                         "wechat": bridge.last_send_ok, "halted": bridge.halted,
-                                        "paused": bridge.paused, "open_chat": bridge.sender.open_stats()})
+                                        "paused": bridge.paused, "open_chat": bridge.sender.open_stats(),
+                                        "latency": bridge.latency.summary()})
             if u.path == "/allow":
                 return self._json(200, {"ok": True, "items": [
                     {"chat_id": i, "name": "全部" if i == "*" else bridge.name_of(i)} for i in bridge.allowlist.items]})

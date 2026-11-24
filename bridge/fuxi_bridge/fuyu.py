@@ -12,7 +12,7 @@
                    comments, body}]，body 截到 2000 字
   prs.json       同上，另有 merged_at
   meta.json      repo、synced_at、releases_etag、since、error
-  events.json    最近 200 条变化：new_release / issue_opened / issue_closed / pr_opened / pr_merged（第一次全量同步不算变化）
+  events.json    最近 200 条变化：new_release / issue_opened / issue_closed / agent_stuck / pr_opened / pr_merged（第一次全量同步不算变化）
 
 「修好了没」：PR 标题或正文里写了 fixes/closes/修复/关闭 #N，或带着 issue 标题里的编号（如 [B93]），
 且已合并，就算修了；包含在合并之后发布的第一个版本里。
@@ -247,6 +247,8 @@ class Fuyu:
             return []
         if prev is None:
             return [{"type": "issue_opened", **base, "at": it["created_at"]}]
+        if "claude-stuck" in (it.get("labels") or []) and "claude-stuck" not in (prev.get("labels") or []):
+            return [{"type": "agent_stuck", **base, "at": it.get("updated_at")}]
         if prev.get("state") == "open" and it["state"] == "closed":
             return [{"type": "issue_closed", **base, "reason": it.get("state_reason") or "", "at": it["closed_at"]}]
         return []
@@ -374,6 +376,8 @@ def render_event(e: dict) -> str:
     t = e.get("type")
     if t == "new_release":
         return f"发布了{'测试版' if e.get('prerelease') else '正式版'} {e['tag']}"
+    if t == "agent_stuck":
+        return f"代理没修成 issue #{e['number']}：{e['title']}"
     if t == "pr_opened":
         return f"新 PR #{e['number']}：{e['title']}"
     if t == "pr_merged":

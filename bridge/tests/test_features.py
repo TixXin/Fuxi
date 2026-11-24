@@ -211,6 +211,8 @@ class ControlTest(unittest.TestCase):
         b.vision_mode = b.voice_mode = "off"
         b.cfg = settings.Settings(os.path.join(d, "settings.json"), {})
         b.fuyu = fuyu.Fuyu(os.path.join(d, "fuyu"), token="", http=lambda *a: None)
+        b.fixflow = mock.Mock()
+        b.fixflow.gh.ready = False
         self.b, self.c = b, control.Control(b)
 
     def test_only_self_in_filehelper(self):

@@ -28,6 +28,7 @@ log = logging.getLogger("fuxi.issues")
 
 LABEL_FROM = "from-wechat"
 LABEL_FIX = "claude-fix"
+LABEL_STUCK = "claude-stuck"   # 浮屿工作流：代理没修成时打上，并把查到的写成 issue 评论
 API = "https://api.github.com/repos/{repo}"
 
 _PHONE = re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")
@@ -100,6 +101,8 @@ class Issues:
         self.repo_of = repo_of
         self.token = token if token is not None else os.environ.get("FUXI_GITHUB_ISSUE_TOKEN", "")
         self.http = http or self._http
+        self.expires = ""        # token 到期时间（GitHub 响应头 github-authentication-token-expiration）
+        self.checked_at = 0.0
 
     @property
     def ready(self) -> bool:
@@ -112,6 +115,9 @@ class Issues:
                                               "Authorization": "Bearer " + self.token})
         try:
             with urllib.request.urlopen(req, timeout=60) as r:
+                exp = r.headers.get("github-authentication-token-expiration")
+                if exp:
+                    self.expires = exp
                 return r.status, json.loads(r.read() or b"{}")
         except urllib.error.HTTPError as e:
             try:
@@ -136,6 +142,12 @@ class Issues:
                     raise
                 time.sleep(3 * (attempt + 1))
         raise last
+
+    def check(self) -> str:
+        """读一次仓库信息，顺带拿到 token 到期时间；返回到期时间（没有就空）。"""
+        self.checked_at = time.time()
+        self._call("GET", "")
+        return self.expires
 
     def get(self, number: int) -> dict:
         return self._call("GET", f"/issues/{number}")

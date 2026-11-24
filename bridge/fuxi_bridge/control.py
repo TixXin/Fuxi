@@ -116,6 +116,10 @@ class Control:
             lines.append(f"群反馈：{b.feedback.brief()}")
         if b.cfg.get("fuyu_sync"):
             lines.append(f"浮屿仓库：{b.fuyu.brief()}")
+        if b.fixflow.gh.ready or b.cfg.get("agent_token_expires"):
+            wait = len(b.feedback.agent_waiting())
+            exp = "；".join(f"{n}到 {d}" for n, d in b.token_expiry()) or "到期日未知"
+            lines.append(f"云端代理：{'在修 ' + str(wait) + ' 条；' if wait else ''}{exp}")
         up = int(time.time() - b.started)
         lines.append(f"版本：{os.environ.get('FUXI_BUILD', 'dev')}")
         lines.append(f"已运行：{up // 3600} 小时 {up % 3600 // 60} 分")

@@ -69,6 +69,8 @@ ITEMS: list[Item] = [
          "用来查进度、反馈查重"),
     Item("fuyu_notify", "浮屿动态", "choice", "release", "同步发现变化时私聊主人（发到文件传输助手）",
          {"release": "只通知发版", "all": "发版+PR合并+issue开关", "off": "关闭"}),
+    Item("agent_token_expires", "代理凭据到期", "text", "", "浮屿仓库 secret CLAUDE_CODE_OAUTH_TOKEN 的到期日（如 2027-11-24），"
+         "到期前 14 天每天提醒；空 = 不提醒（开 issue 的 token 到期日自动从 GitHub 读）"),
     Item("announce_to", "发版群", "text", "", "发版公告（POST /announce）默认发到哪个群：群名或 chat_id；空 = 调用方必须指定"),
     Item("quiet", "静默时段", "text", "", "这段时间不自动回复、不主动搭话，如 00:30-07:30；空 = 不静默",
          env="FUXI_QUIET"),
@@ -130,6 +132,8 @@ def parse(item: Item, raw) -> object:
         return ""
     if item.key in ("digest_time", "group_summary_time") and not re.fullmatch(r"([01]?\d|2[0-3]):[0-5]\d", s):
         raise ValueError(f"{item.label} 格式：12:00")
+    if item.key == "agent_token_expires" and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", s):
+        raise ValueError(f"{item.label} 格式：2027-11-24")
     if item.key in ("quiet", "open_hours") and not _QUIET.match(s):
         raise ValueError(f"{item.label} 格式：00:30-07:30")
     return s

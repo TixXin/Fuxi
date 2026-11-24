@@ -151,5 +151,85 @@ class PrOpenedTest(unittest.TestCase):
         self.assertNotIn("浮屿动态", text)
 
 
+class FakeFuyu:
+    repo = "TixXin/Fuyu"
+
+    def __init__(self):
+        self.prs = []
+
+    def fixes_for(self, n):
+        return self.prs
+
+    def status(self, n):
+        return f"PR #{n}「fix」还在进行中"
+
+
+def bridge_stub(**cfg):
+    from fuxi_bridge.app import Bridge
+    from fuxi_bridge import settings
+    b = object.__new__(Bridge)
+    b.cfg = settings.Settings(os.path.join(tempfile.mkdtemp(), "s.json"), {})
+    for k, v in cfg.items():
+        b.cfg.set(k, v)
+    b.fuyu = FakeFuyu()
+    b.feedback = fb.Feedback(tempfile.mkdtemp(), complete=None, fuyu=b.fuyu)
+    b.fixflow = isu.FixFlow(b.feedback, isu.Issues(lambda: "TixXin/Fuyu", token="", http=FakeGH()))
+    b.send = mock.Mock(return_value=mock.Mock(ok=True))
+    return b
+
+
+class AgentWatchTest(unittest.TestCase):
+    def test_stuck_event_and_notify(self):
+        prev = {"number": 1300, "title": "t", "html_url": "u", "state": "open", "labels": ["claude-fix"]}
+        cur = {**prev, "labels": ["claude-stuck"], "updated_at": "x"}
+        ev = fuyu.Fuyu._diff(prev, cur, False)
+        self.assertEqual(ev[0]["type"], "agent_stuck")
+        self.assertEqual(fuyu.Fuyu._diff(cur, cur, False), [])
+        b = bridge_stub(fuyu_notify="关闭")
+        b.feedback.items = [item(issue=1300, status="known", agent_at=T)]
+        with mock.patch("threading.Thread") as th:
+            b._fuyu_events([{**ev[0], "url": "https://x/1300"}])
+            th.call_args.kwargs["target"]()
+        self.assertIn("【代理没修成】反馈 #3", b.send.call_args.args[0].text)
+        self.assertTrue(b.feedback.get(3)["agent_stuck"])
+        self.assertIn("没修成", b.feedback.detail(3))
+        self.assertEqual(b.feedback.agent_waiting(), [])
+
+    def test_late_once_and_pr_from_cache(self):
+        b = bridge_stub()
+        b.feedback.items = [item(issue=1300, status="known", agent_at=T)]
+        b._agent_watch(T + 3600)
+        b.send.assert_not_called()
+        b._agent_watch(T + 3 * 3600)
+        self.assertIn("【代理还没结果】反馈 #3", b.send.call_args.args[0].text)
+        b._agent_watch(T + 4 * 3600)
+        self.assertEqual(b.send.call_count, 1, "只提醒一次")
+        self.assertIn("已提醒过", b.feedback.detail(3))
+        b.fuyu.prs = [{"number": 1301, "created_at": "2099-01-01T00:00:00Z"}]
+        b._agent_watch(T + 5 * 3600)
+        self.assertEqual(b.feedback.get(3)["agent_pr"], 1301)
+        self.assertIn("PR #1301「fix」还在进行中", b.feedback.detail(3))
+        b.fixflow.gh.token = "t"
+        b.feedback.mark_issue(b.feedback.get(3), 1300, agent=True)   # 再派一次：清掉上次结果
+        self.assertEqual(len(b.feedback.agent_waiting()), 1)
+
+    def test_expiry_reminder(self):
+        from fuxi_bridge import settings
+        b = bridge_stub()
+        with self.assertRaises(ValueError):
+            settings.parse(settings.BY_KEY["agent_token_expires"], "明年")
+        b.cfg.set("agent_token_expires", time.strftime("%Y-%m-%d", time.localtime(T + 10 * 86400)))
+        b.fixflow.gh.expires = "2099-11-23 00:00:00 UTC"
+        self.assertEqual([n for n, _ in b.token_expiry()], ["开 issue 的 token", "代理凭据 CLAUDE_CODE_OAUTH_TOKEN"])
+        b._agent_watch(T)
+        text = b.send.call_args.args[0].text
+        self.assertIn("代理凭据 CLAUDE_CODE_OAUTH_TOKEN将在", text)
+        self.assertNotIn("开 issue 的 token", text)
+        b._agent_watch(T + 3600)
+        self.assertEqual(b.send.call_count, 1, "每天一次")
+        b._agent_watch(T + 86400)
+        self.assertEqual(b.send.call_count, 2)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -345,13 +345,25 @@ class Feedback:
             it["issue"], it["issue_score"] = number, 1
             if it["status"] in ("new", "answered"):
                 it["status"] = "known"
-            if agent:
+            if agent:   # 重新派（比如补充线索后再 /修）：清掉上一次的结果
                 it["agent_at"] = time.time()
+                for k in ("agent_pr", "agent_stuck", "agent_late"):
+                    it.pop(k, None)
             self._save()
 
     def agent_items(self, refs: list[int]) -> list[dict]:
-        """派给代理、对应 issue 在 refs 里的条目（代理出 draft PR 时通知主人用）。"""
+        """派给代理、对应 issue 在 refs 里的条目（代理出 draft PR / 没修成时通知主人用）。"""
         return [i for i in self.items if i.get("agent_at") and i.get("issue") in set(refs)]
+
+    def agent_waiting(self) -> list[dict]:
+        """派给代理、还没有结果（没出 PR、没说修不了）的条目。"""
+        return [i for i in self.items if i.get("agent_at") and not i.get("agent_pr") and not i.get("agent_stuck")
+                and i["status"] != "ignored"]
+
+    def set_fields(self, it: dict, **kw) -> None:
+        with self._lock:
+            it.update(kw)
+            self._save()
 
     def progress(self, it: dict) -> str:
         """给主人看的进度（带 issue 编号）。"""
@@ -397,12 +409,25 @@ class Feedback:
                  f"平台：{it.get('platform') or '未知'}；提到 {it['count']} 次；反馈人：{who}",
                  f"首次 {time.strftime('%m-%d %H:%M', time.localtime(it['first_seen']))}，"
                  f"最近 {time.strftime('%m-%d %H:%M', time.localtime(it['last_seen']))}",
-                 "进度：" + self.progress(it)
-                 + (f"（{time.strftime('%m-%d %H:%M', time.localtime(it['agent_at']))} 已交给云端代理）"
-                    if it.get("agent_at") else "")]
+                 "进度：" + self.progress(it),
+                 self._agent_line(it)]
         if it["quotes"]:
             lines.append("原话：\n" + "\n".join("  " + q for q in it["quotes"][-5:]))
         return "\n".join(x for x in lines if x)
+
+    def _agent_line(self, it: dict) -> str:
+        if not it.get("agent_at"):
+            return ""
+        head = f"云端代理：{time.strftime('%m-%d %H:%M', time.localtime(it['agent_at']))} 派出，"
+        if it.get("agent_pr"):
+            pr = it["agent_pr"]
+            try:
+                return head + (self.fuyu.status(pr) if self.fuyu else f"PR #{pr}")
+            except Exception:
+                return head + f"PR #{pr}"
+        if it.get("agent_stuck"):
+            return head + f"没修成，查到的情况在 issue #{it['issue']} 的评论里"
+        return head + "还在修" + ("（超过 2 小时没结果，已提醒过）" if it.get("agent_late") else "")
 
     def listing(self, days: int = 7) -> str:
         cut = time.time() - days * 86400

@@ -83,6 +83,13 @@ class SendJob:
     open_s: float = 0.0
 
 
+def _date_ts(d: str) -> float:
+    try:
+        return time.mktime(time.strptime(d[:10], "%Y-%m-%d"))
+    except ValueError:
+        return float("inf")
+
+
 class Bridge:
     def __init__(self) -> None:
         env = os.environ
@@ -645,6 +652,10 @@ class Bridge:
             self.outreach.tick(now)
         except Exception:
             log.exception("群营业定时任务出错")
+        try:
+            self._agent_watch(now)
+        except Exception:
+            log.exception("云端代理检查出错")
         digest_due = fb.due("digest", self.cfg.get("digest_time"), now)
         group_due = fb.due("group", self.cfg.get("group_summary_time"), now)
         if digest_due or group_due or now - float(fb.meta.get("classified_at") or 0) >= feedback.CLASSIFY_EVERY:
@@ -682,17 +693,70 @@ class Bridge:
                 else:
                     log.warning("群小结没发到 %s：%s", self.name_of(chat), job.error)
 
+    AGENT_LATE = 2 * 3600
+
+    def _agent_watch(self, now: float) -> None:
+        """派给代理超过 2 小时还没结果就提醒主人一次（错过了 PR 事件的，用 PR 缓存补上）；
+        开 issue 的 token、代理凭据到期前 14 天每天提醒一次。"""
+        texts = []
+        for it in self.feedback.agent_waiting():
+            prs = [p for p in self.fuyu.fixes_for(it["issue"]) if fuyu._ts(p.get("created_at")) >= it["agent_at"] - 60]
+            if prs:
+                self.feedback.set_fields(it, agent_pr=prs[-1]["number"])
+            elif now - it["agent_at"] > self.AGENT_LATE and not it.get("agent_late"):
+                self.feedback.set_fields(it, agent_late=True)
+                repo = self.cfg.get("knowledge_repo") or self.fuyu.repo
+                texts.append(f"【代理还没结果】反馈 #{it['id']}「{it['title']}」→ issue #{it['issue']}，派出已超过 2 小时。\n"
+                             f"看看运行记录：https://github.com/{repo}/actions/workflows/claude-fix.yml")
+        gh = self.fixflow.gh
+        if gh.ready and now - gh.checked_at > 86400:
+            try:
+                gh.check()
+            except Exception as e:
+                log.warning("检查开 issue 的 token 失败：%s", e)
+        day = feedback._day(now)
+        if self.feedback.meta.get("expiry_day") != day:
+            soon = [f"{name}将在 {d} 到期" for name, d in self.token_expiry() if 0 <= (_date_ts(d) - now) / 86400 <= 14]
+            soon += [f"{name}已在 {d} 过期" for name, d in self.token_expiry() if _date_ts(d) < now]
+            if soon:
+                self.feedback.meta["expiry_day"] = day
+                self.feedback._save()
+                texts.append("【到期提醒】" + "；".join(soon) + "。到期后 /修 用不了，记得换新的（步骤见 docs/feedback-loop.md）。")
+        for text in texts:
+            job = self.send(SendJob(chat="filehelper", text=text, source="control"))
+            if not job.ok:
+                log.warning("云端代理提醒没发出去：%s", job.error)
+
+    def token_expiry(self) -> list[tuple[str, str]]:
+        """[(名称, YYYY-MM-DD)]：开 issue 的 token（GitHub 响应头）、代理凭据（设置「代理凭据到期」）。"""
+        out = []
+        if self.fixflow.gh.expires:
+            out.append(("开 issue 的 token", self.fixflow.gh.expires[:10]))
+        if self.cfg.get("agent_token_expires"):
+            out.append(("代理凭据 CLAUDE_CODE_OAUTH_TOKEN", self.cfg.get("agent_token_expires")))
+        return out
+
     def _fuyu_events(self, events: list[dict]) -> None:
         """浮屿仓库同步发现变化：发正式版时通知群里的反馈人（见 outreach.py）；按「浮屿动态」设置私聊主人（文件传输助手）。"""
         for e in events:
             if e.get("type") == "new_release" and not e.get("prerelease") and self.cfg.get("outreach"):
                 threading.Thread(target=self.outreach.on_release, args=(e["tag"],), name="fix-notify", daemon=True).start()
         texts = []
-        for e in events:   # /修 派给代理的 issue 出了 PR：不管「浮屿动态」怎么设都告诉主人
+        for e in events:   # /修 派给代理的 issue 有结果了：不管「浮屿动态」怎么设都告诉主人
             if e.get("type") == "pr_opened":
                 for it in self.feedback.agent_items(e.get("refs") or []):
+                    if it.get("agent_pr"):
+                        continue
+                    self.feedback.set_fields(it, agent_pr=e["number"])
                     texts.append(f"【代理出 PR 了】反馈 #{it['id']}「{it['title']}」→ issue #{it['issue']}\n"
                                  f"PR #{e['number']}：{e['title']}\n{e['url']}\n看过没问题就在 GitHub 上转正式并合并。")
+            elif e.get("type") == "agent_stuck":
+                for it in self.feedback.agent_items([e["number"]]):
+                    if it.get("agent_stuck") or it.get("agent_pr"):
+                        continue
+                    self.feedback.set_fields(it, agent_stuck=True)
+                    texts.append(f"【代理没修成】反馈 #{it['id']}「{it['title']}」→ issue #{it['issue']}\n"
+                                 f"它查到的情况写在 issue 评论里：{e['url']}\n可以补充线索后再 /修 {it['id']}，或者自己修。")
         mode = self.cfg.get("fuyu_notify")
         if mode == "release":
             events = [e for e in events if e.get("type") == "new_release"]

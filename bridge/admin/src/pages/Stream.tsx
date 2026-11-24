@@ -18,7 +18,7 @@ const FILTERS: { value: Filter; label: string }[] = [
 ];
 const KIND_ZH: Record<string, string> = { image: "图片", voice: "语音", emoji: "表情", pat: "拍一拍", link: "链接", file: "文件", video: "视频" };
 
-export function Stream({ live, onMenu }: { live: boolean; onMenu: () => void }) {
+export function Stream({ live, onMenu, onAddFaq }: { live: boolean; onMenu: () => void; onAddFaq: (q: string) => void }) {
   const [items, setItems] = useState<StreamItem[] | null>(null);
   const [error, setError] = useState("");
   const [more, setMore] = useState(true);
@@ -95,7 +95,13 @@ export function Stream({ live, onMenu }: { live: boolean; onMenu: () => void }) 
             <div className="stream__empty">{items.length ? "没有符合条件的消息" : "重启以来还没有消息。白名单里的会话发来消息后会出现在这里。"}</div>
           )}
           {shown.map((it) =>
-            it.kind === "message" ? <MessageItem key={it.id} m={it} /> : it.kind === "sent" ? <SentItem key={it.id} s={it} /> : <HandoffItem key={it.id} h={it} />,
+            it.kind === "message" ? (
+              <MessageItem key={it.id} m={it} />
+            ) : it.kind === "sent" ? (
+              <SentItem key={it.id} s={it} />
+            ) : (
+              <HandoffItem key={it.id} h={it} onAddFaq={onAddFaq} />
+            ),
           )}
         </Card>
       )}
@@ -153,7 +159,7 @@ function MessageItem({ m }: { m: MessageEvent_ }) {
   );
 }
 
-function HandoffItem({ h }: { h: Extract<StreamItem, { kind: "handoff" }> }) {
+function HandoffItem({ h, onAddFaq }: { h: Extract<StreamItem, { kind: "handoff" }>; onAddFaq: (q: string) => void }) {
   return (
     <article className="msg msg--handoff">
       <span className="avatar avatar--icon">
@@ -167,6 +173,11 @@ function HandoffItem({ h }: { h: Extract<StreamItem, { kind: "handoff" }> }) {
           <time className="msg__time">{clockSec(h.ts)}</time>
         </div>
         <div className="msg__in">「{h.question}」资料里没找到，已私聊你</div>
+        {h.question && (
+          <div style={{ marginTop: 6 }}>
+            <Button onClick={() => onAddFaq(h.question)}>收入常见问答</Button>
+          </div>
+        )}
       </div>
     </article>
   );

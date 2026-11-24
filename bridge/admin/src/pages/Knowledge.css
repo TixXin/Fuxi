@@ -167,3 +167,55 @@
   white-space: pre-wrap;
   line-height: 1.5;
 }
+
+.docrow {
+  border-top: 1px solid var(--color-border-subtle, rgba(127, 127, 127, 0.14));
+}
+
+.docrow__head {
+  width: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: 9px 16px;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  font-size: 12.5px;
+}
+
+.docrow__head:hover {
+  background: var(--color-surface-hover, rgba(127, 127, 127, 0.06));
+}
+
+.docrow__path {
+  font-size: 12px;
+}
+
+.docrow__meta {
+  margin-left: auto;
+  color: var(--color-text-subtle);
+  font-size: 11.5px;
+}
+
+.docrow__chunks {
+  padding: 4px 16px 12px 34px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.docrow__chunk b {
+  font-size: 12px;
+}
+
+.docrow__chunk p {
+  margin: 2px 0 0;
+  color: var(--color-text-muted);
+  font-size: 12px;
+  white-space: pre-wrap;
+  line-height: 1.45;
+}

@@ -13,6 +13,7 @@ export interface TodoItem {
   desc: string;
   created: number;
   code?: string;
+  question?: string;
 }
 
 export interface Overview {
@@ -137,6 +138,14 @@ export interface FaqItem {
   q: string;
   a: string;
   updated?: number;
+}
+
+export interface KnowledgeDoc {
+  source: string;
+  kind: string;
+  chunks: number;
+  chars: number;
+  titles: string[];
 }
 
 export interface KnowledgeSearch {
@@ -287,6 +296,10 @@ export const api = {
   saveFaq: (q: string, a: string, id?: number) =>
     request<{ items: FaqItem[] }>("POST", "/api/knowledge/faq", id !== undefined ? { id, q, a } : { q, a }),
   deleteFaq: (id: number) => request<{ items: FaqItem[] }>("POST", "/api/knowledge/faq/delete", { id }),
+  knowledgeDocs: (q = "") =>
+    request<{ items: KnowledgeDoc[] }>("GET", `/api/knowledge/docs${q ? `?q=${encodeURIComponent(q)}` : ""}`),
+  knowledgeDocChunks: (source: string) =>
+    request<{ chunks: { title: string; text: string }[] }>("GET", `/api/knowledge/doc?source=${encodeURIComponent(source)}`),
   allow: () => request<{ items: Chat[] }>("GET", "/api/allow"),
   recentChats: () => request<{ items: Chat[] }>("GET", "/api/chats/recent"),
   searchChats: (q: string) => request<{ items: Chat[] }>("GET", `/api/chats?q=${encodeURIComponent(q)}`),

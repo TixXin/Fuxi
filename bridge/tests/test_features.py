@@ -290,6 +290,16 @@ class ControlTest(unittest.TestCase):
         self.assertIn("中位 1.4 秒", self.c.handle("/状态"))
         self.assertIn("/测试", self.c.handle("/帮助"))
 
+    def test_knowledge_faq_commands(self):
+        from fuxi_bridge import knowledge as kn
+        self.b.knowledge = kn.Knowledge(tempfile.mkdtemp(), "o/r")
+        self.assertIn("还没有自定义常见问答", self.c.handle("/资料 问答"))
+        self.assertIn("用法：", self.c.handle("/资料 记 没有分隔符"))
+        self.assertIn("已记下常见问答 #1", self.c.handle("/资料 记 支持 Linux 吗 | 暂不支持 Linux"))
+        self.assertIn("#1 支持 Linux 吗", self.c.handle("/资料 问答"))
+        self.assertIn("已删除常见问答 #1", self.c.handle("/资料 删 1"))
+        self.assertIn("还没有自定义常见问答", self.c.handle("/资料 问答"))
+
 
 class CareTest(unittest.TestCase):
     def setUp(self):

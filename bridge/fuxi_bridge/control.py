@@ -14,7 +14,8 @@
   /存表情 [分类]      把 10 分钟内发到这里的最新一个表情存进表情包库（分类默认「开心」，还有傲娇、炸毛）
   /搭话              立即检查一次主动搭话（仍受内核时间窗/间隔/上限约束），回报结果
   /待发              列出等确认的发版公告；/发布 [编号] 发出，/取消 [编号] 放弃
-  /资料              产品助手资料库状态；/资料 同步 立即同步；/资料 搜 问题 看会检索到哪几段
+  /资料              产品助手资料库状态；/资料 同步 立即同步；/资料 搜 问题 看会检索到哪几段；
+                     /资料 问答 查看自定义问答；/资料 记 问题 | 回答 新增一条；/资料 删 编号 删除
   /反馈              最近 7 天整理出的群反馈；/反馈 3 看详情和原话；/反馈 整理 立即整理；
                      /反馈 摘要 预览给主人的摘要；/反馈 小结 预览今晚的群小结（只预览，不发）
   /忽略 编号          这条反馈不再出现在摘要和群小结里
@@ -281,7 +282,38 @@ class Control:
             if not hits:
                 return "没找到够相关的资料（群里会按「不确定、转主人」处理）。"
             return "会附上这几段：\n" + "\n".join(f"- {h.title}：{h.text[:60]}…" for h in hits)
-        return f"资料库：{b.knowledge.brief()}（来源 {b.cfg.get('knowledge_repo')}）\n" \
+        if cmd == "问答":
+            items = b.knowledge.faq_list()
+            if not items:
+                return "还没有自定义常见问答。新增：/资料 记 问题 | 回答"
+            return f"自定义常见问答（{len(items)} 条）：\n" + "\n".join(
+                f"#{it['id']} {it['q']} → {it['a'][:50]}{'…' if len(it['a']) > 50 else ''}" for it in items[:20]
+            )
+        if cmd == "记":
+            sep = "|" if "|" in rest else ("｜" if "｜" in rest else "")
+            if not sep:
+                return "用法：/资料 记 问题 | 回答"
+            q, _, a = rest.partition(sep)
+            try:
+                items = b.knowledge.faq_save(q, a)
+            except ValueError as e:
+                return str(e)
+            if hasattr(b, "events"):
+                b.events.publish("knowledge", {"result": ""})
+            return f"已记下常见问答 #{items[0]['id']}（共 {len(items)} 条），立即参与检索。"
+        if cmd == "删":
+            n = rest.strip().lstrip("#")
+            if not n.isdigit():
+                return "用法：/资料 删 编号"
+            try:
+                items = b.knowledge.faq_delete(int(n))
+            except ValueError as e:
+                return str(e)
+            if hasattr(b, "events"):
+                b.events.publish("knowledge", {"result": ""})
+            return f"已删除常见问答 #{n}（剩 {len(items)} 条）。"
+        faqs = len(b.knowledge.faq_list()) if hasattr(b.knowledge, "faq_list") else 0
+        return f"资料库：{b.knowledge.brief()}（自定义问答 {faqs} 条，来源 {b.cfg.get('knowledge_repo')}）\n" \
                f"产品助手群：{'、'.join(b.cfg.get('assistant_groups')) or '未设置（/设置 产品助手群 群名）'}"
 
     def feedback(self, arg: str) -> str:

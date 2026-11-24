@@ -1,14 +1,24 @@
-import { BookOpen, Pencil, Plus, RefreshCw, Search, Trash2 } from "lucide-react";
-import { useState } from "react";
+import { BookOpen, ChevronDown, ChevronRight, FileText, Pencil, Plus, RefreshCw, Search, Trash2 } from "lucide-react";
+import { useEffect, useState } from "react";
 import { Switch, Tag } from "../components/controls";
 import { Button, Card, Dot, ErrorNote, Group, PageHead, Row, Skeleton } from "../components/ui";
-import { api, type FaqItem, type KnowledgeSearch } from "../lib/api";
+import { api, type FaqItem, type KnowledgeDoc, type KnowledgeSearch } from "../lib/api";
 import { useBridgeEvent } from "../lib/bus";
 import { ago, clock } from "../lib/format";
 import { useApi } from "../lib/useApi";
 import "./Knowledge.css";
 
-export function Knowledge({ onMenu, onNavigate }: { onMenu: () => void; onNavigate: (id: string) => void }) {
+export function Knowledge({
+  onMenu,
+  onNavigate,
+  draftFaq = "",
+  onConsumeDraft,
+}: {
+  onMenu: () => void;
+  onNavigate: (id: string) => void;
+  draftFaq?: string;
+  onConsumeDraft?: () => void;
+}) {
   const info = useApi(api.knowledge);
   const [syncMsg, setSyncMsg] = useState("");
   useBridgeEvent(["knowledge"], (e) => {
@@ -71,13 +81,14 @@ export function Knowledge({ onMenu, onNavigate }: { onMenu: () => void; onNaviga
           </Card>
         </Group>
       )}
-      <FaqSection />
+      <FaqSection draftFaq={draftFaq} onConsumeDraft={onConsumeDraft} />
       <TrySearch />
+      <DocBrowser />
     </div>
   );
 }
 
-function FaqSection() {
+function FaqSection({ draftFaq = "", onConsumeDraft }: { draftFaq?: string; onConsumeDraft?: () => void }) {
   const list = useApi(api.knowledgeFaqs);
   const [editing, setEditing] = useState<number | "new" | null>(null);
   const [q, setQ] = useState("");
@@ -85,6 +96,15 @@ function FaqSection() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   useBridgeEvent(["knowledge"], () => void list.reload());
+
+  useEffect(() => {
+    if (!draftFaq) return;
+    setEditing("new");
+    setQ(draftFaq.slice(0, 120));
+    setA("");
+    setError("");
+    onConsumeDraft?.();
+  }, [draftFaq, onConsumeDraft]);
 
   function openNew() {
     setEditing("new");
@@ -275,6 +295,109 @@ function TrySearch() {
             </div>
           );
         })}
+      </Card>
+    </Group>
+  );
+}
+
+function DocBrowser() {
+  const [open, setOpen] = useState(false);
+  const [filter, setFilter] = useState("");
+  const [docs, setDocs] = useState<KnowledgeDoc[] | null>(null);
+  const [error, setError] = useState("");
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const [chunks, setChunks] = useState<{ title: string; text: string }[]>([]);
+  const [loadingChunks, setLoadingChunks] = useState(false);
+
+  async function load(q = filter) {
+    try {
+      const r = await api.knowledgeDocs(q);
+      setDocs(r.items);
+      setError("");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  useEffect(() => {
+    if (open) void load(filter);
+  }, [open]);
+
+  useBridgeEvent(["knowledge"], () => {
+    if (open) void load(filter);
+  });
+
+  async function toggleDoc(source: string) {
+    if (expanded === source) {
+      setExpanded(null);
+      return;
+    }
+    setExpanded(source);
+    setLoadingChunks(true);
+    try {
+      const r = await api.knowledgeDocChunks(source);
+      setChunks(r.chunks);
+    } catch (e) {
+      setChunks([{ title: "读取失败", text: e instanceof Error ? e.message : String(e) }]);
+    } finally {
+      setLoadingChunks(false);
+    }
+  }
+
+  return (
+    <Group title="已收录文档" meta="查看同步进来的文档与切段结果">
+      <Card>
+        <div className="faq__bar">
+          <span className="faq__hint">排查某份文档有没有被同步进来、切段是否完整</span>
+          <Button icon={open ? <ChevronDown size={14} /> : <ChevronRight size={14} />} onClick={() => setOpen((v) => !v)}>
+            {open ? "收起清单" : "展开查看"}
+          </Button>
+        </div>
+        {open && (
+          <>
+            <div className="trysearch">
+              <label className="toolbar__search trysearch__input">
+                <Search size={14} />
+                <input
+                  className="field"
+                  placeholder="按路径或标题过滤，比如 macos / screenshot / v0.3"
+                  value={filter}
+                  onChange={(e) => setFilter(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && load(filter)}
+                />
+              </label>
+              <Button onClick={() => load(filter)}>筛选</Button>
+            </div>
+            {error && <ErrorNote message={error} />}
+            {docs && docs.length === 0 && <div className="faq__empty">没有匹配的文档</div>}
+            {docs?.map((d) => (
+              <div className="docrow" key={d.source}>
+                <button className="docrow__head" type="button" onClick={() => toggleDoc(d.source)}>
+                  <FileText size={14} />
+                  <span className="mono docrow__path">{d.source}</span>
+                  <Tag>{d.kind}</Tag>
+                  <span className="docrow__meta">
+                    {d.chunks} 段 · {Math.round(d.chars / 100) / 10}k 字
+                  </span>
+                </button>
+                {expanded === d.source && (
+                  <div className="docrow__chunks">
+                    {loadingChunks ? (
+                      <div className="faq__hint">加载中…</div>
+                    ) : (
+                      chunks.map((c, i) => (
+                        <div className="docrow__chunk" key={i}>
+                          <b>{c.title}</b>
+                          <p>{c.text}</p>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                )}
+              </div>
+            ))}
+          </>
+        )}
       </Card>
     </Group>
   );

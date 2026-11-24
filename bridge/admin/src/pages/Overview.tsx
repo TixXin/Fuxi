@@ -13,11 +13,12 @@ interface Props {
   live: boolean;
   onMenu: () => void;
   onNavigate: (id: string) => void;
+  onAddFaq: (q: string) => void;
 }
 
 const SERVICE_NAMES = { wechat: "微信", kernel: "内核", bridge: "桥接" } as const;
 
-export function Overview({ data, error, reload, live, onMenu, onNavigate }: Props) {
+export function Overview({ data, error, reload, live, onMenu, onNavigate, onAddFaq }: Props) {
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState("");
 
@@ -135,6 +136,7 @@ export function Overview({ data, error, reload, live, onMenu, onNavigate }: Prop
               desc={`${it.desc} · ${clock(it.created)}`}
             >
               {it.kind === "announce" && <Button onClick={() => onNavigate("announce")}>去处理</Button>}
+              {it.kind === "handoff" && it.question && <Button onClick={() => onAddFaq(it.question!)}>收入问答</Button>}
             </Row>
           ))}
         </Card>

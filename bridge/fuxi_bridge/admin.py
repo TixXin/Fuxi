@@ -138,6 +138,13 @@ def make_handler(bridge: "Bridge", token: str, static_dir: str, ping: float = PI
                 return self._json(200, {"ok": True, **handlers.knowledge_info(bridge)})
             if u.path == "/api/knowledge/faq":
                 return self._json(200, {"ok": True, "items": handlers.knowledge_faq_list(bridge)})
+            if u.path == "/api/knowledge/docs":
+                return self._json(200, {"ok": True, "items": handlers.knowledge_docs(bridge, (qs.get("q") or [""])[0])})
+            if u.path == "/api/knowledge/doc":
+                try:
+                    return self._json(200, {"ok": True, "chunks": handlers.knowledge_doc_chunks(bridge, (qs.get("source") or [""])[0])})
+                except handlers.HandlerError as e:
+                    return self._err(e.code, str(e))
             if u.path == "/api/knowledge/search":
                 try:
                     return self._json(200, {"ok": True, **handlers.knowledge_search(

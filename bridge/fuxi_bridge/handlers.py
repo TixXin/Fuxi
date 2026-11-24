@@ -110,7 +110,8 @@ def overview(b: "Bridge") -> dict:
                      "desc": f"发到「{it['to']}」", "created": it["created"]})
     for ev in b.events.recent(limit=5, kind="handoff"):
         if now - ev["ts"] < 24 * 3600:
-            todo.append({"kind": "handoff", "title": f"群里有人问「{ev.get('question', '')[:40]}」",
+            q = ev.get("question", "")
+            todo.append({"kind": "handoff", "title": f"群里有人问「{q[:40]}」", "question": q,
                          "desc": f"资料里没找到 · {ev.get('chat_name', '')} · {ev.get('sender', '')}",
                          "created": ev["ts"]})
     return {
@@ -190,6 +191,41 @@ def knowledge_faq_delete(b: "Bridge", body: dict) -> list[dict]:
     log.warning("常见问答 #%d 经管理台删除（剩 %d 条）", fid, len(items))
     b.events.publish("knowledge", {"result": ""})
     return items
+
+
+def knowledge_docs(b: "Bridge", q: str = "") -> list[dict]:
+    """已收录文档列表（按 source 聚合，支持关键词筛选）。"""
+    needle = q.strip().lower()
+    grouped: dict[str, dict] = {}
+    for c in b.knowledge.index.chunks:
+        g = grouped.get(c.source)
+        if not g:
+            kind = ("常见问答" if c.source == "local/faq" or c.source.lower() == "docs/faq.md" else
+                    "版本说明" if c.source.startswith("docs/releases/") else
+                    "功能说明" if c.source.startswith("docs/features/") else "其他")
+            g = {"source": c.source, "kind": kind, "chunks": 0, "chars": 0, "titles": []}
+            grouped[c.source] = g
+        g["chunks"] += 1
+        g["chars"] += len(c.text)
+        if len(g["titles"]) < 4 and c.title not in g["titles"]:
+            g["titles"].append(c.title)
+    rows = list(grouped.values())
+    if needle:
+        rows = [r for r in rows if needle in r["source"].lower() or any(needle in t.lower() for t in r["titles"])]
+    order = {"常见问答": 0, "其他": 1, "功能说明": 2, "版本说明": 3}
+    rows.sort(key=lambda r: (order.get(r["kind"], 9), r["source"]))
+    return rows
+
+
+def knowledge_doc_chunks(b: "Bridge", source: str) -> list[dict]:
+    """查看某个文档切出来的全部段落。"""
+    source = (source or "").strip()
+    if not source:
+        raise HandlerError("缺少文档路径")
+    chunks = [{"title": c.title, "text": c.text} for c in b.knowledge.index.chunks if c.source == source]
+    if not chunks:
+        raise HandlerError("资料库里没有这份文档", 404)
+    return chunks
 
 
 def knowledge_sync(b: "Bridge") -> None:

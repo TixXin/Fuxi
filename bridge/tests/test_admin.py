@@ -209,6 +209,17 @@ class AdminServerTest(unittest.TestCase):
         self.assertEqual((code, body["items"]), (200, []))
         self.assertEqual(self.req("POST", "/api/knowledge/faq/delete", {"id": fid})[0], 404)
 
+    def test_knowledge_docs_api(self):
+        from fuxi_bridge import knowledge as kn
+        k = kn.Knowledge(tempfile.mkdtemp(), "o/r")
+        k.faq_save("支持 Linux 吗", "暂不支持 Linux")
+        self.b.knowledge = k
+        code, body, _ = self.req("GET", "/api/knowledge/docs")
+        self.assertEqual((code, len(body["items"]), body["items"][0]["source"]), (200, 1, "local/faq"))
+        code, body, _ = self.req("GET", "/api/knowledge/doc?source=local/faq")
+        self.assertEqual((code, len(body["chunks"])), (200, 1))
+        self.assertEqual(self.req("GET", "/api/knowledge/doc?source=nope")[0], 404)
+
     def test_allow(self):
         self.b.name_of.side_effect = lambda x: {"g@chatroom": "浮屿用户交流群", "wxid_a": "阿青"}.get(x, x)
         self.b.resolve_chat.side_effect = lambda n: "g@chatroom"

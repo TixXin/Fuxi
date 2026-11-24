@@ -26,6 +26,7 @@ export function App() {
   const [page, setPage] = useState(pageFromHash);
   const [navOpen, setNavOpen] = useState(false);
   const [live, setLive] = useState(false);
+  const [draftFaq, setDraftFaq] = useState("");
   const overview = useApi(api.overview, 10_000);
   const { reload } = overview;
 
@@ -56,6 +57,14 @@ export function App() {
     document.querySelector(".app__main")?.scrollTo(0, 0);
   }, []);
 
+  const openFaqDraft = useCallback(
+    (question: string) => {
+      setDraftFaq(question);
+      navigate("knowledge");
+    },
+    [navigate],
+  );
+
   const openNav = useCallback(() => setNavOpen(true), []);
   const item = ALL.find((n) => n.id === page)!;
   const pending = overview.data?.todo.filter((t) => t.kind === "announce").length ?? 0;
@@ -74,10 +83,12 @@ export function App() {
       />
       <main className="app__main">
         {offline && <div className="conn-bar">连不上浮汐，10 秒后重试</div>}
-        {page === "overview" && <Overview {...overview} live={live} onMenu={openNav} onNavigate={navigate} />}
-        {page === "stream" && <Stream live={live} onMenu={openNav} />}
+        {page === "overview" && <Overview {...overview} live={live} onMenu={openNav} onNavigate={navigate} onAddFaq={openFaqDraft} />}
+        {page === "stream" && <Stream live={live} onMenu={openNav} onAddFaq={openFaqDraft} />}
         {page === "settings" && <Settings onMenu={openNav} />}
-        {page === "knowledge" && <Knowledge onMenu={openNav} onNavigate={navigate} />}
+        {page === "knowledge" && (
+          <Knowledge onMenu={openNav} onNavigate={navigate} draftFaq={draftFaq} onConsumeDraft={() => setDraftFaq("")} />
+        )}
         {page === "chats" && <Chats onMenu={openNav} />}
         {page === "announce" && <Announce onMenu={openNav} />}
         {page === "feedback" && <Feedback onMenu={openNav} />}

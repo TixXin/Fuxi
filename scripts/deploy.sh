@@ -73,7 +73,7 @@ deploy() {
     echo "!! 工作区有没提交的改动（bridge/ kernel/ watchdog/ deploy/），版本记为 $tag" >&2
   fi
   for s in $svcs; do
-    echo "==> 构建 fuxi-$s:$tag（linux/amd64）"
+    echo "==> 构建 fuxi-$s:${tag}（linux/amd64）"
     docker build -q --platform linux/amd64 --build-arg FUXI_BUILD="$tag" --label "fuxi.version=$tag" \
       -t "fuxi-$s:$tag" "$root/$s" >/dev/null
     images+=("fuxi-$s:$tag")
@@ -91,7 +91,7 @@ deploy() {
   }
   for s in $svcs; do point_dev "$s" "$tag" deploy; done
 
-  echo "==> 启动（版本 $tag）"
+  echo "==> 启动（版本 ${tag}）"
   restart "$what"
   wait_ready
 }

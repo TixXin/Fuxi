@@ -23,6 +23,7 @@ import logging
 import os
 import queue
 import random
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -55,6 +56,10 @@ def _brief(text: str) -> str:
     if os.environ.get("FUXI_LOG_TEXT") == "1":
         return repr(text[:60])
     return f"<{len(text)}字 #{_h(text)[:8]}>"
+
+
+VERSION_Q = re.compile(r"版本|新版|更新|升级|发版|最新|release|v\d+\.\d+", re.I)
+BUG_Q = re.compile(r"修(了|好|复)|bug|问题|没反应|不行|不了|不能|看不到|打不开|闪退|崩|卡|报错|失败|异常|不显示|没效果", re.I)
 
 
 @dataclass
@@ -518,14 +523,39 @@ class Bridge:
             hits = self.knowledge.search(q)
         except Exception as e:   # 检索出错不能挡住回复
             log.warning("资料检索出错：%s", e)
-            return
+            hits = []
+        notes, sure = self._fuyu_notes(q)
+        extra = ""
         if hits:
-            payload["text"] += ("\n\n（以下是浮屿的说明资料，回答浮屿用法问题时以它为准；资料里没写的不要编，"
-                                "就说不确定、已经转给主人了）\n" + knowledge.render(hits))
+            extra += ("\n\n（以下是浮屿的说明资料，回答浮屿用法问题时以它为准；资料里没写的不要编，"
+                      "就说不确定、已经转给主人了）\n" + knowledge.render(hits))
             log.info("产品助手 %s：附上 %d 段资料（%s）", self.name_of(chat), len(hits), "、".join(h.title[:20] for h in hits))
-        elif knowledge.is_question(q):
-            payload["text"] += "\n\n（浮屿资料里没找到这个问题的答案。不确定就直说，告诉对方已经转给主人了，不要编）"
+        if notes:
+            extra += "\n\n（浮屿仓库的最新情况，回答版本、修没修时参考；开发记录未必就是对方说的问题，对不上就别提）\n" + "\n".join(notes)
+            log.info("产品助手 %s：附上仓库信息 %d 条", self.name_of(chat), len(notes))
+        if not hits and not sure and knowledge.is_question(q):
+            extra += "\n\n（浮屿资料里没找到这个问题的答案。不确定就直说，告诉对方已经转给主人了，不要编）"
             self._handoff(chat, payload, q)
+        payload["text"] += extra
+
+    def _fuyu_notes(self, q: str) -> tuple[list[str], bool]:
+        """版本 / #编号 / 像问题反馈时，从 F2 的仓库缓存里找参考。返回 (几行说明, 是否把握较大可不转人工)。"""
+        notes, sure = [], False
+        try:
+            if VERSION_Q.search(q):
+                notes.append(self.fuyu.version_brief())
+                sure = bool(self.fuyu.latest())
+            for n in dict.fromkeys(int(x) for x in re.findall(r"#(\d{1,6})", q)):
+                notes.append(self.fuyu.status(n))
+                sure = True
+            if not notes and BUG_Q.search(q):
+                for score, it in self.fuyu.find(q, k=2):
+                    if score >= 0.45:
+                        notes.append(self.fuyu.status(it["number"]))
+                        sure = sure or score >= 0.55
+        except Exception as e:
+            log.warning("浮屿仓库信息出错：%s", e)
+        return notes, sure
 
     def _handoff(self, chat: str, payload: dict, q: str) -> None:
         now = time.time()

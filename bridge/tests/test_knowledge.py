@@ -100,7 +100,7 @@ class SyncTest(unittest.TestCase):
         k._get = get
         self.assertIn("3 个文件（新下载 3 个）", k.sync())
         self.assertEqual(len(calls), 4 + 3)
-        self.assertIn("api.github.com/repos/o/r/contents/docs/features/screenshot.md?ref=a", calls[-1])
+        self.assertIn("api.github.com/repos/o/r/git/blobs/a", calls[-1])
         calls.clear()
         k.sync()
         self.assertEqual(len(calls), 4)                     # sha 没变不再下载
@@ -130,6 +130,8 @@ def assist_bridge():
                        + [kn.Chunk("x", f"其他{i}", f"待办日历音乐歌词翻译第{i}条") for i in range(30)])
     k.floor = 3.0          # 合成语料小、idf 低，分数比真实文档低
     b.knowledge = k
+    b.fuyu = mock.Mock(latest=mock.Mock(return_value=None), find=mock.Mock(return_value=[]),
+                       version_brief=mock.Mock(return_value="还没有同步到浮屿的版本信息"))
     b.handoffs = collections.deque(maxlen=50)
     b.send = mock.Mock(return_value=mock.Mock(ok=True))
     return b
@@ -169,6 +171,31 @@ class AssistTest(unittest.TestCase):
         p = payload("@浮汐 哈哈哈")
         b._assist("g@chatroom", p)
         self.assertEqual(p["text"], "@浮汐 哈哈哈")                       # 不是提问：什么都不加
+
+    def test_version_question_uses_fuyu(self):
+        b = assist_bridge()
+        b.fuyu.latest.return_value = {"tag_name": "v0.3.13"}
+        b.fuyu.version_brief.return_value = "浮屿最新正式版 v0.3.13（2026-11-24 发布）"
+        p = payload("@浮汐 现在最新版本是多少？")
+        b._assist("g@chatroom", p)
+        self.assertIn("浮屿最新正式版 v0.3.13", p["text"])
+        b.send.assert_not_called()                                    # 有版本信息就不转人工
+
+    def test_issue_number_and_bug_match(self):
+        b = assist_bridge()
+        b.fuyu.status.side_effect = lambda n: f"#{n} 已修复"
+        p = payload("@浮汐 #1234 修了吗")
+        b._assist("g@chatroom", p)
+        self.assertIn("#1234 已修复", p["text"])
+        b.fuyu.find.assert_not_called()
+        b.fuyu.find.return_value = [(0.59, {"number": 7}), (0.3, {"number": 8})]
+        p = payload("@浮汐 全屏时提醒看不到")
+        b._assist("g@chatroom", p)
+        self.assertIn("#7 已修复", p["text"])
+        self.assertNotIn("#8", p["text"])                            # 低于阈值的不带
+        b.fuyu.find.reset_mock()
+        b._assist("g@chatroom", payload("@浮汐 怎么设置开机自启"))     # 用法问题不查 issue
+        b.fuyu.find.assert_not_called()
 
 
 if __name__ == "__main__":

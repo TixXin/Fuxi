@@ -3,9 +3,10 @@
 来源（公开仓库，默认 TixXin/Fuyu，见 /设置 资料仓库）：README.md、docs/privacy.md、docs/features/*.md、
 全部正式版和比最新正式版还新的测试版的 docs/releases/v*.md（只取「更新内容」，一条一段；
 正式版的说明已经包含它之前测试版的全部改动，所以旧测试版不要）。桥接每 6 小时同步一次：用 contents API
-列 4 个目录（根、docs、docs/features、docs/releases）拿文件名和 sha，只下载 sha 变了的文件。文件内容也走
-api.github.com（raw 模式）：机房到 raw.githubusercontent.com 很慢且常超时，到 api.github.com 约 1 秒。
-未登录每小时 60 次：首次约 50 次，之后通常只有 4 次。
+列 4 个目录（根、docs、docs/features、docs/releases）拿文件名和 sha，只下载 sha 变了的文件。文件内容按 sha 走
+blobs API（raw 模式）：机房到 raw.githubusercontent.com 很慢且常超时，到 api.github.com 约 1 秒。
+未登录每小时 60 次（和 F2 浮屿同步共用）：首次约 50 次，之后通常只有 4 次；中途次数用完时已下的文件留着，
+10 分钟后接着下。.env 设了 FUXI_GITHUB_TOKEN 就带上。
 
 存在 /state/knowledge/：files/<路径>@<sha> 原文（按 sha 存，中途失败下次接着下）、index.json（路径 → sha）、
 meta.json（上次同步）。
@@ -16,6 +17,7 @@ meta.json（上次同步）。
 
 from __future__ import annotations
 
+import http.client
 import json
 import logging
 import math
@@ -31,7 +33,7 @@ from dataclasses import dataclass
 log = logging.getLogger("fuxi.knowledge")
 
 LIST = "https://api.github.com/repos/{repo}/contents/{dir}"
-FILE = "https://api.github.com/repos/{repo}/contents/{path}?ref={sha}"
+BLOB = "https://api.github.com/repos/{repo}/git/blobs/{sha}"
 DIRS = ("", "docs", "docs/features", "docs/releases")
 CHUNK = 700
 SYNC_EVERY = 6 * 3600
@@ -270,16 +272,28 @@ class Knowledge:
     # ---- 同步 ----
     def _get(self, url: str, raw: bool = False, timeout: float = 30) -> bytes:
         accept = "application/vnd.github.raw" if raw else "application/vnd.github+json"
-        req = urllib.request.Request(url, headers={"User-Agent": "fuxi-bridge", "Accept": accept,
-                                                   "X-GitHub-Api-Version": "2022-11-28"})
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:
-                return r.read(2 << 20)
-        except urllib.error.HTTPError as e:
-            if e.code in (403, 429) and e.headers.get("X-RateLimit-Remaining") == "0":
-                reset = int(e.headers.get("X-RateLimit-Reset") or 0)
-                raise RuntimeError(f"GitHub 次数用完，{time.strftime('%H:%M', time.localtime(reset))} 后恢复") from None
-            raise
+        headers = {"User-Agent": "fuxi-bridge", "Accept": accept, "X-GitHub-Api-Version": "2022-11-28"}
+        token = os.environ.get("FUXI_GITHUB_TOKEN", "")
+        if token:
+            headers["Authorization"] = "Bearer " + token
+        req = urllib.request.Request(url, headers=headers)
+        for attempt in range(3):   # 机房跨境读大响应常读到一半断
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as r:
+                    data = r.read(2 << 20)
+                    if not raw:
+                        json.loads(data)
+                    return data
+            except urllib.error.HTTPError as e:
+                if e.code in (403, 429) and e.headers.get("X-RateLimit-Remaining") == "0":
+                    reset = int(e.headers.get("X-RateLimit-Reset") or 0)
+                    raise RuntimeError(f"GitHub 次数用完，{time.strftime('%H:%M', time.localtime(reset))} 后恢复") from None
+                raise
+            except (OSError, http.client.HTTPException, ValueError):
+                if attempt == 2:
+                    raise
+                time.sleep(2 * (attempt + 1))
+        raise AssertionError("unreachable")
 
     def sync(self, repo: str | None = None) -> str:
         """同步一次；返回说明。网络失败抛异常前会记进 meta.json。"""
@@ -300,7 +314,7 @@ class Knowledge:
                     sha = blobs[path]
                     local = self._local(path, sha)
                     if not os.path.exists(local):
-                        data = self._get(FILE.format(repo=repo, path=path, sha=sha), raw=True)
+                        data = self._get(BLOB.format(repo=repo, sha=sha), raw=True)
                         with open(local + ".tmp", "wb") as f:
                             f.write(data)
                         os.replace(local + ".tmp", local)

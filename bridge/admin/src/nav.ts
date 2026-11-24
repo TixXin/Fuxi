@@ -31,7 +31,7 @@ export const NAV: { label: string; items: NavItem[] }[] = [
     label: "机器人",
     items: [
       { id: "chats", label: "会话", icon: Users },
-      { id: "persona", label: "人设", icon: Sparkles, phase: "D" },
+      { id: "persona", label: "人设", icon: Sparkles },
       { id: "settings", label: "设置", icon: SlidersHorizontal },
     ],
   },
@@ -43,7 +43,7 @@ export const NAV: { label: string; items: NavItem[] }[] = [
       { id: "knowledge", label: "资料库", icon: BookOpen },
     ],
   },
-  { label: "工具", items: [{ id: "send", label: "发送", icon: Send, phase: "D" }] },
+  { label: "工具", items: [{ id: "send", label: "发送", icon: Send }] },
 ];
 
 export const ALL = NAV.flatMap((g) => g.items);

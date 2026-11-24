@@ -10,6 +10,8 @@ import { Announce } from "./pages/Announce";
 import { Chats } from "./pages/Chats";
 import { Feedback } from "./pages/Feedback";
 import { Knowledge } from "./pages/Knowledge";
+import { Persona } from "./pages/Persona";
+import { Send } from "./pages/Send";
 import { Placeholder } from "./pages/Placeholder";
 import { Settings } from "./pages/Settings";
 import { Stream } from "./pages/Stream";
@@ -79,7 +81,9 @@ export function App() {
         {page === "chats" && <Chats onMenu={openNav} />}
         {page === "announce" && <Announce onMenu={openNav} />}
         {page === "feedback" && <Feedback onMenu={openNav} />}
-        {!["overview", "stream", "settings", "knowledge", "chats", "announce", "feedback"].includes(page) && (
+        {page === "persona" && <Persona onMenu={openNav} />}
+        {page === "send" && <Send onMenu={openNav} />}
+        {!["overview", "stream", "settings", "knowledge", "chats", "announce", "feedback", "persona", "send"].includes(page) && (
           <Placeholder title={item.label} phase={item.phase} onMenu={openNav} />
         )}
       </main>

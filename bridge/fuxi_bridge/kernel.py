@@ -49,6 +49,24 @@ class Kernel:
         except (urllib.error.URLError, TimeoutError, OSError) as e:
             raise KernelError(f"{method} {path} 失败: {e}") from e
 
+    def call(self, method: str, path: str, body: dict | None = None, timeout: float | None = None) -> tuple[int, dict]:
+        """和 _req 一样，但 4xx 也把内核的 JSON 原样带回来（人设保存失败时要给人看原因）。"""
+        data = json.dumps(body, ensure_ascii=False).encode() if body is not None else None
+        req = urllib.request.Request(
+            self.base + path, data=data, method=method,
+            headers={"Content-Type": "application/json", "x-bot-token": self.token, "x-whale-bridge": "1"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout or self.timeout) as r:
+                return r.status, json.load(r)
+        except urllib.error.HTTPError as e:
+            try:
+                return e.code, json.loads(e.read() or b"{}")
+            except ValueError:
+                raise KernelError(f"{method} {path} → {e.code}") from e
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            raise KernelError(f"{method} {path} 失败: {e}") from e
+
     def wait_ready(self, max_wait: float = 120) -> None:
         deadline = time.monotonic() + max_wait
         while True:

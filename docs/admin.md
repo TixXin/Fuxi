@@ -74,7 +74,7 @@
 | `GET /api/knowledge`、`POST /api/knowledge/sync`、`GET /api/knowledge/search?q=` | 资料库 | `Knowledge` |
 | `GET /api/fuyu` | 浮屿仓库同步状态 | `Fuyu` |
 | `POST /api/send` | 手动发送：`dry_run` 只打开核对；真发要 `confirm` | `SendJob(source="admin")` |
-| `GET|POST /api/kernel/*` | 白名单内的内核接口 | 转发 |
+| `GET /api/persona`、`POST /api/persona`、`POST /api/persona/preset` | 人设读写、套用预设（要 `confirm`）；只转发人设字段，不碰内核的密钥和模型配置 | 内核 `/api/persona*` |
 
 对外 API 和管理接口的处理逻辑放在同一组函数里，两个服务都调用，不复制粘贴。
 做法是把 `api.py` 里的处理函数抽成 `bridge/fuxi_bridge/handlers.py`，两边只负责认证和路由。

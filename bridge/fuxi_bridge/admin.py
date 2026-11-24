@@ -165,6 +165,8 @@ def make_handler(bridge: "Bridge", token: str, static_dir: str, ping: float = PI
             m = re.fullmatch(r"/api/feedback/preview/(digest|group)", path)
             if m:
                 return self._json(200, {"ok": True, "text": handlers.feedback_preview(bridge, m.group(1))}) or True
+            if path == "/api/persona":
+                return self._json(200, {"ok": True, **handlers.persona_get(bridge)}) or True
             return None
 
         def _post_more(self, path: str, body: dict):
@@ -182,6 +184,13 @@ def make_handler(bridge: "Bridge", token: str, static_dir: str, ping: float = PI
             if path == "/api/feedback/classify":
                 handlers.feedback_classify(bridge)
                 return self._json(202, {"ok": True, "started": True}) or True
+            if path == "/api/persona":
+                return self._json(200, {"ok": True, **handlers.persona_save(bridge, body)}) or True
+            if path == "/api/persona/preset":
+                return self._json(200, {"ok": True, **handlers.persona_preset(
+                    bridge, str(body.get("id") or ""), body.get("confirm") is True)}) or True
+            if path == "/api/send":
+                return self._json(200, {"ok": True, **handlers.send(bridge, body)}) or True
             return None
 
         def do_POST(self):

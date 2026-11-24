@@ -262,6 +262,53 @@ class AdminServerTest(unittest.TestCase):
         done.set()
 
 
+    def test_persona(self):
+        calls = []
+
+        def call(method, path, body=None, timeout=None):
+            calls.append((method, path, body))
+            if path == "/api/persona" and method == "GET":
+                return 200, {"ok": True, "persona": {"name": "浮汐", "customPrompt": "x", "apiKey": "不该出去"},
+                             "warnings": [], "llm": {"model": "m"}}
+            if path == "/api/persona/presets":
+                return 200, {"ok": True, "presets": [{"id": "persona-standard", "name": "标准", "file": "/a/b"}]}
+            if path == "/api/persona" and body.get("customPrompt") == "太长":
+                return 400, {"ok": False, "error": "人设太长：约 99999 token", "tokenCheck": {"tokens": 99999}}
+            return 200, {"ok": True, "warnings": ["提示"], "applied": {"id": "persona-standard"}}
+        self.b.kernel.call.side_effect = call
+        _, body, _ = self.req("GET", "/api/persona")
+        self.assertEqual(body["persona"], {"name": "浮汐", "customPrompt": "x"})        # 只放出人设字段
+        self.assertEqual(body["presets"][0], {"id": "persona-standard", "name": "标准", "description": None, "chars": None})
+        code, body, _ = self.req("POST", "/api/persona", {"patch": {"name": "小汐", "apiKey": "k"}})
+        self.assertEqual((code, body["warnings"]), (200, ["提示"]))
+        self.assertEqual(calls[-1], ("POST", "/api/persona", {"name": "小汐"}))        # 不认识的键不转发
+        code, body, _ = self.req("POST", "/api/persona", {"patch": {"customPrompt": "太长"}})
+        self.assertEqual((code, body["error"], body["tokenCheck"]), (400, "人设太长：约 99999 token", {"tokens": 99999}))
+        self.assertEqual(self.req("POST", "/api/persona", {"patch": {}})[0], 400)
+        self.assertEqual(self.req("POST", "/api/persona/preset", {"id": "persona-standard"})[0], 400)   # 要确认
+        self.assertEqual(self.req("POST", "/api/persona/preset", {"id": "../x", "confirm": True})[0], 400)
+        code, body, _ = self.req("POST", "/api/persona/preset", {"id": "persona-standard", "confirm": True})
+        self.assertEqual((code, body["applied"]["id"]), (200, "persona-standard"))
+
+    def test_send(self):
+        self.b.name_of.side_effect = lambda x: "阿青"
+        self.b.sender.probe_open.return_value = 1.234
+        code, body, _ = self.req("POST", "/api/send", {"chat_id": "wxid_a", "dry_run": True})
+        self.assertEqual((code, body["seconds"], body["name"]), (200, 1.23, "阿青"))
+        self.b.send.assert_not_called()
+        self.assertEqual(self.req("POST", "/api/send", {"chat_id": "wxid_a", "text": "在吗"})[0], 400)   # 要确认
+        self.assertEqual(self.req("POST", "/api/send", {"chat_id": "a b", "text": "在吗", "confirm": True})[0], 400)
+        self.assertEqual(self.req("POST", "/api/send", {"chat_id": "wxid_a", "text": " ", "confirm": True})[0], 400)
+        self.b.send.side_effect = lambda job: setattr(job, "ok", True) or setattr(job, "verified", True) or job
+        code, body, _ = self.req("POST", "/api/send", {"chat_id": "wxid_a", "text": "在吗", "confirm": True})
+        self.assertEqual((code, body["verified"]), (200, True))
+        job = self.b.send.call_args[0][0]
+        self.assertEqual((job.chat, job.text, job.source), ("wxid_a", "在吗", "admin"))
+        self.b.send.side_effect = lambda job: setattr(job, "error", "发送已熔断：x") or job
+        code, body, _ = self.req("POST", "/api/send", {"chat_id": "wxid_a", "text": "在吗", "confirm": True})
+        self.assertEqual((code, body["error"]), (502, "没发出去：发送已熔断：x"))
+
+
 class EventsTest(unittest.TestCase):
     def test_counts_reset_daily_and_slow_subscriber(self):
         e = events.Events(keep=3)

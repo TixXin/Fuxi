@@ -375,3 +375,80 @@ def feedback_preview(b: "Bridge", kind: str) -> str:
     if kind == "group":
         return b.feedback.group_summary() or "今天还没有反馈，今晚不会发群小结。"
     raise HandlerError("只有 digest / group", 404)
+
+
+# ---- 人设（转发内核的 /api/persona，只开放读、改、套用预设） ----
+PERSONA_KEYS = {"name", "age", "job", "appearance", "personality", "background", "customPrompt", "emoji",
+                "privateMaxChars", "groupMaxChars", "maxBubbles", "historyTurns", "groupHistoryTurns",
+                "proactive", "opinions", "links", "freeChat", "masterRoast", "mutedGroups"}
+
+
+def _kernel(b: "Bridge", method: str, path: str, body: dict | None = None) -> dict:
+    from .kernel import KernelError
+    try:
+        code, data = b.kernel.call(method, path, body, timeout=60)
+    except KernelError as e:
+        raise HandlerError(f"内核没响应：{e}", 502) from None
+    if code >= 400 or not data.get("ok", True):
+        extra = {k: data[k] for k in ("warnings", "tokenCheck") if k in data}
+        raise HandlerError(data.get("error") or f"内核返回 {code}", 400 if code < 500 else 502, **extra)
+    return data
+
+
+def persona_get(b: "Bridge") -> dict:
+    d = _kernel(b, "GET", "/api/persona")
+    presets = _kernel(b, "GET", "/api/persona/presets").get("presets", [])
+    return {"persona": {k: v for k, v in d.get("persona", {}).items() if k in PERSONA_KEYS | {"sourcePreset"}},
+            "warnings": d.get("warnings") or [], "llm": d.get("llm") or {},
+            "presets": [{k: p.get(k) for k in ("id", "name", "description", "chars")} for p in presets]}
+
+
+def persona_save(b: "Bridge", body: dict) -> dict:
+    patch = {k: v for k, v in (body.get("patch") or {}).items() if k in PERSONA_KEYS}
+    if not patch:
+        raise HandlerError("没有要改的内容")
+    d = _kernel(b, "POST", "/api/persona", patch)
+    log.warning("人设经管理台修改：%s", "、".join(sorted(patch)))
+    b.events.publish("persona", {"keys": sorted(patch)})
+    return {"warnings": d.get("warnings") or [], "tokenCheck": d.get("tokenCheck")}
+
+
+def persona_preset(b: "Bridge", pid: str, confirm: bool = False) -> dict:
+    if not re.fullmatch(r"[a-z0-9._-]{1,80}", pid or ""):
+        raise HandlerError("预设 id 不对")
+    if not confirm:
+        raise HandlerError("套用预设会覆盖当前人设，需要确认")
+    d = _kernel(b, "POST", "/api/persona/preset", {"id": pid})
+    log.warning("人设经管理台套用预设 %s", pid)
+    b.events.publish("persona", {"preset": pid})
+    return {"applied": d.get("applied")}
+
+
+# ---- 手动发送 ----
+SEND_MAX = 2000
+
+
+def send(b: "Bridge", body: dict) -> dict:
+    from .app import SendJob
+    chat = str(body.get("chat_id") or "").strip()
+    text = str(body.get("text") or "")
+    if not re.fullmatch(r"[A-Za-z0-9_@.-]{1,80}", chat):
+        raise HandlerError("先选一个会话")
+    name = b.name_of(chat)
+    if body.get("dry_run"):
+        try:
+            dt = b.sender.probe_open(name)
+        except Exception as e:
+            raise HandlerError(f"打开「{name}」失败：{e}", 502) from None
+        return {"dry_run": True, "name": name, "seconds": round(dt, 2)}
+    if not text.strip():
+        raise HandlerError("没写内容")
+    if len(text) > SEND_MAX:
+        raise HandlerError(f"一次最多 {SEND_MAX} 字")
+    if body.get("confirm") is not True:
+        raise HandlerError("发送需要确认")
+    job = b.send(SendJob(chat=chat, text=text, source="admin"))
+    log.warning("管理台手动发送到 %s：ok=%s verified=%s", name, job.ok, job.verified)
+    if not job.ok:
+        raise HandlerError(f"没发出去：{job.error or '未知原因'}", 502)
+    return {"name": name, "verified": job.verified, "error": job.error}

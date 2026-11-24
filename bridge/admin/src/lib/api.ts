@@ -34,7 +34,7 @@ export interface Overview {
 
 export interface BridgeEvent {
   id: number;
-  kind: "message" | "handoff" | "settings" | "status" | "knowledge" | "allow" | "announce" | "feedback";
+  kind: "message" | "handoff" | "settings" | "status" | "knowledge" | "allow" | "announce" | "feedback" | "persona";
   ts: number;
   [key: string]: unknown;
 }
@@ -183,6 +183,36 @@ export interface FeedbackList {
   group_summary_time: string;
 }
 
+export interface Persona {
+  name: string;
+  age: number;
+  job: string;
+  appearance: string;
+  personality: string;
+  background: string;
+  customPrompt: string;
+  emoji: string;
+  privateMaxChars: number;
+  groupMaxChars: number;
+  maxBubbles: number;
+  historyTurns: number;
+  groupHistoryTurns: number;
+  proactive: boolean;
+  opinions: boolean;
+  links: boolean;
+  freeChat: boolean;
+  masterRoast: boolean;
+  mutedGroups: string[];
+  sourcePreset: string;
+}
+
+export interface PersonaInfo {
+  persona: Persona;
+  warnings: string[];
+  llm: { providerLabel?: string; model?: string; mock?: boolean };
+  presets: { id: string; name: string; description: string | null; chars: number | null }[];
+}
+
 export const api = {
   overview: () => request<Overview>("GET", "/api/overview"),
   pause: () => request<{ paused: boolean }>("POST", "/api/pause"),
@@ -205,13 +235,20 @@ export const api = {
   feedbackIgnore: (id: number, on: boolean) => request<{ status: string }>("POST", `/api/feedback/${id}/${on ? "ignore" : "unignore"}`),
   feedbackClassify: () => request<{ started: boolean }>("POST", "/api/feedback/classify"),
   feedbackPreview: (kind: "digest" | "group") => request<{ text: string }>("GET", `/api/feedback/preview/${kind}`),
+  persona: () => request<PersonaInfo>("GET", "/api/persona"),
+  savePersona: (patch: Partial<Persona>) =>
+    request<{ warnings: string[]; tokenCheck?: { tokens: number; limit: number } }>("POST", "/api/persona", { patch }),
+  applyPreset: (id: string) => request<{ applied: { id: string; name: string } }>("POST", "/api/persona/preset", { id, confirm: true }),
+  sendProbe: (chat_id: string) => request<{ name: string; seconds: number }>("POST", "/api/send", { chat_id, dry_run: true }),
+  send: (chat_id: string, text: string) =>
+    request<{ name: string; verified: boolean | null; error: string }>("POST", "/api/send", { chat_id, text, confirm: true }),
   knowledgeSearch: (q: string, judge: boolean) =>
     request<KnowledgeSearch>("GET", `/api/knowledge/search?q=${encodeURIComponent(q)}${judge ? "&judge=1" : ""}`),
 };
 
 export function subscribe(onEvent: (e: BridgeEvent) => void, onState: (live: boolean) => void): () => void {
   const es = new EventSource("/api/events");
-  const kinds = ["message", "handoff", "settings", "status", "knowledge", "allow", "announce", "feedback"] as const;
+  const kinds = ["message", "handoff", "settings", "status", "knowledge", "allow", "announce", "feedback", "persona"] as const;
   const handler = (ev: MessageEvent) => {
     try {
       onEvent(JSON.parse(ev.data));

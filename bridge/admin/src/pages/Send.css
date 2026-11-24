@@ -1,0 +1,82 @@
+.send__search {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+  padding: 12px 16px;
+}
+
+.send__hint {
+  color: var(--color-text-subtle);
+  font-size: 12px;
+}
+
+.send__pick {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 8px 16px;
+  border: 0;
+  border-top: 1px solid var(--color-white-a06);
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.send__pick:hover {
+  background: var(--color-white-a04);
+}
+
+.send__pick-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.send__pick-meta {
+  color: var(--color-text-subtle);
+  font-size: 12px;
+}
+
+.send__compose {
+  display: grid;
+  gap: 10px;
+  padding: 14px 16px;
+}
+
+.send__compose .error-note {
+  padding: 0;
+}
+
+.send__probe {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  color: var(--color-mint);
+  font-size: 12.5px;
+}
+
+.send__probe svg {
+  flex: none;
+  margin-top: 2px;
+}
+
+.send__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-md);
+}
+
+.send__ok {
+  color: var(--color-mint);
+}
+
+.send__bad {
+  color: var(--status-bad);
+}

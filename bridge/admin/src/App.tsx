@@ -1,11 +1,15 @@
 import { useCallback, useEffect, useState } from "react";
 import { Sidebar } from "./components/Sidebar";
 import { api, subscribe } from "./lib/api";
+import { emit } from "./lib/bus";
 import { applyTheme, savedTheme, toggleTheme } from "./lib/theme";
 import { useApi } from "./lib/useApi";
 import { ALL } from "./nav";
 import { Overview } from "./pages/Overview";
+import { Knowledge } from "./pages/Knowledge";
 import { Placeholder } from "./pages/Placeholder";
+import { Settings } from "./pages/Settings";
+import { Stream } from "./pages/Stream";
 import "./App.css";
 
 function pageFromHash(): string {
@@ -31,7 +35,9 @@ export function App() {
   useEffect(() => {
     let timer = 0;
     return subscribe(
-      () => {
+      (e) => {
+        emit(e);
+        if (e.kind === "knowledge") return;
         window.clearTimeout(timer);   // 连着来的事件合并成一次刷新
         timer = window.setTimeout(() => void reload(), 400);
       },
@@ -45,6 +51,7 @@ export function App() {
     document.querySelector(".app__main")?.scrollTo(0, 0);
   }, []);
 
+  const openNav = useCallback(() => setNavOpen(true), []);
   const item = ALL.find((n) => n.id === page)!;
   const pending = overview.data?.todo.filter((t) => t.kind === "announce").length ?? 0;
   const offline = !!overview.error && overview.error.startsWith("连不上");
@@ -62,10 +69,12 @@ export function App() {
       />
       <main className="app__main">
         {offline && <div className="conn-bar">连不上浮汐，10 秒后重试</div>}
-        {page === "overview" ? (
-          <Overview {...overview} live={live} onMenu={() => setNavOpen(true)} onNavigate={navigate} />
-        ) : (
-          <Placeholder title={item.label} phase={item.phase} onMenu={() => setNavOpen(true)} />
+        {page === "overview" && <Overview {...overview} live={live} onMenu={openNav} onNavigate={navigate} />}
+        {page === "stream" && <Stream live={live} onMenu={openNav} />}
+        {page === "settings" && <Settings onMenu={openNav} />}
+        {page === "knowledge" && <Knowledge onMenu={openNav} onNavigate={navigate} />}
+        {!["overview", "stream", "settings", "knowledge"].includes(page) && (
+          <Placeholder title={item.label} phase={item.phase} onMenu={openNav} />
         )}
       </main>
     </div>

@@ -6,8 +6,10 @@
   GET  /api/overview                 概览
   GET  /api/settings                 全部行为设置；POST {key: 值, ...} 修改
   GET  /api/messages?before=&limit=  对话流历史（内存里最近 500 条）
-  GET  /api/events                   SSE：message、handoff、settings、status
+  GET  /api/events                   SSE：message、handoff、settings、status、knowledge
   POST /api/pause {} | /api/resume {}  暂停 / 恢复（恢复顺带解除熔断）
+  GET  /api/knowledge                资料库状态；POST /api/knowledge/sync 后台同步一次
+  GET  /api/knowledge/search?q=&judge=1  试搜：候选分数、会附给内核的段落（judge=1 再让模型筛）
 
 所有请求要带 X-Fuxi-Admin 口令；非 GET 还要 Content-Type: application/json + X-Requested-With: fuxi-admin，
 Origin（有的话）要和 Host 一致。
@@ -119,6 +121,14 @@ def make_handler(bridge: "Bridge", token: str, static_dir: str, ping: float = PI
                     limit=max(1, min(200, int(limit) if limit.isdigit() else 50)))})
             if u.path == "/api/events":
                 return self._sse()
+            if u.path == "/api/knowledge":
+                return self._json(200, {"ok": True, **handlers.knowledge_info(bridge)})
+            if u.path == "/api/knowledge/search":
+                try:
+                    return self._json(200, {"ok": True, **handlers.knowledge_search(
+                        bridge, (qs.get("q") or [""])[0], (qs.get("judge") or [""])[0] == "1")})
+                except handlers.HandlerError as e:
+                    return self._err(e.code, str(e))
             self._err(404, "没有这个接口")
 
         def do_POST(self):
@@ -133,6 +143,9 @@ def make_handler(bridge: "Bridge", token: str, static_dir: str, ping: float = PI
                     return self._json(200, {"ok": True, "items": handlers.set_settings(bridge, body, "管理台")})
                 if path in ("/api/pause", "/api/resume"):
                     return self._json(200, {"ok": True, **handlers.pause(bridge, path == "/api/pause")})
+                if path == "/api/knowledge/sync":
+                    handlers.knowledge_sync(bridge)
+                    return self._json(202, {"ok": True, "started": True})
             except handlers.HandlerError as e:
                 return self._err(e.code, str(e), **e.extra)
             self._err(404, "没有这个接口")

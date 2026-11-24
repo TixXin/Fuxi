@@ -34,7 +34,7 @@ export interface Overview {
 
 export interface BridgeEvent {
   id: number;
-  kind: "message" | "handoff" | "settings" | "status";
+  kind: "message" | "handoff" | "settings" | "status" | "knowledge";
   ts: number;
   [key: string]: unknown;
 }
@@ -65,15 +65,89 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   return data as T;
 }
 
+export interface MessageEvent_ extends BridgeEvent {
+  kind: "message";
+  chat: string;
+  chat_name: string;
+  group: boolean;
+  sender: string;
+  count: number;
+  kinds: string[];
+  text: string;
+  msg_time: number;
+  replies: string[];
+  reason: string;
+  timing: Record<string, number> | null;
+}
+
+export interface HandoffEvent extends BridgeEvent {
+  kind: "handoff";
+  chat: string;
+  chat_name: string;
+  sender: string;
+  question: string;
+}
+
+export type StreamItem = MessageEvent_ | HandoffEvent;
+
+export type SettingType = "bool" | "int" | "text" | "list" | "choice";
+export type SettingValue = boolean | number | string | string[] | null;
+
+export interface Setting {
+  key: string;
+  label: string;
+  type: SettingType;
+  value: SettingValue;
+  default: SettingValue;
+  desc: string;
+  choices: Record<string, string>;
+  kernel: boolean;
+  min: number;
+  max: number;
+  labels?: Record<string, string>;
+}
+
+export interface KnowledgeInfo {
+  repo: string;
+  synced_at: number | null;
+  files: number;
+  fetched: number;
+  chunks: number;
+  sources: Record<string, number>;
+  error: string;
+  failed_at: number | null;
+  syncing: boolean;
+  enabled: boolean;
+  groups: string[];
+}
+
+export interface KnowledgeSearch {
+  query: string;
+  question: boolean;
+  floor: number;
+  cover: number;
+  picked: string[];
+  judged: string[] | null;
+  candidates: { score: number; coverage: number; source: string; title: string; text: string }[];
+}
+
 export const api = {
   overview: () => request<Overview>("GET", "/api/overview"),
   pause: () => request<{ paused: boolean }>("POST", "/api/pause"),
   resume: () => request<{ paused: boolean; was: string }>("POST", "/api/resume"),
+  messages: (before?: number, limit = 50) =>
+    request<{ items: StreamItem[] }>("GET", `/api/messages?limit=${limit}${before ? `&before=${before}` : ""}`),
+  settings: () => request<{ items: Setting[] }>("GET", "/api/settings"),
+  saveSetting: (key: string, value: SettingValue) => request<{ items: Setting[] }>("POST", "/api/settings", { [key]: value }),
+  knowledge: () => request<KnowledgeInfo>("GET", "/api/knowledge"),
+  knowledgeSync: () => request<{ started: boolean }>("POST", "/api/knowledge/sync"),
+  knowledgeSearch: (q: string, judge: boolean) =>
+    request<KnowledgeSearch>("GET", `/api/knowledge/search?q=${encodeURIComponent(q)}${judge ? "&judge=1" : ""}`),
 };
 
 export function subscribe(onEvent: (e: BridgeEvent) => void, onState: (live: boolean) => void): () => void {
   const es = new EventSource("/api/events");
-  const kinds = ["message", "handoff", "settings", "status"] as const;
+  const kinds = ["message", "handoff", "settings", "status", "knowledge"] as const;
   const handler = (ev: MessageEvent) => {
     try {
       onEvent(JSON.parse(ev.data));

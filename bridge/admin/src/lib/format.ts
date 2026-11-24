@@ -21,3 +21,17 @@ export function uptime(sec: number): string {
 function pad(n: number): string {
   return String(n).padStart(2, "0");
 }
+
+export function clockSec(ts: number): string {
+  const d = new Date(ts * 1000);
+  return `${clock(ts)}:${pad(d.getSeconds())}`;
+}
+
+export function ago(ts: number | null | undefined, now = Date.now() / 1000): string {
+  if (!ts) return "从未";
+  const s = Math.max(0, now - ts);
+  if (s < 60) return "刚刚";
+  if (s < 3600) return `${Math.floor(s / 60)} 分钟前`;
+  if (s < 86400) return `${Math.floor(s / 3600)} 小时前`;
+  return clock(ts, now);
+}

@@ -24,7 +24,7 @@ export const NAV: { label: string; items: NavItem[] }[] = [
     label: "",
     items: [
       { id: "overview", label: "概览", icon: LayoutDashboard },
-      { id: "stream", label: "对话流", icon: MessagesSquare, phase: "B" },
+      { id: "stream", label: "对话流", icon: MessagesSquare },
     ],
   },
   {
@@ -32,7 +32,7 @@ export const NAV: { label: string; items: NavItem[] }[] = [
     items: [
       { id: "chats", label: "会话", icon: Users, phase: "C" },
       { id: "persona", label: "人设", icon: Sparkles, phase: "D" },
-      { id: "settings", label: "设置", icon: SlidersHorizontal, phase: "B" },
+      { id: "settings", label: "设置", icon: SlidersHorizontal },
     ],
   },
   {
@@ -40,7 +40,7 @@ export const NAV: { label: string; items: NavItem[] }[] = [
     items: [
       { id: "announce", label: "发版公告", icon: Megaphone, phase: "C" },
       { id: "feedback", label: "群反馈", icon: Inbox, phase: "C" },
-      { id: "knowledge", label: "资料库", icon: BookOpen, phase: "B" },
+      { id: "knowledge", label: "资料库", icon: BookOpen },
     ],
   },
   { label: "工具", items: [{ id: "send", label: "发送", icon: Send, phase: "D" }] },

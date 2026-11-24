@@ -355,12 +355,16 @@ class Knowledge:
     cover = 0.5    # 最相关那段至少覆盖问句一半（按 idf 加权）
     boost = 1.6    # 功能说明比版本说明优先：版本说明段落多，按词频容易挤到前面
 
-    def search(self, query: str, k: int = 4, budget: int = 2400) -> list[Chunk]:
-        query = clean(query)
+    def candidates(self, query: str, k: int = 4) -> list[tuple[float, Chunk]]:
+        """粗筛的候选（已按功能说明优先加权、从高到低）；管理台「试搜」也用它看分数。"""
         hits = [((s if c.source.startswith("docs/releases/") else s * self.boost), c)
-                for s, c in self.index.search(query, 40)]
+                for s, c in self.index.search(clean(query), 40)]
         hits.sort(key=lambda h: -h[0])
-        hits = hits[:k]
+        return hits[:k]
+
+    def search(self, query: str, k: int = 4, budget: int = 2400) -> list[Chunk]:
+        hits = self.candidates(query, k)
+        query = clean(query)
         if not hits or hits[0][0] < self.floor or self.index.coverage(query, hits[0][1]) < self.cover:
             return []
         out, used = [], 0

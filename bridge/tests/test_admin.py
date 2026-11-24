@@ -161,6 +161,36 @@ class AdminServerTest(unittest.TestCase):
         self.assertNotIn("不该", body)
         self.assertEqual(self.req("GET", "/api/nope")[0], 404)
 
+    def test_knowledge(self):
+        from fuxi_bridge import knowledge as kn
+        k = object.__new__(kn.Knowledge)
+        k.meta = {"repo": "o/r", "synced_at": 1.0, "files": 2}
+        k.index = kn.Index([kn.Chunk("docs/features/screenshot.md", "截图 › 贴图", "按 F3 把截图贴到屏幕上"),
+                            kn.Chunk("docs/releases/v1.md", "v1", "修复若干问题")]
+                           + [kn.Chunk("x", f"其他{i}", f"待办日历音乐{i}") for i in range(20)])
+        k.floor = 1.0
+        done = threading.Event()
+        k.sync = lambda repo: (done.wait(2), "同步完成")[1]
+        self.b.knowledge = k
+        self.b.name_of.side_effect = lambda x: "我" if x == "wxid_z" else x
+        _, body, _ = self.req("GET", "/api/knowledge")
+        self.assertEqual((body["chunks"], body["sources"]["功能说明"]), (22, 1))
+        code, body, _ = self.req("GET", "/api/knowledge/search?q=%E6%88%AA%E5%9B%BE%E6%80%8E%E4%B9%88%E8%B4%B4")
+        self.assertEqual(code, 200)
+        self.assertEqual(body["candidates"][0]["title"], "截图 › 贴图")
+        self.assertEqual(body["picked"][0], "截图 › 贴图")
+        self.assertIsNone(body["judged"])
+        self.assertEqual(self.req("GET", "/api/knowledge/search?q=")[0], 400)
+        self.assertEqual(self.req("POST", "/api/knowledge/sync", {})[0], 202)
+        self.assertEqual(self.req("POST", "/api/knowledge/sync", {})[0], 409)     # 同步中不能再点
+        q = self.b.events.subscribe()
+        done.set()
+        self.assertEqual(q.get(timeout=3)["kind"], "knowledge")
+        self.b.cfg.set("owners", ["wxid_z", "某人"])
+        _, body, _ = self.req("GET", "/api/settings")
+        owners = next(i for i in body["items"] if i["key"] == "owners")
+        self.assertEqual(owners["labels"], {"wxid_z": "我"})
+
 
 class EventsTest(unittest.TestCase):
     def test_counts_reset_daily_and_slow_subscriber(self):

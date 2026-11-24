@@ -40,10 +40,17 @@ def settings_items(b: "Bridge") -> list[dict]:
             v = b.get_setting(it.key)
         except KernelError:
             v = None
-        items.append({"key": it.key, "label": it.label, "type": it.type, "value": v,
-                      "default": it.default, "desc": it.desc, "choices": it.choices,
-                      "kernel": bool(it.kernel), "min": it.min, "max": it.max})
+        row = {"key": it.key, "label": it.label, "type": it.type, "value": v,
+               "default": it.default, "desc": it.desc, "choices": it.choices,
+               "kernel": bool(it.kernel), "min": it.min, "max": it.max}
+        if it.type == "list" and isinstance(v, list):   # wxid / chat_id 旁边显示名字
+            row["labels"] = {x: b.name_of(x) for x in v if _is_id(x)}
+        items.append(row)
     return items
+
+
+def _is_id(x: str) -> bool:
+    return x.startswith(("wxid_", "gh_")) or x.endswith(("@chatroom", "@openim")) or x == "filehelper"
 
 
 def set_settings(b: "Bridge", body: dict, who: str = "API") -> list[dict]:
@@ -131,3 +138,58 @@ def pause(b: "Bridge", on: bool, who: str = "管理台") -> dict:
     log.warning("%s：%s", who, "暂停回复" if on else "恢复回复")
     b.events.publish("status", {"paused": b.paused, "halted": b.halted})
     return {"paused": b.paused, "halted": b.halted, "was": was}
+
+
+# ---- 资料库（产品助手的浮屿文档） ----
+def knowledge_info(b: "Bridge") -> dict:
+    k = b.knowledge
+    m = k.meta
+    sources: dict[str, int] = {}
+    for c in k.index.chunks:
+        kind = ("版本说明" if c.source.startswith("docs/releases/") else
+                "功能说明" if c.source.startswith("docs/features/") else "其他")
+        sources[kind] = sources.get(kind, 0) + 1
+    return {"repo": m.get("repo") or b.cfg.get("knowledge_repo"), "synced_at": m.get("synced_at"),
+            "files": m.get("files", 0), "fetched": m.get("fetched", 0), "chunks": len(k.index.chunks),
+            "sources": sources, "error": m.get("error", ""), "failed_at": m.get("failed_at"),
+            "syncing": getattr(k, "syncing", False), "enabled": bool(b.cfg.get("assistant_groups")),
+            "groups": b.cfg.get("assistant_groups") or []}
+
+
+def knowledge_sync(b: "Bridge") -> None:
+    """后台同步一次，完成后推送 knowledge 事件；正在同步时抛错。"""
+    import threading
+    k = b.knowledge
+    if getattr(k, "syncing", False):
+        raise HandlerError("正在同步，稍等", 409)
+    k.syncing = True
+
+    def go():
+        result = ""
+        try:
+            result = k.sync(b.cfg.get("knowledge_repo"))
+        except Exception as e:
+            result = f"同步失败：{e}"
+        finally:
+            k.syncing = False
+            b.events.publish("knowledge", {"result": result})
+    threading.Thread(target=go, name="knowledge-sync", daemon=True).start()
+
+
+def knowledge_search(b: "Bridge", q: str, judge: bool = False) -> dict:
+    """试搜：粗筛候选的分数、覆盖率，最终会附给内核的段落；judge=True 再让模型筛一遍（和群里一样）。"""
+    from . import knowledge as kn
+    k = b.knowledge
+    q = q.strip()[:200]
+    if not q:
+        raise HandlerError("要搜什么？")
+    cands = k.candidates(q, 6)
+    picked = k.search(q)
+    judged = None
+    if judge and picked:
+        judged = [c.title for c in b._judge(q, picked)]
+    cq = kn.clean(q)
+    return {"query": q, "question": kn.is_question(q), "floor": k.floor, "cover": k.cover,
+            "picked": [c.title for c in picked], "judged": judged,
+            "candidates": [{"score": round(s, 1), "coverage": round(k.index.coverage(cq, c), 2),
+                            "source": c.source, "title": c.title, "text": c.text[:400]} for s, c in cands]}

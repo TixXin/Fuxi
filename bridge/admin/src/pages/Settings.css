@@ -1,0 +1,48 @@
+.setting__control {
+  flex: none;
+  max-width: 60%;
+  transition: opacity var(--motion-base) var(--motion-ease);
+}
+
+.setting__control.is-saving {
+  opacity: 0.55;
+}
+
+.setting__kernel {
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: var(--color-white-a08);
+  color: var(--color-text-subtle);
+  font-size: 10.5px;
+}
+
+.setting__error {
+  display: block;
+  margin-top: 2px;
+  color: var(--status-bad);
+}
+
+.setting__saved {
+  margin-left: 6px;
+  color: var(--color-mint);
+}
+
+.setting__na {
+  color: var(--color-text-subtle);
+  font-size: 12px;
+}
+
+.settings__foot {
+  padding: 12px 4px 0;
+  color: var(--color-text-subtle);
+  font-size: 12px;
+}
+
+@media (max-width: 760px) {
+  .setting__control {
+    max-width: 100%;
+  }
+}

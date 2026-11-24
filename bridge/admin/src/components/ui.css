@@ -262,6 +262,37 @@
   text-align: center;
 }
 
+.live {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--color-text-subtle);
+  font-size: 12px;
+}
+
+.live::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--status-idle);
+}
+
+.live.is-live {
+  color: var(--color-mint);
+}
+
+.live.is-live::before {
+  background: var(--color-mint);
+  animation: breathe 1.6s infinite;
+}
+
+@keyframes breathe {
+  50% {
+    opacity: 0.35;
+  }
+}
+
 @media (max-width: 760px) {
   .page {
     padding: 14px 16px 40px;

@@ -80,6 +80,10 @@ ITEMS: list[Item] = [
          env="FUXI_REPLY_SELF"),
     Item("settle_ms", "合并等待", "int", 1500, "收到消息后再等多少毫秒，把连发的几条合在一起回",
          env="FUXI_SETTLE_MS", min=0, max=30000),
+    Item("human_quiet_s", "让人先用", "int", 8, "有人在网页版微信里动键盘鼠标时先不发，等停手这么多秒再发；0 = 不等",
+         min=0, max=120),
+    Item("human_max_wait_s", "最多等人", "int", 120, "等人停手最多等多少秒，超过就这条不发（记为没发出去）",
+         min=10, max=900),
     Item("stale_sec", "过期秒数", "int", 120, "超过这么多秒的旧消息不再回复（含停机补回复）",
          env="FUXI_STALE_SEC", min=10, max=3600),
 ]

@@ -506,6 +506,9 @@ class SendRetryTest(unittest.TestCase):
         b.sent_hashes = collections.deque(maxlen=10)
         b.names_cache = {"g@chatroom": "测试群"}
         b.sender = mock.Mock(last_open=0.0)
+        b.sender.human_idle.return_value = None
+        b.cfg = mock.Mock()
+        b.cfg.get.side_effect = {"human_quiet_s": 8, "human_max_wait_s": 120}.get
         b.sender.send_text.side_effect = send_effects
         b._verify = lambda job, t0: verified
         b.RETRY_DELAY = 0
@@ -571,3 +574,55 @@ class TimingTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HumanWaitTest(unittest.TestCase):
+    """有人在网页版微信里操作时，发送先等他停手。"""
+
+    def _bridge(self, idles, quiet=8, max_wait=120):
+        from fuxi_bridge.app import SendJob
+        b = object.__new__(Bridge)
+        b.names_cache = {"wxid_a": "阿青"}
+        b.last_abort = None
+        b.sender = mock.Mock()
+        b.sender.human_idle.side_effect = idles
+        b.cfg = mock.Mock()
+        b.cfg.get.side_effect = {"human_quiet_s": quiet, "human_max_wait_s": max_wait}.get
+        return b, SendJob(chat="wxid_a", text="你好")
+
+    def test_waits_until_quiet(self):
+        b, job = self._bridge([2.0, 5.0, 9.0])
+        now = [0.0]
+        with mock.patch("fuxi_bridge.app.time.monotonic", lambda: now[0]), \
+             mock.patch("fuxi_bridge.app.time.sleep", lambda s: now.__setitem__(0, now[0] + s)):
+            self.assertTrue(b._wait_for_human(job))
+        self.assertEqual(b.sender.human_idle.call_count, 3)
+
+    def test_nobody_or_off_sends_at_once(self):
+        b, job = self._bridge([None])
+        self.assertTrue(b._wait_for_human(job))
+        b, job = self._bridge([0.1], quiet=0)
+        self.assertTrue(b._wait_for_human(job))
+        b.sender.human_idle.assert_not_called()
+
+    def test_gives_up_after_max_wait(self):
+        b, job = self._bridge(lambda: 1.0, max_wait=30)
+        now = [0.0]
+        with mock.patch("fuxi_bridge.app.time.monotonic", lambda: now[0]), \
+             mock.patch("fuxi_bridge.app.time.sleep", lambda s: now.__setitem__(0, now[0] + s)):
+            self.assertFalse(b._wait_for_human(job))
+        self.assertIn("有人在用微信", job.error)
+        self.assertNotIn("放弃发送", job.error)        # 不走「放弃后重试一次」
+
+    def test_bot_own_input_is_not_human(self):
+        from fuxi_bridge import sender as sender_mod
+        s = object.__new__(sender_mod.Sender)
+        s.display = ":1"
+        with mock.patch.object(sender_mod.time, "monotonic", lambda: 100.0):
+            s.last_input = 97.0
+            with mock.patch.object(sender_mod, "x_idle_seconds", lambda d: 3.0):
+                self.assertIsNone(s.human_idle())          # 空闲时间是 bot 自己的操作清零的
+            with mock.patch.object(sender_mod, "x_idle_seconds", lambda d: 1.0):
+                self.assertEqual(s.human_idle(), 1.0)      # bot 之后又有人动过
+            with mock.patch.object(sender_mod, "x_idle_seconds", lambda d: None):
+                self.assertIsNone(s.human_idle())          # 查不到就当没人

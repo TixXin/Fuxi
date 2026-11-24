@@ -301,8 +301,32 @@ class Bridge:
     RETRIES = 1          # 「放弃发送」（还没输入任何内容）后重试次数
     RETRY_DELAY = 1.5
 
+    def _wait_for_human(self, job: SendJob) -> bool:
+        """有人正在网页版微信里操作时先等他停手，免得抢键盘鼠标、把他打了一半的字一起发出去。"""
+        quiet, max_wait = self.cfg.get("human_quiet_s"), self.cfg.get("human_max_wait_s")
+        if not quiet:
+            return True
+        t0 = time.monotonic()
+        while True:
+            idle = self.sender.human_idle()
+            if idle is None or idle >= quiet:
+                if time.monotonic() - t0 > 0.5:
+                    log.info("等人停手 %.0f 秒后发往 %s", time.monotonic() - t0, self.name_of(job.chat))
+                return True
+            if time.monotonic() - t0 >= max_wait:
+                job.error = f"有人在用微信，等了 {max_wait} 秒还没停手，这条没发"
+                self.last_abort = (time.time(), job.error)
+                log.warning("发往 %s 没发：%s", self.name_of(job.chat), job.error)
+                return False
+            if time.monotonic() - t0 < 0.5:
+                log.info("有人在用微信（%.0f 秒前操作过），等停手 %d 秒再发往 %s", idle, quiet, self.name_of(job.chat))
+            time.sleep(max(0.5, min(3.0, quiet - idle)))
+
     def _attempt(self, job: SendJob) -> None:
         """发送一次。放弃（未发出）只记 job.error；粘贴之后出错或核对失败才熔断。"""
+        if not self._wait_for_human(job):
+            self.last_send_ok = False
+            return
         try:
             t0 = int(time.time()) - 2
             job.t_start = time.monotonic()

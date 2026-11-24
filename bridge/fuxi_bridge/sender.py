@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import collections
+import ctypes
 import contextlib
 import logging
 import os
@@ -39,6 +40,8 @@ class Sender:
         self._current_chat: str | None = None
         self.open_times: collections.deque[tuple[float, float, str]] = collections.deque(maxlen=50)
         self.last_open = 0.0
+        self.last_input = 0.0   # 自己最后一次往 X 里注入键盘鼠标的时间（monotonic），用来区分人的操作
+        self.display = display
 
     # ---- 底层 ----
     def _run(self, *args: str, stdin: bytes | None = None) -> str:
@@ -46,6 +49,9 @@ class Sender:
             r = subprocess.run(args, input=stdin, env=self.env, capture_output=True, timeout=15)
         except subprocess.TimeoutExpired as e:
             raise SendError(f"{args[0]} 超时") from e
+        finally:
+            if args[0] == "xdotool" and len(args) > 1 and args[1] in INPUT_CMDS:
+                self.last_input = time.monotonic()
         if r.returncode != 0:
             raise SendError(f"{args[0]} 失败: {r.stderr.decode(errors='replace').strip()}")
         return r.stdout.decode(errors="replace").strip()
@@ -461,6 +467,17 @@ class Sender:
             self.open_chat(chat)
             return time.monotonic() - t0
 
+    def human_idle(self) -> float | None:
+        """人最后一次动键盘鼠标是多少秒前；bot 自己操作之后没人动过（或查不到）返回 None。
+
+        X 的空闲时间（MIT-SCREEN-SAVER）会被 xdotool 注入的输入一起清零，所以只有比 bot 自己的
+        最后一次输入更晚的那次操作才算人的。网页版微信（selkies）的操作也是注入到同一个 X 里。"""
+        idle = x_idle_seconds(self.display)
+        if idle is None:
+            return None
+        since_bot = time.monotonic() - self.last_input if self.last_input else float("inf")
+        return idle if idle < since_bot - 1.0 else None
+
     def forget_chat(self) -> None:
         """界面可能被人动过（或发送结果存疑）时调用：下次发送必须重新搜索。"""
         self._current_chat = None
@@ -480,6 +497,48 @@ class Sender:
             r = subprocess.run(["xwd", "-id", w, "-silent"], env=self.env, stdout=f, timeout=15)
         if r.returncode != 0:
             raise SendError("xwd 截图失败")
+
+
+INPUT_CMDS = {"key", "keydown", "keyup", "type", "mousemove", "click", "mousedown", "mouseup"}
+
+_XSS = None
+
+
+class _XssInfo(ctypes.Structure):
+    _fields_ = [("window", ctypes.c_ulong), ("state", ctypes.c_int), ("kind", ctypes.c_int),
+                ("til_or_since", ctypes.c_ulong), ("idle", ctypes.c_ulong), ("event_mask", ctypes.c_ulong)]
+
+
+def x_idle_seconds(display: str) -> float | None:
+    """X 显示的键盘鼠标空闲秒数；没装 libXss 或连不上显示时返回 None（当作没人在用）。"""
+    global _XSS
+    try:
+        if _XSS is None:
+            x11, xss = ctypes.cdll.LoadLibrary("libX11.so.6"), ctypes.cdll.LoadLibrary("libXss.so.1")
+            x11.XOpenDisplay.restype = ctypes.c_void_p
+            x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
+            x11.XDefaultRootWindow.restype = ctypes.c_ulong
+            x11.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
+            x11.XCloseDisplay.argtypes = [ctypes.c_void_p]
+            xss.XScreenSaverAllocInfo.restype = ctypes.POINTER(_XssInfo)
+            xss.XScreenSaverQueryInfo.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.POINTER(_XssInfo)]
+            _XSS = (x11, xss)
+        x11, xss = _XSS
+        d = x11.XOpenDisplay(display.encode())
+        if not d:
+            return None
+        try:
+            info = xss.XScreenSaverAllocInfo()
+            if not xss.XScreenSaverQueryInfo(d, x11.XDefaultRootWindow(d), info):
+                return None
+            return info.contents.idle / 1000
+        finally:
+            x11.XCloseDisplay(d)
+    except OSError:
+        _XSS = False
+        return None
+    except TypeError:   # _XSS 是 False：之前加载失败过
+        return None
 
 
 _OCR = None

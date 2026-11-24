@@ -10,5 +10,5 @@ bash -n "$root/scripts/deploy.sh"
 node --check "$root/kernel/docker-entrypoint.js" 2>/dev/null || true
 # 内核上的浮汐扩展（链接阅读等）
 (cd "$root/kernel/fuxi" && npm ci --silent --no-audit --no-fund)
-node --test "$root/kernel/fuxi/test/"
+node --test "$root"/kernel/fuxi/test/*.js
 echo "全部通过"

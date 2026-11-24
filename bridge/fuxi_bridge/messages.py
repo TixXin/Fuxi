@@ -16,7 +16,8 @@ import json
 import logging
 import os
 import re
-from dataclasses import asdict, dataclass
+import xml.etree.ElementTree as ET
+from dataclasses import asdict, dataclass, field
 
 from .store import DbCache
 
@@ -48,6 +49,9 @@ class Message:
     text: str
     source: str        # 原始 source XML（@ 列表等）
     shard: str
+    # type 49 解析结果（见 parse_appmsg）：引用的原消息、拍一拍对象等；普通文本为空
+    quote: dict = field(default_factory=dict)
+    patted: str = ""
 
     @property
     def is_group(self) -> bool:
@@ -164,10 +168,16 @@ class MessageReader:
                         sender = sender or m.group(1)
                         text = text[m.end() :]
                 mtype = MSG_TYPES.get(r["local_type"] & 0xFFFFFFFF, str(r["local_type"]))
+                extra: dict = {}
+                if mtype == "app":
+                    app = parse_appmsg(text)
+                    if app:
+                        mtype, text = app["kind"], app["text"]
+                        extra = {"quote": app.get("quote") or {}, "patted": app.get("patted", "")}
                 out.append(Message(
                     chat=chat, local_id=r["local_id"], sort_seq=r["sort_seq"], type=mtype,
                     sender=sender, is_self=(sender == self.self_wxid), create_time=r["create_time"],
-                    text=text, source=_decode(r["source"], None), shard=os.path.basename(shard),
+                    text=text, source=_decode(r["source"], None), shard=os.path.basename(shard), **extra,
                 ))
         out.sort(key=lambda m: (m.sort_seq, m.local_id))
         if out:
@@ -244,3 +254,104 @@ _AT_LIST = re.compile(r"<atuserlist>\s*(?:<!\[CDATA\[)?([^<\]]*)")
 def at_users(source: str) -> list[str]:
     m = _AT_LIST.search(source or "")
     return [u for u in (m.group(1).split(",") if m else []) if u]
+
+
+# ---- type 49（appmsg）：引用、链接、文件、小程序、聊天记录、拍一拍… ----
+
+# 交给内核的消息类型（其余 appmsg 如转账/红包/未知类型直接忽略）
+APP_KINDS = ("quote", "link", "file", "miniapp", "record", "channels", "music", "pat", "share")
+_PLACEHOLDER = {
+    "1": None, "3": "[图片]", "34": "[语音]", "42": "[名片]", "43": "[视频]", "47": "[表情]",
+    "48": "[位置]", "50": "[通话]",
+}
+_APP_KIND = {
+    "57": "quote", "5": "link", "6": "file", "33": "miniapp", "36": "miniapp", "19": "record",
+    "40": "record", "51": "channels", "3": "music", "76": "music", "62": "pat",
+}
+_SKIP_APP = {"2000", "2001", "2002", "2003"}  # 转账、红包：不交给模型
+
+
+def _xml(text: str):
+    i = text.find("<msg")
+    if i < 0:
+        return None
+    try:
+        return ET.fromstring(text[i:])
+    except ET.ParseError:
+        return None
+
+
+def _t(el, path: str) -> str:
+    return ((el.findtext(path) if el is not None else None) or "").strip()
+
+
+def _quoted_text(ref) -> str:
+    """refermsg 里被引用消息的可读内容。"""
+    rtype = _t(ref, "type")
+    content = _t(ref, "content")
+    if rtype == "1":
+        return _SENDER_PREFIX.sub("", content, count=1)
+    if rtype == "49":
+        inner = _xml(content)
+        title = _t(inner, "appmsg/title") if inner is not None else ""
+        return f"[分享] {title}" if title else "[分享]"
+    return _PLACEHOLDER.get(rtype) or "[消息]"
+
+
+def _clip(s: str, n: int) -> str:
+    s = " ".join(s.split())
+    return s if len(s) <= n else s[: n - 1] + "…"
+
+
+def parse_appmsg(text: str) -> dict | None:
+    """把 appmsg XML 转成 {kind, text, quote?, patted?}；不认识或不该交给模型的返回 None。
+
+    quote 的 text 只放回复正文（@ 识别只看它），被引用内容放在 quote 里，组装 payload 时再拼。
+    """
+    root = _xml(text)
+    am = root.find("appmsg") if root is not None else None
+    if am is None:
+        return None
+    atype = _t(am, "type")
+    if atype in _SKIP_APP:
+        return None
+    kind = _APP_KIND.get(atype, "share")
+    title, des, url = _t(am, "title"), _t(am, "des"), _t(am, "url")
+    if kind == "quote":
+        ref = am.find("refermsg")
+        if not title:
+            return None
+        q = {}
+        if ref is not None:
+            q = {
+                "sender": _t(ref, "chatusr") or _t(ref, "fromusr"),
+                "name": _t(ref, "displayname"),
+                "text": _clip(_quoted_text(ref), 200),
+            }
+        return {"kind": "quote", "text": title, "quote": q}
+    if kind == "pat":
+        patted = _t(am, "patinfo/pattedusername")
+        return {"kind": "pat", "text": f"[拍一拍] {title}" if title else "[拍一拍]", "patted": patted}
+    if kind == "file":
+        size = _t(am, "appattach/totallen")
+        kb = f"（{int(size) // 1024} KB）" if size.isdigit() else ""
+        return {"kind": "file", "text": f"[文件] {title}{kb}"}
+    if kind == "miniapp":
+        src = _t(am, "sourcedisplayname")
+        return {"kind": "miniapp", "text": f"[小程序{('·' + src) if src else ''}] {title}"}
+    if kind == "record":
+        return {"kind": "record", "text": f"[聊天记录] {title}\n{_clip(des, 300)}".rstrip()}
+    if kind == "channels":
+        desc = _t(am, "finderFeed/desc") or title
+        nick = _t(am, "finderFeed/nickname")
+        return {"kind": "channels", "text": f"[视频号{('·' + nick) if nick else ''}] {_clip(desc, 200)}"}
+    if kind == "music":
+        return {"kind": "music", "text": f"[音乐] {title}{(' - ' + des) if des else ''}"}
+    if not title:
+        return None
+    parts = [f"[分享链接] {title}" if kind == "link" else f"[分享] {title}"]
+    if des and des != title:
+        parts.append(_clip(des, 200))
+    if url.startswith(("http://", "https://")):
+        parts.append(url)  # 内核会按 URL 抓取网页摘要
+    return {"kind": kind, "text": "\n".join(parts)}

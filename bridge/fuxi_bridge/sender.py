@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+import collections
+import contextlib
 import logging
 import os
 import re
@@ -24,11 +26,12 @@ class SendError(Exception):
 
 
 class Sender:
-    def __init__(self, display: str = ":1", step_delay: float = 0.35):
+    def __init__(self, display: str = ":1", step_delay: float = 0.3):
         self.env = {**os.environ, "DISPLAY": display}
         self.delay = step_delay
         self._lock = threading.Lock()
         self._current_chat: str | None = None
+        self.open_times: collections.deque[tuple[float, float, str]] = collections.deque(maxlen=50)
 
     # ---- 底层 ----
     def _run(self, *args: str, stdin: bytes | None = None) -> str:
@@ -105,8 +108,13 @@ class Sender:
 
     def _activate(self) -> str:
         w = self.window()
-        self._run("xdotool", "windowactivate", "--sync", w)
-        time.sleep(self.delay)
+        try:
+            active = self._run("xdotool", "getactivewindow")
+        except SendError:
+            active = ""
+        if active != w:
+            self._run("xdotool", "windowactivate", "--sync", w)
+            time.sleep(0.1)
         return w
 
     def _capture(self, w: str) -> "_Shot":
@@ -115,21 +123,50 @@ class Sender:
             raise SendError("xwd 截图失败")
         return _Shot(r.stdout)
 
-    def _search(self, name: str) -> tuple[str, "_Shot"]:
-        w = self._activate()
-        self._key("ctrl+f")
+    def _type_search(self, name: str) -> None:
+        """Ctrl+F → 全选 → 粘贴关键词，一次 xdotool 调用完成。"""
         self._clip_text(name)
-        self._key("ctrl+a")
-        self._key("ctrl+v")
-        time.sleep(1.2)  # 等搜索结果
-        return w, self._capture(w)
+        self._run("xdotool", "key", "--clearmodifiers", "--delay", "30", "ctrl+f", "ctrl+a", "ctrl+v")
+
+    def _wait_results(self, w: str, max_wait: float = 3.0) -> tuple[int, int] | None:
+        """轮询截图直到下拉框内容稳定，返回唯一完全匹配行的坐标。
+
+        结果是分批渲染的（实测先出 1 行、约 0.6 秒内出全），中途某一帧的「唯一匹配」可能在
+        后面的帧里变得不唯一，所以必须等内容连续 RESULT_STABLE 秒不变、且距粘贴至少
+        RESULT_MIN 秒，才采信。
+        """
+        start = time.monotonic()
+        prev, since, hit = None, start, None
+        while True:
+            sig, hit = self._capture(w).search_state()
+            now = time.monotonic()
+            if sig != prev:
+                prev, since = sig, now
+            elif sig[1] and now - start >= self.RESULT_MIN and now - since >= self.RESULT_STABLE:
+                return hit
+            if now - start > max_wait:
+                log.warning("搜索结果 %.1f 秒内未稳定", max_wait)
+                return None
+            time.sleep(0.04)
+
+    RESULT_MIN = 0.45
+    RESULT_STABLE = 0.25
+
+    def _search(self, name: str) -> tuple[str, tuple[int, int] | None]:
+        w = self._activate()
+        self._type_search(name)
+        return w, self._wait_results(w)
 
     def locate(self, name: str) -> tuple[int, int] | None:
         """只搜索并定位，不点击（调试用）。"""
         with self._lock:
-            _, shot = self._search(name)
-            self._key("Escape")
-            return shot.exact_match_row()
+            _, hit = self._search(name)
+            self._run("xdotool", "key", "Escape")
+            return hit
+
+    def _title_is(self, w: str, name: str, thorough: bool = False) -> tuple[bool, str]:
+        title = self.read_title(w, thorough=thorough)
+        return title_matches(name, title), title
 
     def open_chat(self, name: str) -> None:
         """搜索并打开会话。name 必须是微信里显示的会话名（备注优先/群名/文件传输助手）。
@@ -137,28 +174,71 @@ class Sender:
         搜索下拉框的分区和顺序因关键词而异（网络联想、联系人、群聊「包含:xx」、聊天记录…），
         不能回车、也不能按位置猜。判定依据：微信把命中的关键词标绿，**只有标题与关键词
         完全相同的本地结果，整行标题才是纯绿色**。恰好一行这样的结果才点击，否则放弃。
+
+        提速（目标 2 秒内）：上一次就是由我们打开的同一会话且标题仍对 → 不再搜索；
+        固定等待都换成轮询；OCR 只跑识别模型。
         """
-        w, shot = self._search(name)
-        hit = shot.exact_match_row()
+        t0 = time.monotonic()
+        w = self._activate()
+        before_ok, _ = self._title_is(w, name)
+        if before_ok and self._current_chat == name:
+            self._record(t0, "已在会话")
+            return
+        self._current_chat = None
+        self._type_search(name)
+        hit = self._wait_results(w)
         if hit is None:
-            self._key("Escape")
+            self._run("xdotool", "key", "Escape")
             raise SendError(f"搜索「{name}」没有唯一的完全匹配结果，放弃发送")
         x, y = hit
         self._run("xdotool", "mousemove", "--window", w, str(x), str(y), "click", "1")
-        time.sleep(0.6)
-        # 粘贴前再核对一次：OCR 识别聊天标题，与目标名一致才继续
-        title = self.read_title(w)
-        if not title_matches(name, title):
-            # 注意：此时焦点在聊天里，按 Escape 会把整个主窗口隐藏到托盘，所以什么都不按
-            raise SendError(f"打开的会话标题是「{title}」，与目标「{name}」不符，放弃发送")
+        # 粘贴前核对：OCR 聊天标题与目标名一致才继续。若点之前标题就已经是目标名，
+        # 读到的可能是旧画面，先等界面切换完再核对。
+        time.sleep(0.4 if before_ok else 0.12)
+        deadline = time.monotonic() + 1.5
+        while True:
+            ok, title = self._title_is(w, name)
+            if ok:
+                break
+            if time.monotonic() > deadline:
+                ok, title = self._title_is(w, name, thorough=True)
+                if ok:
+                    break
+                # 注意：此时焦点在聊天里，按 Escape 会把整个主窗口隐藏到托盘，所以什么都不按
+                raise SendError(f"打开的会话标题是「{title}」，与目标「{name}」不符，放弃发送")
+            time.sleep(0.1)
         self._current_chat = name
+        self._record(t0, "搜索")
 
-    def read_title(self, w: str | None = None) -> str:
-        """OCR 当前聊天标题（RapidOCR / PP-OCR，对生僻字比 tesseract 准得多）。"""
+    def _record(self, t0: float, mode: str) -> None:
+        dt = time.monotonic() - t0
+        self.open_times.append((time.time(), dt, mode))
+        log.info("进入会话耗时 %.2f 秒（%s）", dt, mode)
+
+    def open_stats(self) -> dict:
+        """最近进入会话的耗时统计（秒）。"""
+        xs = sorted(d for _, d, m in self.open_times if m == "搜索")
+        if not xs:
+            return {"n": 0}
+        return {"n": len(xs), "p50": round(xs[len(xs) // 2], 2), "max": round(xs[-1], 2),
+                "last": round(self.open_times[-1][1], 2)}
+
+    def read_title(self, w: str | None = None, thorough: bool = False) -> str:
+        """OCR 当前聊天标题（RapidOCR / PP-OCR，对生僻字比 tesseract 准得多）。
+
+        默认只把标题文字裁出来跑识别模型（约 0.02 秒）；thorough=True 跑完整的
+        检测+识别（约 0.6 秒，标题里有表情等导致裁切不准时兜底）。
+        """
         w = w or self.window()
         img = self._capture(w).title_bgr()
         try:
-            res, _ = _ocr()(img)
+            if not thorough:
+                crop = title_crop(img)
+                if crop is not None:
+                    res, _ = _ocr()(crop, use_det=False, use_cls=False)
+                    if res and res[0][1] >= 0.8:
+                        return str(res[0][0]).strip()
+            res, _ = _ocr()(img, use_cls=False)
         except Exception as e:
             raise SendError(f"OCR 失败：{e}") from e
         boxes = sorted(res or [], key=lambda r: r[0][0][0])  # 按左上角 x 排序
@@ -166,21 +246,40 @@ class Sender:
 
     # ---- 对外 ----
     def send_text(self, chat: str, text: str) -> None:
-        with self._lock:
+        with self._lock, self._fresh_on_error():
             self.open_chat(chat)
             self._clip_text(text)
-            self._key("ctrl+v")
+            self._key("ctrl+v")   # 粘贴是异步取剪贴板的，留一点时间再回车
             self._key("Return")
             log.info("已发送文本到 %s（%d 字）", chat, len(text))
 
     def send_image(self, chat: str, path: str) -> None:
-        with self._lock:
+        with self._lock, self._fresh_on_error():
             self.open_chat(chat)
             self._clip_image(path)
             self._key("ctrl+v")
-            time.sleep(0.6)
+            time.sleep(0.4)
             self._key("Return")
             log.info("已发送图片到 %s：%s", chat, os.path.basename(path))
+
+    def probe_open(self, chat: str) -> float:
+        """只打开会话并核对标题、不发送，返回耗时（遥控 /测试 与调试用）。"""
+        with self._lock, self._fresh_on_error():
+            t0 = time.monotonic()
+            self.open_chat(chat)
+            return time.monotonic() - t0
+
+    def forget_chat(self) -> None:
+        """界面可能被人动过（或发送结果存疑）时调用：下次发送必须重新搜索。"""
+        self._current_chat = None
+
+    @contextlib.contextmanager
+    def _fresh_on_error(self):
+        try:
+            yield
+        except BaseException:
+            self._current_chat = None
+            raise
 
     def screenshot(self, out_xwd: str) -> None:
         """截取微信窗口（xwd 格式，调试用）。"""
@@ -202,6 +301,28 @@ def _ocr():
 
         _OCR = RapidOCR()
     return _OCR
+
+
+def title_crop(img, gap: int = 60, pad: int = 8):
+    """从标题栏截图里裁出标题文字（最左边一段深色文字，与右侧图标间隔 > gap 像素）。"""
+    import numpy as np
+
+    a = img.astype(np.int16)
+    mx, mn = a.max(axis=2), a.min(axis=2)
+    dark = (mx < 170) & (mx - mn < 30)
+    cols = np.where(dark.any(axis=0))[0]
+    if not len(cols):
+        return None
+    end = cols[-1]
+    for i, g in enumerate(np.diff(cols)):
+        if g > gap:
+            end = cols[i]
+            break
+    x0, x1 = int(cols[0]), int(end) + 1
+    rows = np.where(dark[:, x0:x1].any(axis=1))[0]
+    y0, y1 = int(rows[0]), int(rows[-1]) + 1
+    h, w = img.shape[:2]
+    return np.ascontiguousarray(img[max(0, y0 - pad):min(h, y1 + pad), max(0, x0 - pad):min(w, x1 + pad)])
 
 
 _NON_WORD = re.compile(r"[^0-9A-Za-z\u4e00-\u9fff]+")
@@ -235,6 +356,7 @@ class _Shot:
 
     布局常量按微信 4.x Linux 默认 2 倍缩放实测：左侧导航 0~146，会话列表 146~600，
     搜索下拉框宽到约 786。下拉框里网络联想词只有小图标，本地结果是 ~72px 的大头像。
+    像素运算用 numpy（整窗扫描从纯 Python 的 ~0.4 秒降到几毫秒）。
     """
 
     AVATAR_X = (168, 244)
@@ -245,6 +367,8 @@ class _Shot:
     def __init__(self, raw: bytes):
         import struct
 
+        import numpy as np
+
         h = struct.unpack(">25I", raw[:100])
         self.w, self.h, self.bpp, self.bpl = h[4], h[5], h[11], h[12]
         if self.bpp not in (24, 32):
@@ -252,11 +376,14 @@ class _Shot:
         self.step = self.bpp // 8
         self.off = h[0] + h[19] * 12
         self.raw = raw
+        if len(raw) < self.off + self.h * self.bpl:
+            raise SendError("截图数据不完整")
+        rows = np.frombuffer(raw, dtype=np.uint8, count=self.h * self.bpl, offset=self.off).reshape(self.h, self.bpl)
+        self.bgr = rows[:, : self.w * self.step].reshape(self.h, self.w, self.step)[:, :, :3]
 
     def px(self, x: int, y: int) -> tuple[int, int, int]:
-        i = self.off + y * self.bpl + x * self.step
-        b = self.raw
-        return (b[i + 2], b[i + 1], b[i])
+        b, g, r = self.bgr[y, x]
+        return (int(r), int(g), int(b))
 
     @staticmethod
     def _near(p, q, tol=6) -> bool:
@@ -269,49 +396,57 @@ class _Shot:
         import numpy as np
 
         x0, y0, x1, y1 = self.TITLE_BOX
-        x1, y1 = min(x1, self.w), min(y1, self.h)
-        rows = []
-        for y in range(y0, y1):
-            start = self.off + y * self.bpl + x0 * self.step
-            rows.append(self.raw[start:start + (x1 - x0) * self.step])
-        a = np.frombuffer(b"".join(rows), dtype=np.uint8).reshape(y1 - y0, x1 - x0, self.step)
-        return np.ascontiguousarray(a[:, :, :3])  # xwd 小端即 B,G,R(,X)
+        return np.ascontiguousarray(self.bgr[y0:min(y1, self.h), x0:min(x1, self.w)])
 
     def dropdown_bottom(self) -> int:
-        white = (250, 250, 250)
+        import numpy as np
+
+        def near_white(col):
+            c = self.bgr[self.TOP_Y:, col].astype(np.int16)
+            return (np.abs(c - 250) <= 6).all(axis=1)
+
+        mask = ~near_white(self.LIST_EDGE_X) & near_white(self.DROPDOWN_ONLY_X)
         run = 0
-        for y in range(self.TOP_Y, self.h):
-            inside_list_bg = not self._near(self.px(self.LIST_EDGE_X, y), white)
-            dropdown_white = self._near(self.px(self.DROPDOWN_ONLY_X, y), white)
-            run = run + 1 if (inside_list_bg and dropdown_white) else 0
+        for i, v in enumerate(mask):
+            run = run + 1 if v else 0
             if run >= 10:
-                return y - run
+                return self.TOP_Y + i - run
         return self.h
 
     TITLE_X = (246, 700)   # 头像右侧到右侧 ⓘ 图标之前
     LOCAL_TITLE_MIN_X = 252  # 本地结果标题从 ~258 起；网络联想词从 ~214 起（会被扫描左界截断成 246）
 
-    @staticmethod
-    def _kind(p) -> str | None:
-        r, g, b = p
-        if g > r + 50 and g > b + 20:
-            return "G"   # 关键词高亮绿
-        if max(p) < 170 and max(p) - min(p) < 30:
-            return "D"   # 普通黑/灰字
-        return None
+    def _kinds(self, bottom: int):
+        """区域内每个像素的分类：G = 关键词高亮绿，D = 普通黑/灰字。"""
+        import numpy as np
+
+        x0, x1 = self.TITLE_X
+        a = self.bgr[self.TOP_Y:bottom, x0:x1].astype(np.int16)
+        b, g, r = a[:, :, 0], a[:, :, 1], a[:, :, 2]
+        green = (g > r + 50) & (g > b + 20)
+        mx, mn = a.max(axis=2), a.min(axis=2)
+        dark = (mx < 170) & (mx - mn < 30) & ~green
+        return green, dark
 
     def text_lines(self, bottom: int) -> list[dict]:
-        x0, x1 = self.TITLE_X
+        import numpy as np
+
+        if bottom <= self.TOP_Y:
+            return []
+        green, dark = self._kinds(bottom)
+        hit = green | dark
+        g_cnt, d_cnt, any_hit = green.sum(axis=1), dark.sum(axis=1), hit.any(axis=1)
+        first_x = np.where(any_hit, hit.argmax(axis=1), 0) + self.TITLE_X[0]
         lines, cur = [], None
-        for y in range(self.TOP_Y, bottom):
-            hits = [(x, k) for x in range(x0, x1) if (k := self._kind(self.px(x, y)))]
-            if hits:
+        for i in range(len(any_hit)):
+            y = self.TOP_Y + i
+            if any_hit[i]:
                 if cur is None:
-                    cur = {"y0": y, "y1": y, "G": 0, "D": 0, "xmin": hits[0][0]}
+                    cur = {"y0": y, "y1": y, "G": 0, "D": 0, "xmin": int(first_x[i])}
                 cur["y1"] = y
-                cur["xmin"] = min(cur["xmin"], hits[0][0])
-                for _, k in hits:
-                    cur[k] += 1
+                cur["xmin"] = min(cur["xmin"], int(first_x[i]))
+                cur["G"] += int(g_cnt[i])
+                cur["D"] += int(d_cnt[i])
             elif cur is not None and y - cur["y1"] > 3:
                 lines.append(cur)
                 cur = None
@@ -319,16 +454,22 @@ class _Shot:
             lines.append(cur)
         return lines
 
-    def exact_match_row(self) -> tuple[int, int] | None:
+    def search_state(self) -> tuple[tuple, tuple[int, int] | None]:
+        """(下拉框内容签名, 唯一完全匹配行的点击坐标或 None)。签名用于判断结果是否已加载稳定。"""
         bottom = self.dropdown_bottom()
+        lines = self.text_lines(bottom)
+        sig = (bottom, tuple((l["y0"], l["y1"], l["xmin"], l["G"] > 0, l["D"] > 0) for l in lines))
         exact = [
-            l for l in self.text_lines(bottom)
+            l for l in lines
             if l["xmin"] >= self.LOCAL_TITLE_MIN_X and 15 <= l["y1"] - l["y0"] <= 40
             and l["G"] >= 40 and l["D"] == 0
         ]
         if len(exact) != 1:
             if exact:
                 log.warning("搜索结果里有 %d 个完全匹配，无法确定目标", len(exact))
-            return None
+            return sig, None
         l = exact[0]
-        return (400, (l["y0"] + l["y1"]) // 2)
+        return sig, (400, (l["y0"] + l["y1"]) // 2)
+
+    def exact_match_row(self) -> tuple[int, int] | None:
+        return self.search_state()[1]

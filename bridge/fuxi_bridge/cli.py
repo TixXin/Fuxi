@@ -3,6 +3,7 @@
   python -m fuxi_bridge.cli keys    --db-root <db_storage> [--pid N]
   python -m fuxi_bridge.cli tables  --db-root <db_storage> --db message/message_0.db --work <dir>
   python -m fuxi_bridge.cli send    --chat 文件传输助手 --text 你好
+  python -m fuxi_bridge.cli open    --chat 文件传输助手 -n 3 --fresh   # 只打开不发送，测耗时
 """
 
 from __future__ import annotations
@@ -58,6 +59,17 @@ def cmd_send(args) -> None:
         s.send_text(args.chat, args.text)
 
 
+def cmd_open(args) -> None:
+    from .sender import Sender
+
+    s = Sender(display=args.display)
+    for i in range(args.n):
+        dt = s.probe_open(args.chat)
+        print(f"第 {i + 1} 次：{dt:.2f} 秒")
+        if args.fresh:
+            s.forget_chat()
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     p = argparse.ArgumentParser(prog="fuxi_bridge.cli")
@@ -82,6 +94,13 @@ def main() -> None:
     s.add_argument("--image")
     s.add_argument("--display", default=":1")
     s.set_defaults(fn=cmd_send)
+
+    o = sub.add_parser("open", help="只打开会话并核对标题（不发送），打印耗时")
+    o.add_argument("--chat", required=True)
+    o.add_argument("-n", type=int, default=1)
+    o.add_argument("--fresh", action="store_true", help="每次都重新搜索（不走「已在会话」捷径）")
+    o.add_argument("--display", default=":1")
+    o.set_defaults(fn=cmd_open)
 
     args = p.parse_args()
     args.fn(args)

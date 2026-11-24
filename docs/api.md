@@ -40,7 +40,9 @@
 
 ### `GET /healthz`
 
-`{"ok": true, "wechat": true, "halted": ""}`：`wechat=false` 表示最近一次发送失败；
+`{"ok": true, "healthy": true, "problems": [], "wechat": true, "halted": "", "paused": false,
+"open_chat": {"n": 12, "p50": 1.5, "max": 1.9, "last": 0.1}}`：`wechat=false` 表示最近一次发送失败；
+`paused` 是文件传输助手 `/暂停` 的状态；`open_chat` 是最近几次「搜索并进入会话」的耗时（秒）；
 `halted` 非空表示已**熔断**——某次发送后核对失败（疑似发错会话）或发送中途出错，
 此后所有发送（bot 回复、提醒、API）一律拒绝。
 

@@ -31,12 +31,16 @@ import time
 from dataclasses import dataclass, field
 
 from . import messages, store
+from . import control
 from .allow import AllowList
 from .kernel import Kernel, KernelError
 from .messages import Message
 from .sender import Sender, SendError
 
 log = logging.getLogger("fuxi")
+
+# 交给内核的消息类型：文本 + 解析过的 appmsg（引用、链接、文件、拍一拍…）
+ACCEPT_TYPES = ("text",) + messages.APP_KINDS
 
 
 def _h(text: str) -> str:
@@ -107,6 +111,19 @@ class Bridge:
         self.last_poll_ok_at = 0.0
         self.kernel_ok_at = 0.0
         self.last_abort: tuple[float, str] | None = None  # 最近一次发送前拦截
+        # 暂停（文件传输助手 /暂停）：停自动回复与提醒，落盘以便重启后保持
+        self.paused_path = os.path.join(state, "paused")
+        self.paused = os.path.exists(self.paused_path)
+        self.control = control.Control(self)
+
+    def set_paused(self, on: bool) -> None:
+        self.paused = on
+        if on:
+            with open(self.paused_path, "w") as f:
+                f.write(time.strftime("%F %T\n"))
+        elif os.path.exists(self.paused_path):
+            os.remove(self.paused_path)
+        log.warning("自动回复与提醒已%s", "暂停" if on else "恢复")
 
     # ---------- 名字 ----------
     def name_of(self, username: str) -> str:
@@ -150,7 +167,8 @@ class Bridge:
     def _send_worker(self) -> None:
         while True:
             job = self.sendq.get()
-            if self.halted:
+            # 遥控回报（只发文件传输助手）在熔断时也放行，否则主人看不到 /状态
+            if self.halted and not (job.source == "control" and job.chat == "filehelper"):
                 job.error = f"发送已熔断：{self.halted}"
                 job.done.set()
                 continue
@@ -166,6 +184,7 @@ class Bridge:
                 if job.verify:
                     job.verified = self._verify(job, t0)
                     if not job.verified:
+                        self.sender.forget_chat()
                         self.halted = f"{time.strftime('%H:%M:%S')} 发往「{name}」后核对失败，可能发错会话"
                         log.critical("已熔断，停止一切发送：%s。确认无误后 POST /resume 恢复", self.halted)
                 self.last_send_ok = job.verified is not False
@@ -226,8 +245,10 @@ class Bridge:
         log.info("白名单已同步到内核（%s）", "全部放行" if "*" in items else f"{len(items)} 个会话")
 
     def _accept(self, m: Message) -> bool:
-        if m.type != "text" or not m.text.strip():
+        if m.type not in ACCEPT_TYPES or not m.text.strip():
             return False
+        if m.type == "pat" and m.patted != self.self_wxid:
+            return False  # 只关心拍了拍「我」
         if self.in_quiet_hours():
             return False
         if not self._allowed_chat(m.chat):
@@ -254,7 +275,11 @@ class Bridge:
             except Exception:
                 log.exception("读取 %s 失败", chat)
                 continue
-            acc = [m for m in new if self._accept(m)]
+            cmds = [m for m in new if control.is_command(m, self.self_wxid)]
+            for m in cmds:
+                if m.create_time >= time.time() - self.stale:
+                    self.pool.submit(self._run_command, m.text)
+            acc = [m for m in new if m not in cmds and self._accept(m)]
             if acc:
                 self.pending.setdefault(chat, []).extend(acc)
                 self.pending_at[chat] = time.monotonic()
@@ -265,12 +290,30 @@ class Bridge:
             if batch:
                 self.pool.submit(self._dispatch, chat, batch)
 
+    def _render(self, m: Message) -> str:
+        """交给内核的正文：引用消息在回复后面附上被引用的内容。"""
+        q = m.quote
+        if not q:
+            return m.text
+        who = "你" if q.get("sender") == self.self_wxid else (q.get("name") or self.name_of(q.get("sender", "")))
+        return f"{m.text}\n（引用 {who} 的消息：{q.get('text') or '[消息]'}）"
+
+    def _run_command(self, text: str) -> None:
+        reply = self.control.handle(text)
+        job = self.send(SendJob(chat="filehelper", text=reply, source="control"))
+        if job.error:
+            log.error("遥控回报发送失败：%s", job.error)
+
     def _payload(self, chat: str, batch: list[Message]) -> dict:
         last = batch[-1]
         names = self.self_names()
-        text = "\n".join(m.text for m in batch if m.sender == last.sender)
-        at_me = any(self.self_wxid in messages.at_users(m.source) for m in batch) or any(
-            f"@{n}" in text for n in names)
+        mine = [m for m in batch if m.sender == last.sender]
+        bare = "\n".join(m.text for m in mine)          # @ 识别只看本人写的内容，不看被引用的
+        text = "\n".join(self._render(m) for m in mine)
+        at_me = (any(self.self_wxid in messages.at_users(m.source) for m in batch)
+                 or any(f"@{n}" in bare for n in names)
+                 or any(m.type == "pat" for m in mine))
+        quote = next((m.quote for m in reversed(mine) if m.quote), {})
         sender_name = self.name_of(last.sender) if last.sender else ""
         return {
             "chat_id": chat,
@@ -280,12 +323,18 @@ class Bridge:
             "text": text,
             "msg_id": f"{chat}:{last.shard}:" + "|".join(str(m.local_id) for m in batch),
             "at_me": at_me,
-            "mentioned_names": [n for n in names if f"@{n}" in text],
+            "reply_to_bot": quote.get("sender") == self.self_wxid if quote else False,
+            "reply_to_name": quote.get("name", ""),
+            "reply_to_user_id": quote.get("sender", ""),
+            "mentioned_names": [n for n in names if f"@{n}" in bare],
             "self_names": names,
             "chat_title": self.name_of(chat) if last.is_group else "",
         }
 
     def _dispatch(self, chat: str, batch: list[Message]) -> None:
+        if self.paused:
+            log.info("已暂停，不处理 %s 的 %d 条消息", self.name_of(chat), len(batch))
+            return
         with self.chat_locks[chat]:
             payload = self._payload(chat, batch)
             log.info("→ 内核 %s [%s] %s", payload["chat_title"] or self.name_of(chat), payload["senderName"],
@@ -305,6 +354,8 @@ class Bridge:
                 return
             mention = resp.get("mention") or ""
             for i, b in enumerate(bubbles):
+                if self.paused:
+                    return
                 if not self.rate_ok(chat):
                     log.warning("超过发送频率上限，丢弃 %s 的剩余 %d 条回复", self.name_of(chat), len(bubbles) - i)
                     return
@@ -339,6 +390,8 @@ class Bridge:
     def _reminder_loop(self) -> None:
         while True:
             time.sleep(5)
+            if self.paused:
+                continue  # 不取：取出即标记 sending，暂停期间留在内核里
             try:
                 items = self.kernel.reminders_due()
             except KernelError as e:

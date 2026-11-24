@@ -211,6 +211,19 @@ curl -s -H "Authorization: Bearer $T" -X POST 127.0.0.1:8790/resume
 
 也可以在手机上给**文件传输助手**发 `/恢复`（见下节）。重启 bridge 也会解除熔断，但请先确认原因。
 
+### 网页管理台
+
+在浏览器里看状态、暂停/恢复（后续还有对话流、设置、白名单……），架构见 [admin.md](admin.md)。服务器上需要：
+
+1. `.env` 设 `FUXI_ADMIN_TOKEN`（`openssl rand -hex 16`），重新部署 kernel（8791 端口挂在内核容器上）和 bridge。
+2. 反代（OpenResty）新建一个站点：`auth_basic` + htpasswd（和网页版微信同一组用户名密码），`location /` 反代到
+   `127.0.0.1:8791`，并 `proxy_set_header X-Fuxi-Admin <口令>`、`proxy_set_header Authorization ""`；
+   `location = /api/events` 另加 `proxy_buffering off` 和较长的 `proxy_read_timeout`；统一
+   `add_header Cache-Control "private, no-store" always`（前面有 CDN 时防缓存）。
+3. 自测：不带认证 401；带认证能打开页面；写操作不带 `X-Requested-With: fuxi-admin` 是 403。
+
+域名、htpasswd 位置等服务器信息不写进仓库。
+
 ### 文件传输助手遥控
 
 用 bot 这个微信号在**文件传输助手**里发指令，桥接执行后回报到文件传输助手。只认本人发的、

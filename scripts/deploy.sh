@@ -150,7 +150,7 @@ backups() {
   echo "==> 服务器上立即备份一次"
   remote ssh "$FUXI_HOST" "docker exec fuxi-watchdog /watchdog.sh backup | tail -1"
   mkdir -p "$dest" && chmod 700 "$dest"
-  echo "==> 拉回 $dest（只拉本机还没有的）"
+  echo "==> 拉回 ${dest}（只拉本机还没有的）"
   local have
   have=$(ls "$dest" 2>/dev/null || true)
   for f in $(ssh "$FUXI_HOST" "ls -1 '$FUXI_DIR/backups' 2>/dev/null | grep '\\.tgz\$'"); do

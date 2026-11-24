@@ -287,6 +287,80 @@ class CareTest(unittest.TestCase):
         self.assertIn("当前不发：已暂停", self.c.brief())
 
 
+class StickerTest(unittest.TestCase):
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        os.makedirs(os.path.join(self.d, "stickers", "开心"))
+        self.file = os.path.join(self.d, "stickers", "开心", "a.gif")
+        open(self.file, "wb").write(b"GIF89a....")
+        b = bare_bridge()
+        b.kernel_data = self.d
+        b.paused, b.halted = False, ""
+        b.rate_ok = lambda chat: True
+        b.sent_times = collections.deque()
+        b.kernel = mock.Mock()
+        b.kernel.sticker_claim.return_value = {"id": "s1", "path": "/app/data/stickers/开心/a.gif"}
+        b.send = mock.Mock(return_value=mock.Mock(ok=True, verified=True, error="", t_sent=None))
+        self.b = b
+        self.item = {"id": "s1", "path": "/app/data/stickers/开心/a.gif", "generation": 3, "chatUsername": "wxid_a"}
+
+    def test_path_mapping(self):
+        self.assertEqual(self.b._sticker_file("/app/data/stickers/开心/a.gif"), self.file)
+
+    @mock.patch("fuxi_bridge.app.time.sleep")
+    def test_send_after_text_and_ack(self, _sleep):
+        self.b._send_sticker("wxid_a", self.item, delivered=True)
+        self.assertEqual(self.b.send.call_args[0][0].sticker, self.file)
+        self.b.kernel.sticker_ack.assert_called_once_with("s1", "confirmed", "")
+
+    def test_cancel_when_text_not_delivered(self):
+        self.b._send_sticker("wxid_a", self.item, delivered=False)
+        self.b.kernel.sticker_cancel.assert_called_once_with(self.item)
+        self.b.kernel.sticker_claim.assert_not_called()
+        self.b.send.assert_not_called()
+
+    def test_missing_file_acks_failed(self):
+        self.b.kernel.sticker_claim.return_value = {"id": "s1", "path": "/app/data/stickers/开心/none.gif"}
+        self.b._send_sticker("wxid_a", self.item, delivered=True)
+        self.assertEqual(self.b.kernel.sticker_ack.call_args[0][1], "failed")
+        self.b.send.assert_not_called()
+
+    @mock.patch("fuxi_bridge.app.time.sleep")
+    def test_dispatch_text_failure_cancels_sticker(self, _sleep):
+        b = self.b
+        b.chat_locks = collections.defaultdict(__import__("threading").Lock)
+        b.reader.revoked = mock.Mock(return_value=set())
+        b.kernel.webhook.return_value = {"action": "reply", "bubbles": ["好", "的"], "sticker": self.item}
+        b.kernel.send_permission.return_value = (True, "")
+        b.first_delay = lambda t, s: 0
+        b.typing_delay = lambda t: 0
+        b.send = mock.Mock(return_value=mock.Mock(ok=False, error="放弃发送", t_sent=None))
+        b._dispatch_traced("wxid_a", [msg(chat="wxid_a", text="hi")], timing.Trace(0, 0))
+        self.assertEqual(b.send.call_count, 1)          # 第一个气泡失败，后面的不再发
+        b.kernel.sticker_cancel.assert_called_once()
+
+    def test_own_sticker_echo_is_ignored_in_filehelper(self):
+        import time as _t
+        b = self.b
+        b.in_quiet_hours = lambda: False
+        b.allowlist = AllowList(os.path.join(self.d, "allow.txt"), "filehelper")
+        b.sent_hashes, b.reply_self, b.stale = collections.deque(), True, 120
+        now = int(_t.time())
+        b.media_sent = {"filehelper": now}
+        echo = msg(chat="filehelper", sender=SELF, is_self=True, type="emoji", text="[动画表情]", create_time=now)
+        self.assertFalse(b._accept(echo))
+        later = msg(chat="filehelper", sender=SELF, is_self=True, type="emoji", text="[动画表情]", create_time=now + 60)
+        self.assertTrue(b._accept(later))
+
+    def test_save_helpers(self):
+        self.assertEqual(control.sticker_ext(b"GIF89a..."), ".gif")
+        self.assertEqual(control.sticker_ext(b"\x89PNG\r\n\x1a\nxx"), ".png")
+        self.assertEqual(control.sticker_ext(b"<html>"), "")
+        xml = '<msg><emoji md5="a" cdnurl="http://x/y?m=1&amp;f=2"/></msg>'
+        self.assertEqual(messages.emoji_url(xml), "http://x/y?m=1&f=2")
+        self.assertEqual(messages.emoji_url('<msg><emoji md5="a" len="9"/></msg>'), "")
+
+
 class SpeedTest(unittest.TestCase):
     def test_section_name_tolerates_icon_noise(self):
         names = Sender.SECTIONS_ALL

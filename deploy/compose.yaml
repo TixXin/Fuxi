@@ -17,7 +17,6 @@ services:
     logging: *logging
     environment:
       FUXI_KERNEL_TOKEN: ${FUXI_KERNEL_TOKEN:?请在 .env 设置 FUXI_KERNEL_TOKEN}
-      FUXI_OWNER_WXIDS: ${FUXI_MASTER:-}   # 主人，内核启动时就写入（桥接启动后也会再同步一次）
       FUXI_OWNER_WXIDS: ${FUXI_OWNER_WXIDS:-}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-}
@@ -53,13 +52,15 @@ services:
       FUXI_RATE_CHAT: ${FUXI_RATE_CHAT:-6}
       FUXI_RATE_GLOBAL: ${FUXI_RATE_GLOBAL:-20}
       FUXI_QUIET: ${FUXI_QUIET:-}
-      FUXI_MASTER: ${FUXI_MASTER:-}
+      FUXI_OWNER_WXIDS: ${FUXI_OWNER_WXIDS:-}
       FUXI_CARE: ${FUXI_CARE:-1}
+      FUXI_STICKERS: ${FUXI_STICKERS:-}
       DISPLAY: ":1"
     volumes:
       - ${WX_CONFIG_DIR:?请在 .env 设置 WX_CONFIG_DIR}:/wxconfig:ro   # 微信数据，只读
       - ${X11_SOCKET_DIR:?请在 .env 设置 X11_SOCKET_DIR}:/tmp/.X11-unix
       - bridge-state:/state                  # 水位
+      - kernel-data:/kernel-data:ro          # 表情包文件（内核挑图，桥接发送）
     tmpfs:
       - /work:size=1g,mode=0700              # 解密库、密钥缓存、待发图片，只在内存里
 

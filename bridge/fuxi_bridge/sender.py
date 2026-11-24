@@ -28,6 +28,10 @@ class SendError(Exception):
 
 
 class Sender:
+    # 与微信容器共享的目录（两边路径相同）：表情包按「文件」粘贴，微信要能读到原文件。
+    # 借用已共享的 X11 socket 目录，免得为此重建微信容器（重建要手机确认登录）。
+    SHARE_DIR = os.environ.get("FUXI_SHARE_DIR", "/tmp/.X11-unix/fuxi")
+
     def __init__(self, display: str = ":1", step_delay: float = 0.3):
         self.env = {**os.environ, "DISPLAY": display}
         self.delay = step_delay
@@ -67,6 +71,29 @@ class Sender:
         mime = "image/png" if path.lower().endswith(".png") else "image/jpeg"
         with open(path, "rb") as f:
             self._xclip(f.read(), "-t", mime)
+
+    def _share(self, path: str) -> str:
+        """把文件复制到共享目录，返回微信那边看到的路径；顺手清掉 10 分钟前的旧文件。"""
+        import shutil
+        import uuid
+
+        os.makedirs(self.SHARE_DIR, exist_ok=True)
+        now = time.time()
+        for n in os.listdir(self.SHARE_DIR):
+            f = os.path.join(self.SHARE_DIR, n)
+            try:
+                if now - os.path.getmtime(f) > 600:
+                    os.remove(f)
+            except OSError:
+                pass
+        ext = os.path.splitext(path)[1].lower() or ".gif"
+        dst = os.path.join(self.SHARE_DIR, uuid.uuid4().hex[:12] + ext)
+        shutil.copyfile(path, dst)
+        os.chmod(dst, 0o644)
+        return dst
+
+    def _clip_file(self, shared: str) -> None:
+        self._xclip(f"file://{shared}\r\n".encode(), "-t", "text/uri-list")
 
     def _windows(self) -> list[tuple[str, int, int]]:
         try:
@@ -338,6 +365,19 @@ class Sender:
             time.sleep(0.7)
             self._key("Return")
             log.info("已发送图片到 %s：%s", chat, os.path.basename(path))
+
+    def send_sticker(self, chat: str, path: str) -> None:
+        """发表情包：按文件粘贴，GIF 会原样作为动画表情发出（按图片粘贴会被转成静态图）。"""
+        with self._lock, self._fresh_on_error():
+            try:
+                shared = self._share(path)
+            except OSError as e:
+                raise SendError(f"表情包文件准备失败（未发出）：{e}，放弃发送") from e
+            self._open_or_abort(chat)
+            self._paste(lambda: self._clip_file(shared))
+            time.sleep(0.7)
+            self._key("Return")
+            log.info("已发送表情包到 %s：%s", chat, os.path.basename(path))
 
     def probe_open(self, chat: str) -> float:
         """只打开会话并核对标题、不发送，返回耗时（遥控 /测试 与调试用）。"""

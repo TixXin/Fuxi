@@ -10,6 +10,7 @@
 - POST /api/bridge/heartbeat     每 20 秒
 - POST /api/config {patch}       改配置并立即生效（用于同步白名单、主人）
 - GET  /api/care/due · GET /api/care · POST /api/care/sent   主动搭话（见 care.py）
+- POST /api/stickers/claim|ack|cancel|upload                  表情包（webhook 回复里带 sticker 任务）
 """
 
 from __future__ import annotations
@@ -115,6 +116,27 @@ class Kernel:
 
     def care_sent(self, chat: str, text: str, group: bool, sid: str) -> None:
         self._req("POST", "/api/care/sent", {"chat": chat, "text": text, "group": group, "id": sid}, timeout=10)
+
+    def set_stickers(self, on: bool) -> None:
+        r = self._req("POST", "/api/config", {"patch": {"features": {"stickers": bool(on)}}}, timeout=15)
+        if not r.get("ok"):
+            raise KernelError(f"内核拒绝表情包开关：{r.get('error')}")
+
+    def sticker_claim(self, sid: str) -> dict:
+        return self._req("POST", "/api/stickers/claim", {"id": sid}, timeout=10).get("item") or {}
+
+    def sticker_ack(self, sid: str, status: str, error: str = "") -> None:
+        """status：confirmed（核对到了）/ unconfirmed（发了没核对到）/ failed / cancelled"""
+        self._req("POST", "/api/stickers/ack", {"id": sid, "status": status, "error": error[:400]}, timeout=10)
+
+    def sticker_cancel(self, item: dict) -> None:
+        self._req("POST", "/api/stickers/cancel", {"id": item.get("id"), "generation": item.get("generation"),
+                                                   "chatUsername": item.get("chatUsername")}, timeout=10)
+
+    def sticker_upload(self, emotion: str, name: str, data: bytes) -> list:
+        import base64
+        body = {"emotion": emotion, "files": [{"name": name, "data": base64.b64encode(data).decode()}]}
+        return self._req("POST", "/api/stickers/upload", body, timeout=60).get("uploaded") or []
 
     def heartbeat(self, info: dict) -> None:
         self._req("POST", "/api/bridge/heartbeat", {"platform": "wechat", **info}, timeout=10)

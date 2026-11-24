@@ -217,6 +217,25 @@ class MessageReader:
                     out.add(m.msg_id)
         return out
 
+    def last_emoji(self, chat: str, since: int) -> str:
+        """chat 里 since（秒）之后最新一条动画表情的原始 XML；没有返回空串。"""
+        table = "Msg_" + hashlib.md5(chat.encode()).hexdigest()
+        best: tuple[int, str] = (0, "")
+        for shard in self.shards():
+            con = self.cache.connect(shard)
+            try:
+                if not con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone():
+                    continue
+                r = con.execute(
+                    f'SELECT sort_seq, message_content, compress_content FROM "{table}" '
+                    "WHERE (local_type & 4294967295) = 47 AND create_time >= ? ORDER BY sort_seq DESC LIMIT 1",
+                    (since,)).fetchone()
+                if r and r["sort_seq"] > best[0]:
+                    best = (r["sort_seq"], _decode(r["message_content"], r["compress_content"]))
+            finally:
+                con.close()
+        return best[1]
+
     def sessions(self, limit: int = 200) -> list[dict]:
         con = self.cache.connect("session/session.db")
         try:
@@ -371,6 +390,12 @@ def parse_media(mtype: str, text: str) -> str:
         nick = _attr(root, "msg", "nickname")
         return f"[名片] {nick}".rstrip()
     return f"[{mtype}]"
+
+
+def emoji_url(xml: str) -> str:
+    """动画表情原图的下载地址（cdnurl，明文）。自己从电脑端发的表情没有这个字段。"""
+    root = _xml(xml)
+    return _attr(root, "emoji", "cdnurl")
 
 
 def parse_appmsg(text: str) -> dict | None:

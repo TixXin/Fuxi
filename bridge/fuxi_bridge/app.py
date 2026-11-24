@@ -66,6 +66,7 @@ class SendJob:
     text: str | None = None
     source: str = "bot"     # bot（自动回复，受限速）| reminder | api
     image: str | None = None
+    sticker: str | None = None  # 表情包文件（按文件粘贴，GIF 保持动图）
     verify: bool = True
     done: threading.Event = field(default_factory=threading.Event)
     ok: bool = False
@@ -108,6 +109,7 @@ class Bridge:
 
         self.sendq: "queue.Queue[SendJob]" = queue.Queue()
         self.sent_hashes: collections.deque[str] = collections.deque(maxlen=500)
+        self.media_sent: dict[str, float] = {}   # 会话 → bot 最近一次发图/表情包的时刻（认出自己的回声）
         self.pending: dict[str, list[Message]] = {}
         self.pending_at: dict[str, float] = {}
         self.pending_seen: dict[str, float] = {}   # 最后一条待处理消息被读到的时刻（time.time）
@@ -127,9 +129,11 @@ class Bridge:
         # 暂停（文件传输助手 /暂停）：停自动回复与提醒，落盘以便重启后保持
         self.paused_path = os.path.join(state, "paused")
         self.paused = os.path.exists(self.paused_path)
-        self.masters = [x.strip() for x in env.get("FUXI_MASTER", "").split(",") if x.strip()]
+        self.masters = [x.strip() for x in env.get("FUXI_OWNER_WXIDS", "").split(",") if x.strip()]
         self.care_on = env.get("FUXI_CARE", "1") != "0"
         self.care = care.Care(self, os.path.join(state, "care.json"))
+        self.stickers_env = env.get("FUXI_STICKERS", "").strip()        # 1 / 0；留空 = 不改内核设置
+        self.kernel_data = env.get("FUXI_KERNEL_DATA", "/kernel-data")  # 内核 data 卷（只读）挂在这里
         self.control = control.Control(self)
 
     def set_paused(self, on: bool) -> None:
@@ -224,6 +228,10 @@ class Bridge:
                 self.sender.send_text(name, job.text)
             if job.image:
                 self.sender.send_image(name, job.image)
+            if job.sticker:
+                self.sender.send_sticker(name, job.sticker)
+            if job.image or job.sticker:
+                self.media_sent[job.chat] = time.time()
             job.ok = True
             job.t_sent = time.monotonic()
             job.open_s = self.sender.last_open
@@ -252,6 +260,8 @@ class Bridge:
             try:
                 for mtype, text in self.reader.self_sent_since(job.chat, t0):
                     if job.image and mtype == "image":
+                        return True
+                    if job.sticker and mtype in ("emoji", "image"):
                         return True
                     if job.text is not None and _squash(text) == want:
                         return True
@@ -298,6 +308,8 @@ class Bridge:
             return False
         if _h(m.text) in self.sent_hashes:
             return False  # 自己刚发的回复
+        if m.is_self and m.type in ("image", "emoji") and abs(m.create_time - self.media_sent.get(m.chat, 0)) < 15:
+            return False  # 自己刚发的图片/表情包（文件传输助手自测时会读回来）
         if m.is_self and not (self.reply_self and m.chat == "filehelper"):
             return False
         if m.chat.startswith("gh_") or m.sender.startswith("gh_") or m.chat.endswith("@openim"):
@@ -406,37 +418,79 @@ class Bridge:
             except KernelError as e:
                 log.error("内核 webhook 失败：%s", e)
                 return
-            if resp.get("action") != "reply":
-                log.info("内核不回复：%s", resp.get("reason") or resp.get("skipped") or resp.get("action"))
+            sticker = resp.get("sticker") or None   # 内核已为这次回复预留的表情包任务
+            delivered = False
+            try:
+                delivered = self._deliver(chat, batch, resp, tr, k0)
+            finally:
+                if sticker:
+                    self._send_sticker(chat, sticker, delivered)
+
+    def _deliver(self, chat: str, batch: list[Message], resp: dict, tr: "timing.Trace", k0: float) -> bool:
+        """发出内核的文字回复；全部气泡都发成功才返回 True（随后才发表情包）。"""
+        if resp.get("action") != "reply":
+            log.info("内核不回复：%s", resp.get("reason") or resp.get("skipped") or resp.get("action"))
+            return False
+        bubbles = [b for b in (resp.get("bubbles") or [resp.get("reply") or ""]) if b and b.strip()]
+        allowed, reason = self.kernel.send_permission(chat, self.name_of(chat))
+        if not allowed:
+            log.info("内核不允许在 %s 发言：%s", chat, reason)
+            return False
+        tr.add("kernel", time.monotonic() - k0)
+        mention = resp.get("mention") or ""
+        for i, b in enumerate(bubbles):
+            if self.paused:
+                return False
+            if not self.rate_ok(chat):
+                log.warning("超过发送频率上限，丢弃 %s 的剩余 %d 条回复", self.name_of(chat), len(bubbles) - i)
+                return False
+            text = f"@{mention} {b}" if (i == 0 and mention and chat.endswith("@chatroom")) else b
+            delay = self.first_delay(text, tr.s["kernel"]) if i == 0 else self.typing_delay(text)
+            time.sleep(delay)
+            tr.add("typing", delay)
+            if i == 0 and self._revoked(batch):
+                log.info("%s 在生成回复期间撤回了消息，放弃这次回复", self.name_of(chat))
+                return False
+            self.sent_times.append((time.time(), chat))
+            job = self.send(SendJob(chat=chat, text=text))
+            if not job.ok:
+                return False
+            if job.t_sent:
+                tr.add("queue", job.t_start - job.t_queued)
+                tr.add("open", job.open_s)
+                tr.add("paste", job.t_sent - job.t_start - job.open_s)
+                tr.add("verify", job.t_done - job.t_sent)
+                tr.bubble_sent(time.time() - (time.monotonic() - job.t_sent))
+        return True
+
+    def _sticker_file(self, path: str) -> str:
+        """内核容器里的路径（/app/data/...）→ 桥接这边只读挂载的同一个文件。"""
+        for prefix in ("/app/data/", "data/"):
+            if path.startswith(prefix):
+                return os.path.join(self.kernel_data, path[len(prefix):])
+        return path
+
+    def _send_sticker(self, chat: str, item: dict, delivered: bool) -> None:
+        """文字发完后发内核预留的表情包：领取 → 发送 → 回执。文字没发成就取消预留。"""
+        sid = item.get("id") or ""
+        try:
+            if not delivered or self.paused or self.halted or not self.rate_ok(chat):
+                self.kernel.sticker_cancel(item)
+                log.info("取消表情包任务（文字回复没发完或已暂停）")
                 return
-            bubbles = [b for b in (resp.get("bubbles") or [resp.get("reply") or ""]) if b and b.strip()]
-            allowed, reason = self.kernel.send_permission(chat, self.name_of(chat))
-            if not allowed:
-                log.info("内核不允许在 %s 发言：%s", chat, reason)
+            got = self.kernel.sticker_claim(sid)
+            path = self._sticker_file(got.get("path") or item.get("path") or "")
+            if not os.path.isfile(path):
+                self.kernel.sticker_ack(sid, "failed", "表情包文件桥接读不到（内核 data 卷没挂载？）")
+                log.error("表情包文件读不到：%s", path)
                 return
-            tr.add("kernel", time.monotonic() - k0)
-            mention = resp.get("mention") or ""
-            for i, b in enumerate(bubbles):
-                if self.paused:
-                    return
-                if not self.rate_ok(chat):
-                    log.warning("超过发送频率上限，丢弃 %s 的剩余 %d 条回复", self.name_of(chat), len(bubbles) - i)
-                    return
-                text = f"@{mention} {b}" if (i == 0 and mention and chat.endswith("@chatroom")) else b
-                delay = self.first_delay(text, tr.s["kernel"]) if i == 0 else self.typing_delay(text)
-                time.sleep(delay)
-                tr.add("typing", delay)
-                if i == 0 and self._revoked(batch):
-                    log.info("%s 在生成回复期间撤回了消息，放弃这次回复", self.name_of(chat))
-                    return
-                self.sent_times.append((time.time(), chat))
-                job = self.send(SendJob(chat=chat, text=text))
-                if job.ok and job.t_sent:
-                    tr.add("queue", job.t_start - job.t_queued)
-                    tr.add("open", job.open_s)
-                    tr.add("paste", job.t_sent - job.t_start - job.open_s)
-                    tr.add("verify", job.t_done - job.t_sent)
-                    tr.bubble_sent(time.time() - (time.monotonic() - job.t_sent))
+            time.sleep(random.uniform(0.8, 2.0))
+            self.sent_times.append((time.time(), chat))
+            job = self.send(SendJob(chat=chat, sticker=path))
+            status = "failed" if not job.ok else ("confirmed" if job.verified else "unconfirmed")
+            self.kernel.sticker_ack(sid, status, job.error)
+        except KernelError as e:
+            log.warning("表情包任务处理失败：%s", e)
 
     def _revoked(self, batch: list[Message]) -> set[str]:
         try:
@@ -537,6 +591,12 @@ class Bridge:
                 log.info("主人已同步到内核：%s", "、".join(self.name_of(m) for m in self.masters))
             except Exception as e:
                 log.warning("同步主人到内核失败：%s", e)
+        if self.stickers_env in ("0", "1"):
+            try:
+                self.kernel.set_stickers(self.stickers_env == "1")
+                log.info("表情包已%s", "开启" if self.stickers_env == "1" else "关闭")
+            except Exception as e:
+                log.warning("同步表情包开关到内核失败：%s", e)
         self.pending_boot = self._changed_chats()  # 记下各会话进度；过期窗口内有动静的稍后补处理
         threading.Thread(target=self._send_worker, name="send", daemon=True).start()
         threading.Thread(target=self._reminder_loop, name="reminders", daemon=True).start()

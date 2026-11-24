@@ -34,7 +34,7 @@ REASONS = {
     "out_of_window": "不在允许的时间段",
     "daily_cap": "今天已达上限",
     "too_soon": "离上次太近",
-    "whitelist_filtered": "没有可找的人（主人没设置？见 FUXI_MASTER）",
+    "whitelist_filtered": "没有可找的人（主人没设置？见 FUXI_OWNER_WXIDS）",
     "whitelist_empty": "没有可找的人（白名单为空）",
     "all_busy": "对方正在聊天，不打扰",
 }

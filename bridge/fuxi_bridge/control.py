@@ -11,6 +11,7 @@
   /允许 名字或ID      加入白名单（名字须唯一匹配：备注/昵称/群名）
   /禁止 名字或ID      移出白名单
   /测试 名字          只打开该会话并核对标题、不发送，回报耗时
+  /存表情 [分类]      把 10 分钟内发到这里的最新一个表情存进表情包库（分类默认「开心」，还有傲娇、炸毛）
   /搭话              立即检查一次主动搭话（仍受内核时间窗/间隔/上限约束），回报结果
 """
 
@@ -39,6 +40,21 @@ def is_command(m: "Message", self_wxid: str) -> bool:
 def parse(text: str) -> tuple[str, str]:
     parts = text.strip().split(maxsplit=1)
     return parts[0], (parts[1].strip() if len(parts) > 1 else "")
+
+
+STICKER_KINDS = {"开心": "happy", "傲娇": "cute", "撒娇": "cute", "炸毛": "angry"}
+
+
+def sticker_ext(data: bytes) -> str:
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return ".gif"
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return ".png"
+    if data[:3] == b"\xff\xd8\xff":
+        return ".jpg"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return ".webp"
+    return ""
 
 
 class Control:
@@ -142,6 +158,33 @@ class Control:
         r = b.care.tick()
         return "已发出一次主动搭话。" if r == "sent" else f"这次不发：{r}"
 
+    def save_sticker(self, arg: str) -> str:
+        import urllib.request
+
+        from . import messages
+        b = self.b
+        label = arg.strip() or "开心"
+        emotion = STICKER_KINDS.get(label)
+        if not emotion:
+            return f"不认识的分类「{label}」，可选：开心、傲娇、炸毛。"
+        xml = b.reader.last_emoji("filehelper", int(time.time()) - 600)
+        if not xml:
+            return "10 分钟内没在文件传输助手里看到表情。先从手机往文件传输助手发一个表情，再发 /存表情。"
+        url = messages.emoji_url(xml)
+        if not url.startswith(("http://", "https://")):
+            return "这个表情没有下载地址（电脑端发的表情没有），请从手机发一次。"
+        with urllib.request.urlopen(url, timeout=20) as r:
+            data = r.read(4 * 1024 * 1024 + 1)
+        ext = sticker_ext(data)
+        if not ext:
+            return "下载到的不是 GIF/PNG/JPG/WebP 图片，存不了。"
+        if len(data) > 4 * 1024 * 1024:
+            return "这个表情超过 4 MB，存不了。"
+        import hashlib
+        name = "wx-" + hashlib.md5(data).hexdigest()[:12] + ext
+        b.kernel.sticker_upload(emotion, name, data)
+        return f"已存进「{label}」（{len(data) // 1024} KB）。"
+
     # ---- 工具 ----
     def _allow_brief(self) -> str:
         items = self.b.allowlist.items
@@ -174,4 +217,5 @@ COMMANDS = {
     "/禁止": "deny",
     "/测试": "test_open",
     "/搭话": "care",
+    "/存表情": "save_sticker",
 }

@@ -17,6 +17,7 @@ services:
     logging: *logging
     environment:
       FUXI_KERNEL_TOKEN: ${FUXI_KERNEL_TOKEN:?请在 .env 设置 FUXI_KERNEL_TOKEN}
+      FUXI_OWNER_WXIDS: ${FUXI_MASTER:-}   # 主人，内核启动时就写入（桥接启动后也会再同步一次）
       FUXI_OWNER_WXIDS: ${FUXI_OWNER_WXIDS:-}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-}

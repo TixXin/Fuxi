@@ -1,53 +1,130 @@
 #!/usr/bin/env bash
 # 在本机构建镜像并部署到服务器（服务器拉 Docker Hub 慢，所以本机构建再传）。
 #
-#   FUXI_HOST=<ssh 别名> FUXI_DIR=<服务器上的部署目录> scripts/deploy.sh [bridge|kernel|watchdog|all]
+#   scripts/deploy.sh [bridge|kernel|watchdog|all]     构建并部署（默认 all）
+#   scripts/deploy.sh rollback <服务> [版本]            退回上一版（或指定版本），不重新构建
+#   scripts/deploy.sh versions                         服务器上的部署记录和可回滚的版本
 #
-# 服务器地址与目录只从环境变量读，不写进仓库。需要本机 Docker 在运行。
+# 需要环境变量 FUXI_HOST（ssh 别名）、FUXI_DIR（服务器上的部署目录），不写进仓库。需要本机 Docker 在运行。
+#
+# 版本：镜像标签用 git 提交号（如 fuxi-bridge:941eb30）；工作区有没提交的改动时加 -dirty<月日时分>。
+# compose 一直用 :dev，部署 / 回滚就是把 :dev 指向某个版本再重建容器。
+# 服务器上的 $FUXI_DIR/deploys.log 记每次部署（时间 服务 版本 动作），每个服务保留最近 KEEP 个版本镜像。
 set -euo pipefail
 
 : "${FUXI_HOST:?请设置 FUXI_HOST（ssh 别名）}"
 : "${FUXI_DIR:?请设置 FUXI_DIR（服务器上的部署目录）}"
-what="${1:-all}"
 root="$(cd "$(dirname "$0")/.." && pwd)"
+KEEP=5
+LOG="$FUXI_DIR/deploys.log"
 
-case "$what" in
-  bridge) services=(bridge) ;;
-  kernel) services=(kernel) ;;
-  watchdog) services=(watchdog) ;;
-  all) services=(kernel bridge watchdog) ;;
-  *) echo "用法：$0 [bridge|kernel|watchdog|all]" >&2; exit 2 ;;
-esac
+usage() { sed -n '4,6p' "$0" | sed 's/^# *//' >&2; exit 2; }
 
-images=()
-for s in "${services[@]}"; do
-  echo "==> 构建 fuxi-$s:dev（linux/amd64）"
-  docker build -q --platform linux/amd64 -t "fuxi-$s:dev" "$root/$s" >/dev/null
-  images+=("fuxi-$s:dev")
-done
-
-echo "==> 传输镜像到 $FUXI_HOST"
-docker save "${images[@]}" | gzip -1 | ssh "$FUXI_HOST" docker load
-
-echo "==> 更新 compose.yaml"
-ssh "$FUXI_HOST" "mkdir -p '$FUXI_DIR' && chmod 700 '$FUXI_DIR'"
-scp -q "$root/deploy/compose.yaml" "$FUXI_HOST:$FUXI_DIR/compose.yaml"
-ssh "$FUXI_HOST" "test -f '$FUXI_DIR/.env'" || {
-  echo "!! 服务器上还没有 $FUXI_DIR/.env：按 deploy/.env.example 创建（chmod 600）后再运行本脚本" >&2
-  exit 1
+services_of() {
+  case "$1" in
+    bridge|kernel|watchdog) echo "$1" ;;
+    all) echo "kernel bridge watchdog" ;;
+    *) usage ;;
+  esac
 }
 
-echo "==> 启动"
-if [ "$what" = bridge ] || [ "$what" = watchdog ]; then
-  ssh "$FUXI_HOST" "cd '$FUXI_DIR' && docker compose up -d --no-deps $what"
-elif [ "$what" = kernel ]; then
-  ssh "$FUXI_HOST" "cd '$FUXI_DIR' && docker compose up -d kernel && docker compose up -d --no-deps --force-recreate bridge"
-else
-  # 桥接共用内核的网络命名空间：内核重建后桥接必须跟着重建，否则还挂在旧的命名空间上
-  ssh "$FUXI_HOST" "cd '$FUXI_DIR' && docker compose up -d kernel && docker compose up -d --no-deps --force-recreate bridge && docker compose up -d --no-deps watchdog"
-fi
+# 重建容器：桥接共用内核的网络命名空间，内核重建后桥接必须跟着重建，否则还挂在旧的命名空间上
+restart() {
+  local what="$1"
+  case "$what" in
+    bridge|watchdog) ssh "$FUXI_HOST" "cd '$FUXI_DIR' && docker compose up -d --no-deps --force-recreate $what" ;;
+    kernel) ssh "$FUXI_HOST" "cd '$FUXI_DIR' && docker compose up -d --force-recreate kernel && docker compose up -d --no-deps --force-recreate bridge" ;;
+    all) ssh "$FUXI_HOST" "cd '$FUXI_DIR' && docker compose up -d --force-recreate kernel && docker compose up -d --no-deps --force-recreate bridge && docker compose up -d --no-deps --force-recreate watchdog" ;;
+  esac
+}
 
-echo "==> 等待桥接就绪（首次扫描密钥约 30 秒）"
-ssh "$FUXI_HOST" "for i in \$(seq 1 40); do docker logs --since 2m fuxi-bridge 2>&1 | grep -q '开始监听' && break; sleep 3; done
-  docker ps --filter name=fuxi --format '{{.Names}}\t{{.Status}}'
-  docker logs --since 2m fuxi-bridge 2>&1 | grep -E '解出密钥|白名单已|开始监听|ERROR|CRITICAL' | tail -5 | sed -E 's/wxid_[a-z0-9]+/wxid_<id>/g'"
+wait_ready() {
+  echo "==> 等待桥接就绪（首次扫描密钥约 30 秒）"
+  ssh "$FUXI_HOST" "for i in \$(seq 1 40); do docker logs --since 2m fuxi-bridge 2>&1 | grep -q '开始监听' && break; sleep 3; done
+    docker ps --filter name=fuxi --format '{{.Names}}\t{{.Status}}\t{{.Image}}'
+    docker logs --since 2m fuxi-bridge 2>&1 | grep -E '解出密钥|白名单已|开始监听|ERROR|CRITICAL' | tail -5 | sed -E 's/wxid_[a-z0-9]+/wxid_<id>/g'"
+}
+
+# 服务器上：把 :dev 指向版本 $2，记日志；第一次用版本部署时，把原来没有版本号的 :dev 存成 initial 方便回滚
+point_dev() {
+  local svc="$1" tag="$2" action="$3"
+  ssh "$FUXI_HOST" "set -e
+    img=fuxi-$svc
+    cur=\$(docker image inspect -f '{{.Id}}' \$img:dev 2>/dev/null || true)
+    if [ -n \"\$cur\" ] && ! grep -q \" $svc \" '$LOG' 2>/dev/null; then
+      docker tag \$img:dev \$img:initial
+      echo \"\$(date '+%F %T') $svc initial 原有版本\" >> '$LOG'
+    fi
+    docker tag \$img:$tag \$img:dev
+    echo \"\$(date '+%F %T') $svc $tag $action\" >> '$LOG'
+    # 只留最近 $KEEP 个版本（按部署记录从新到旧；正在用的 :dev 指向的那个不会被删掉）
+    keep=\$(grep \" $svc \" '$LOG' | awk '{print \$4}' | tac | awk '!s[\$0]++' | head -n $KEEP)
+    for t in \$(docker images \$img --format '{{.Tag}}' | grep -vx dev); do
+      echo \"\$keep\" | grep -qx \"\$t\" || docker rmi -f \$img:\$t >/dev/null 2>&1 || true
+    done"
+}
+
+deploy() {
+  local what="$1" svcs tag images=()
+  svcs=$(services_of "$what")
+  tag=$(git -C "$root" rev-parse --short=7 HEAD)
+  if [ -n "$(git -C "$root" status --porcelain -- bridge kernel watchdog deploy)" ]; then
+    tag="$tag-dirty$(date +%m%d%H%M)"
+    echo "!! 工作区有没提交的改动（bridge/ kernel/ watchdog/ deploy/），版本记为 $tag" >&2
+  fi
+  for s in $svcs; do
+    echo "==> 构建 fuxi-$s:$tag（linux/amd64）"
+    docker build -q --platform linux/amd64 --build-arg FUXI_BUILD="$tag" --label "fuxi.version=$tag" \
+      -t "fuxi-$s:$tag" "$root/$s" >/dev/null
+    images+=("fuxi-$s:$tag")
+  done
+
+  echo "==> 传输镜像到 $FUXI_HOST"
+  docker save "${images[@]}" | gzip -1 | ssh "$FUXI_HOST" docker load
+
+  echo "==> 更新 compose.yaml"
+  ssh "$FUXI_HOST" "mkdir -p '$FUXI_DIR' && chmod 700 '$FUXI_DIR'"
+  scp -q "$root/deploy/compose.yaml" "$FUXI_HOST:$FUXI_DIR/compose.yaml"
+  ssh "$FUXI_HOST" "test -f '$FUXI_DIR/.env'" || {
+    echo "!! 服务器上还没有 $FUXI_DIR/.env：按 deploy/.env.example 创建（chmod 600）后再运行本脚本" >&2
+    exit 1
+  }
+  for s in $svcs; do point_dev "$s" "$tag" deploy; done
+
+  echo "==> 启动（版本 $tag）"
+  restart "$what"
+  wait_ready
+}
+
+rollback() {
+  local svc="${1:-}" want="${2:-}"
+  case "$svc" in bridge|kernel|watchdog) ;; *) usage ;; esac
+  if [ -z "$want" ]; then
+    # 当前版本之前、镜像还在的最近一个
+    want=$(ssh "$FUXI_HOST" "grep ' $svc ' '$LOG' 2>/dev/null | awk '{print \$4}' | tac | awk '!s[\$0]++' | sed -n '2,\$p' |
+      while read t; do docker image inspect fuxi-$svc:\$t >/dev/null 2>&1 && { echo \$t; break; }; done")
+    [ -n "$want" ] || { echo "!! 没有可回滚的 $svc 版本（scripts/deploy.sh versions 看看）" >&2; exit 1; }
+  fi
+  ssh "$FUXI_HOST" "docker image inspect fuxi-$svc:$want >/dev/null 2>&1" || {
+    echo "!! 服务器上没有 fuxi-$svc:$want" >&2; exit 1; }
+  echo "==> $svc 回滚到 $want"
+  point_dev "$svc" "$want" rollback
+  restart "$svc"
+  wait_ready
+}
+
+versions() {
+  ssh "$FUXI_HOST" "echo '== 最近的部署（时间 服务 版本 动作）'; tail -n 15 '$LOG' 2>/dev/null || echo '（还没有记录）'
+    echo; echo '== 服务器上的版本镜像（dev = 正在用的）'
+    for s in kernel bridge watchdog; do
+      dev=\$(docker image inspect -f '{{.Id}}' fuxi-\$s:dev 2>/dev/null | cut -c8-19)
+      echo \"fuxi-\$s: \$(docker images fuxi-\$s --format '{{.Tag}}={{.ID}}' | grep -v '^dev=' |
+        sed \"s/=\$dev\\\$/ (当前)/; s/=.*//\" | tr '\n' ' ')\"
+    done"
+}
+
+case "${1:-all}" in
+  rollback) shift; rollback "$@" ;;
+  versions) versions ;;
+  *) deploy "${1:-all}" ;;
+esac

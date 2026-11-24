@@ -2,7 +2,7 @@
 
 所有请求需 `Authorization: Bearer <FUXI_API_TOKEN>`。
 
-  GET  /healthz                      {ok, healthy, problems[], wechat, halted}
+  GET  /healthz                      {ok, healthy, problems[], wechat, halted, version}
   POST /resume                       解除熔断（发送后核对失败会停止一切发送）
   GET  /allow                        当前白名单 [{chat_id, name}]
   PUT  /allow  {"items": [...]}      整体替换；元素可以是 chat_id、唯一的显示名，或 "*"
@@ -94,7 +94,8 @@ def serve(bridge: "Bridge") -> None:
                 return self._json(200, {"ok": True, "healthy": not probs, "problems": probs,
                                         "wechat": bridge.last_send_ok, "halted": bridge.halted,
                                         "paused": bridge.paused, "open_chat": bridge.sender.open_stats(),
-                                        "latency": bridge.latency.summary()})
+                                        "latency": bridge.latency.summary(),
+                                        "version": os.environ.get("FUXI_BUILD", "dev")})
             if u.path == "/allow":
                 return self._json(200, {"ok": True, "items": [
                     {"chat_id": i, "name": "全部" if i == "*" else bridge.name_of(i)} for i in bridge.allowlist.items]})

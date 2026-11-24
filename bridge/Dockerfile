@@ -15,4 +15,7 @@ WORKDIR /app
 ENV PYTHONUNBUFFERED=1 DISPLAY=:1 TZ=Asia/Shanghai
 # 静默时段（/设置 静默时段）按这个时区解释
 
+# 部署脚本传入的版本（git 提交号），/状态 和 /healthz 里显示；放最后，不影响前面的构建缓存
+ARG FUXI_BUILD=dev
+ENV FUXI_BUILD=$FUXI_BUILD
 CMD ["python", "-m", "fuxi_bridge.app"]

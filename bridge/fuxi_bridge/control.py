@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from typing import TYPE_CHECKING
 
@@ -114,6 +115,7 @@ class Control:
         if b.cfg.get("fuyu_sync"):
             lines.append(f"浮屿仓库：{b.fuyu.brief()}")
         up = int(time.time() - b.started)
+        lines.append(f"版本：{os.environ.get('FUXI_BUILD', 'dev')}")
         lines.append(f"已运行：{up // 3600} 小时 {up % 3600 // 60} 分")
         lines.append("问题：" + ("；".join(p for p in probs if not p.startswith("已熔断")) or "无"))
         return "\n".join(lines)

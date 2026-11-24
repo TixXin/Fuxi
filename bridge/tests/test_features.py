@@ -220,6 +220,19 @@ class PayloadTest(unittest.TestCase):
         b._dispatch_traced("g@chatroom", [msg(local_id=1, type="image", text="[图片]"), msg(local_id=2, text="看看这个")], timing.Trace(0, 0))
         b.kernel.webhook.assert_called_once()
 
+    def test_split_by_sender_and_at_me_scoped_to_mine(self):
+        b = bare_bridge()
+        b.names_cache["wxid_b"] = "小红"
+        m1 = msg(local_id=1, sender="wxid_a", text="@鲸鲸 怎么贴图", source="<msgsource><atuserlist>wxid_self</atuserlist></msgsource>")
+        m2 = msg(local_id=2, sender="wxid_b", text="哈哈哈")
+        m3 = msg(local_id=3, sender="wxid_a", text="急用")
+        chunks = b._split_by_sender([m1, m2, m3])
+        self.assertEqual([[m.local_id for m in c] for c in chunks], [[1, 3], [2]])
+        # 即便未拆分，_payload 也不应把前一个人的 @ 错算到最后发言人头上
+        p = b._payload("g@chatroom", [m1, m2])
+        self.assertFalse(p["at_me"])
+        self.assertEqual(p["text"], "哈哈哈")
+
 
 class ControlTest(unittest.TestCase):
     def setUp(self):

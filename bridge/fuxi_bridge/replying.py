@@ -38,9 +38,13 @@ class ReplyMixin:
                     except (ValueError, KernelError) as e:
                         log.info("%s失败 %s：%s", "看图" if kind == "image" else "语音识别", self.name_of(chat), e)
                         continue
-                    self.media_cache[key] = got
-                    while len(self.media_cache) > 300:
-                        self.media_cache.popitem(last=False)
+                    if got:
+                        self.media_cache[key] = got
+                        while len(self.media_cache) > 300:
+                            self.media_cache.popitem(last=False)
+                    else:
+                        log.warning("%s返回空结果 %s（media=%s）", "看图" if kind == "image" else "语音识别",
+                                    self.name_of(chat), str(m.media)[:8])
                 if got:
                     m.text = f"{m.text}（{label}：{got}）"
                     if self.is_feedback_group(chat):

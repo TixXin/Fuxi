@@ -68,7 +68,7 @@ class Bridge(SendingMixin, ReplyMixin, AssistMixin, GroupWorkMixin):
         self.kernel = Kernel(env.get("FUXI_KERNEL_URL", "http://127.0.0.1:8787"), env.get("FUXI_KERNEL_TOKEN", ""))
         # 行为设置：/state/settings.json（见 settings.py），apply_settings 把它们抄到下面这些属性上
         self.cfg = settings.Settings(os.path.join(state, "settings.json"), dict(env))
-        self.settle, self.stale, self.reply_self = 1.5, 120, False
+        self.settle, self.group_settle, self.stale, self.reply_self = 1.5, 3.5, 120, False
         self.rate_chat, self.rate_global, self.quiet = 6, 20, ""
         self.extra_names: list[str] = []
         self.masters: list[str] = []
@@ -124,6 +124,8 @@ class Bridge(SendingMixin, ReplyMixin, AssistMixin, GroupWorkMixin):
         self.fixflow = issues.FixFlow(self.feedback, issues.Issues(lambda: self.cfg.get("knowledge_repo") or self.fuyu.repo))
         self.handoffs: collections.deque[tuple[float, str]] = collections.deque(maxlen=50)
         self._fuyu_proactive_at: dict[str, float] = {}
+        self._group_silenced_until: dict[str, float] = {}
+        self._chat_msg_seq: dict[str, int] = {}
         self.control = control.Control(self)
         self.apply_settings()
 
@@ -132,13 +134,14 @@ class Bridge(SendingMixin, ReplyMixin, AssistMixin, GroupWorkMixin):
         """把 settings.json 的值抄到属性上；返回变了的项（中文名），并处理需要联动的。"""
         c = self.cfg
         new = {
-            "settle": c.get("settle_ms") / 1000, "stale": c.get("stale_sec"), "reply_self": c.get("reply_self"),
+            "settle": c.get("settle_ms") / 1000, "group_settle": c.get("group_settle_ms") / 1000,
+            "stale": c.get("stale_sec"), "reply_self": c.get("reply_self"),
             "rate_chat": c.get("rate_chat"), "rate_global": c.get("rate_global"), "quiet": c.get("quiet"),
             "extra_names": c.get("self_names"), "masters": c.get("owners"),
             "care_on": c.get("care_on"), "vision_mode": c.get("vision"), "voice_mode": c.get("voice"),
         }
-        labels = {"settle": "settle_ms", "stale": "stale_sec", "extra_names": "self_names", "masters": "owners",
-                  "vision_mode": "vision", "voice_mode": "voice"}
+        labels = {"settle": "settle_ms", "group_settle": "group_settle_ms", "stale": "stale_sec",
+                  "extra_names": "self_names", "masters": "owners", "vision_mode": "vision", "voice_mode": "voice"}
         changed = []
         for attr, v in new.items():
             if getattr(self, attr, None) != v:
@@ -291,16 +294,41 @@ class Bridge(SendingMixin, ReplyMixin, AssistMixin, GroupWorkMixin):
                     self.pool.submit(self._run_command, m.text)
             acc = [m for m in new if m not in cmds and self._accept(m)]
             if acc:
+                self._chat_msg_seq[chat] = self._chat_msg_seq.get(chat, 0) + len(acc)
                 self.pending.setdefault(chat, []).extend(acc)
                 self.pending_at[chat] = time.monotonic()
                 self.pending_seen[chat] = time.time()
         now = time.monotonic()
-        for chat in [c for c, t in self.pending_at.items() if now - t >= self.settle]:
+        ready = [
+            c for c, t in self.pending_at.items()
+            if now - t >= (self.group_settle if c.endswith("@chatroom") else self.settle)
+        ]
+        for chat in ready:
             batch = self.pending.pop(chat, [])
             self.pending_at.pop(chat, None)
             seen = self.pending_seen.pop(chat, time.time())
-            if batch:
-                self.pool.submit(self._dispatch, chat, batch, seen)
+            chunks = self._split_by_sender(batch)
+            cur_seq = self._chat_msg_seq.get(chat, 0)
+            for idx, chunk in enumerate(chunks):
+                # 同一合并窗口里后面已有其他发言人的消息 → 告诉前一批（用于主动答疑让贤）
+                seq_for_chunk = cur_seq - 1 if idx < len(chunks) - 1 else cur_seq
+                self.pool.submit(self._dispatch, chat, chunk, seen, seq_for_chunk)
+
+    @staticmethod
+    def _split_by_sender(batch: list[Message]) -> list[list[Message]]:
+        """群聊合并窗口内可能有多人同时发言：按发言人拆成独立批次（保持先后顺序），
+        避免只取最后发言人而吞掉前一个人的 @ 或提问。"""
+        if len(batch) <= 1 or not batch[-1].is_group:
+            return [batch] if batch else []
+        groups: list[list[Message]] = []
+        by_sender: dict[str, list[Message]] = {}
+        for m in batch:
+            key = m.sender or ""
+            if key not in by_sender:
+                by_sender[key] = []
+                groups.append(by_sender[key])
+            by_sender[key].append(m)
+        return groups
 
     def _render(self, m: Message) -> str:
         """交给内核的正文：引用消息在回复后面附上被引用的内容。"""
@@ -336,7 +364,7 @@ class Bridge(SendingMixin, ReplyMixin, AssistMixin, GroupWorkMixin):
         mine = [m for m in batch if m.sender == last.sender]
         bare = "\n".join(m.text for m in mine)          # @ 识别只看本人写的内容，不看被引用的
         text = "\n".join(self._render(m) for m in mine)
-        at_me = (any(self.self_wxid in messages.at_users(m.source) for m in batch)
+        at_me = (any(self.self_wxid in messages.at_users(m.source) for m in mine)
                  or any(f"@{n}" in bare for n in names)
                  or any(m.type == "pat" for m in mine))
         other_uids = [u for m in mine for u in messages.at_users(m.source) if u != self.self_wxid]
@@ -364,7 +392,7 @@ class Bridge(SendingMixin, ReplyMixin, AssistMixin, GroupWorkMixin):
             "chat_title": self.name_of(chat) if last.is_group else "",
         }
 
-    def _dispatch(self, chat: str, batch: list[Message], seen: float | None = None) -> None:
+    def _dispatch(self, chat: str, batch: list[Message], seen: float | None = None, seq_before: int | None = None) -> None:
         if self.paused:
             log.info("已暂停，不处理 %s 的 %d 条消息", self.name_of(chat), len(batch))
             self._publish_batch(chat, batch, None, "已暂停")
@@ -372,7 +400,7 @@ class Bridge(SendingMixin, ReplyMixin, AssistMixin, GroupWorkMixin):
         tr = timing.Trace(batch[-1].create_time, seen or time.time())
         tr.add("settle", time.time() - tr.seen)
         try:
-            self._dispatch_traced(chat, batch, tr)
+            self._dispatch_traced(chat, batch, tr, seq_before=seq_before)
         finally:
             if tr.bubbles:
                 self.latency.add(tr.result())
@@ -392,7 +420,7 @@ class Bridge(SendingMixin, ReplyMixin, AssistMixin, GroupWorkMixin):
         except Exception:
             log.exception("发布对话流事件失败")
 
-    def _dispatch_traced(self, chat: str, batch: list[Message], tr: "timing.Trace") -> None:
+    def _dispatch_traced(self, chat: str, batch: list[Message], tr: "timing.Trace", seq_before: int | None = None) -> None:
         with self.chat_locks[chat]:
             gone = self._revoked(batch)
             if gone:
@@ -404,19 +432,22 @@ class Bridge(SendingMixin, ReplyMixin, AssistMixin, GroupWorkMixin):
             self._understand(chat, batch, tr)
             k0 = time.monotonic()
             payload = self._payload(chat, batch)
-            if payload["chat_type"] == "group" and self._is_blind_media(batch):
-                if not payload["at_me"] and not payload["reply_to_bot"]:
+            if self._is_blind_media(batch):
+                if payload["chat_type"] == "group" and not payload["at_me"] and not payload["reply_to_bot"]:
                     log.info("跳过群里纯媒体（未看图/未听语音且未 @）：%s [%s]",
                              payload["chat_title"] or self.name_of(chat), payload["senderName"])
                     tr.reason = "群里纯媒体未看懂，跳过"
                     return
-                payload["text"] += "\n（提示：当前群聊未开启看图/听语音，你看不到这段媒体的具体内容，不要凭空猜测，自然说明看不到即可）"
+                payload["text"] += "\n（提示：未能看清/听清这段媒体的具体内容，不要凭空猜测，自然说明看不到或听不清即可）"
             if self._source_asked(payload):
                 url = self.cfg.get("source_url")
                 log.info("%s 问源码，回仓库地址", self.name_of(chat))
                 self._deliver(chat, batch, {"action": "reply", "reply": f"我是开源的：{url}\n（AGPL-3.0，对话内核来自 whale_girl）"}, tr, k0)
                 return
+            if seq_before is not None:
+                payload["_chat_seq"] = seq_before
             self._assist(chat, payload)
+            payload.pop("_chat_seq", None)
             log.info("→ 内核 %s [%s] %s", payload["chat_title"] or self.name_of(chat), payload["senderName"],
                      _brief(payload["text"]))
             try:

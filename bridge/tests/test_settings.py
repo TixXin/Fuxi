@@ -84,6 +84,7 @@ class BridgeSettingsTest(unittest.TestCase):
         b.set_setting("master_always_reply", "关")
         b.kernel.patch_config.assert_called_with(("group", "masterAlwaysReply"), False)
         self.assertEqual((b.get_setting("fuyu_qa_pct"), b.get_setting("fuyu_chat_pct"), b.get_setting("fuyu_chat_cooldown")), (90, 20, 240))
+        self.assertEqual((b.get_setting("fuyu_qa_delay"), b.get_setting("group_settle_ms"), b.group_settle), (8, 3500, 3.5))
 
 
 class ControlSettingsTest(unittest.TestCase):

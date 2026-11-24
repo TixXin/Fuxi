@@ -245,6 +245,62 @@ class AssistTest(unittest.TestCase):
         self.assertTrue(p2["at_me"])
         self.assertIn("v0.3.13", p2["text"])
 
+    def test_proactive_respects_dismiss_silence(self):
+        b = assist_bridge()
+        b.masters = ["wxid_m"]
+        with mock.patch("fuxi_bridge.assist.time.monotonic", return_value=1000.0):
+            b._assist("g@chatroom", {**payload("@浮汐 闭嘴", at=True), "sender_id": "wxid_m"})
+        # 静默期内（+60s < 600s）未 @ 的浮屿提问/闲聊都不会主动触发
+        p = payload("截图怎么贴到屏幕上", at=False)
+        with mock.patch("fuxi_bridge.assist.random.random", return_value=0.0), \
+             mock.patch("fuxi_bridge.assist.time.monotonic", return_value=1060.0):
+            b._assist("g@chatroom", p)
+        self.assertFalse(p["at_me"])
+        # 主人显式 @ 后解除静默
+        with mock.patch("fuxi_bridge.assist.time.monotonic", return_value=1070.0):
+            b._assist("g@chatroom", {**payload("@浮汐 回来吧", at=True), "sender_id": "wxid_m"})
+        p2 = payload("截图怎么贴到屏幕上", at=False)
+        with mock.patch("fuxi_bridge.assist.random.random", return_value=0.0), \
+             mock.patch("fuxi_bridge.assist.time.monotonic", return_value=1080.0):
+            b._assist("g@chatroom", p2)
+        self.assertTrue(p2["at_me"])
+
+    def test_proactive_qa_yields_when_new_message_arrives(self):
+        b = assist_bridge()
+        b._chat_msg_seq = {"g@chatroom": 5}
+        b.paused = False
+        b.cfg.set("fuyu_qa_delay", 2)
+        now = [0.0]
+
+        def fake_sleep(dt):
+            now[0] += dt
+            if now[0] >= 0.5:
+                b._chat_msg_seq["g@chatroom"] = 6   # 等待期间群里来了新消息 → 让贤
+
+        p = {**payload("截图怎么贴到屏幕上", at=False), "_chat_seq": 5}
+        with mock.patch("fuxi_bridge.assist.random.random", return_value=0.0), \
+             mock.patch("fuxi_bridge.assist.time.monotonic", lambda: now[0]), \
+             mock.patch("fuxi_bridge.assist.time.sleep", fake_sleep):
+            b._assist("g@chatroom", p)
+        self.assertFalse(p["at_me"])
+
+        # 等待期间没人接话 → 正常主动答疑
+        b._chat_msg_seq["g@chatroom"] = 6
+        now[0] = 0.0
+        p2 = {**payload("截图怎么贴到屏幕上", at=False), "_chat_seq": 6}
+        with mock.patch("fuxi_bridge.assist.random.random", return_value=0.0), \
+             mock.patch("fuxi_bridge.assist.time.monotonic", lambda: now[0]), \
+             mock.patch("fuxi_bridge.assist.time.sleep", lambda dt: now.__setitem__(0, now[0] + dt)):
+            b._assist("g@chatroom", p2)
+        self.assertTrue(p2["at_me"])
+
+    def test_fit_append_keeps_under_kernel_limit_and_preserves_tail(self):
+        from fuxi_bridge.assist import PAYLOAD_TEXT_LIMIT, _fit_append
+        out = _fit_append("原问题", "\n\n（资料）\n", "长" * 3000, "\n\n（尾注不要丢）")
+        self.assertLessEqual(len(out), PAYLOAD_TEXT_LIMIT)
+        self.assertTrue(out.startswith("原问题\n\n（资料）\n"))
+        self.assertTrue(out.endswith("…\n\n（尾注不要丢）"))
+
     def test_handoff_once(self):
         b = assist_bridge()
         with mock.patch("threading.Thread") as th:

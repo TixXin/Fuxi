@@ -362,7 +362,7 @@ class Knowledge:
         hits.sort(key=lambda h: -h[0])
         return hits[:k]
 
-    def search(self, query: str, k: int = 4, budget: int = 2400) -> list[Chunk]:
+    def search(self, query: str, k: int = 4, budget: int = 1200) -> list[Chunk]:
         hits = self.candidates(query, k)
         query = clean(query)
         if not hits or hits[0][0] < self.floor or self.index.coverage(query, hits[0][1]) < self.cover:

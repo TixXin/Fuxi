@@ -24,6 +24,29 @@ FUYU_TOPIC_RE = re.compile(
     re.I,
 )
 ISSUE_NUM_RE = re.compile(r"#(\d{1,6})")
+# 内核 pipeline/chat.js normalize() 会对 msg.text 做 2000 字硬截断，桥接拼资料时必须留出余量
+PAYLOAD_TEXT_LIMIT = 1920
+# 群里赶她闭嘴/退场的常见表达（与内核 canned.js 保持一致，用来在桥接侧同步静默期，防止未 @ 主动触发误破静默）
+DISMISS_DIRECT_RE = re.compile(
+    r"闭嘴|滚蛋|滚开|滚出去|你滚|^滚[吧啊呀了嘛哦]*$|走开|退下|一边去|别说了|别吵|别接话|别插嘴|没你事|不用你了|安静点?$"
+)
+DISMISS_THIRD_RE = re.compile(
+    r"(让|叫|把|喊|请)(?:她|它|这货|机器人|浮汐|fuxi)(?:赶紧|快点|马上)?(?:滚|闭嘴|安静|别说话|少说话|别接话|别插嘴|别吵|走开|退下)",
+    re.I,
+)
+SILENCE_SEC = 600
+
+
+def _fit_append(base: str, hits_header: str, hits_body: str, tail: str, limit: int = PAYLOAD_TEXT_LIMIT) -> str:
+    """把资料段和尾注拼到 base 后面，总长严格不超过 limit（保住原话与尾注，只裁超长的资料正文）。"""
+    if not hits_body:
+        out = base + tail
+        return out[:limit]
+    budget = limit - len(base) - len(hits_header) - len(tail)
+    if budget <= 40:
+        return (base + tail)[:limit]
+    body = hits_body if len(hits_body) <= budget else (hits_body[:budget - 1].rstrip() + "…")
+    return base + hits_header + body + tail
 
 
 class AssistMixin:
@@ -70,24 +93,65 @@ class AssistMixin:
             self._fuyu_proactive_at = table
         table[chat] = time.monotonic()
 
+    def _is_group_silenced(self, chat: str) -> bool:
+        table = getattr(self, "_group_silenced_until", None) or {}
+        return time.monotonic() < table.get(chat, 0.0)
+
+    def _update_group_silence(self, chat: str, payload: dict, q: str) -> None:
+        """同步群里「闭嘴/滚」触发的静默期，防止未 @ 的主动插话把静默意外打破。"""
+        table = getattr(self, "_group_silenced_until", None)
+        if table is None:
+            table = {}
+            self._group_silenced_until = table
+        addressed = bool(payload.get("at_me") or payload.get("reply_to_bot"))
+        clean = q.strip(" ，,。.!！~～、…")
+        dismissed = (addressed and bool(DISMISS_DIRECT_RE.search(clean))) or bool(DISMISS_THIRD_RE.search(clean))
+        if dismissed:
+            table[chat] = time.monotonic() + SILENCE_SEC
+            log.info("产品助手 %s：检测到退场指令，%d 秒内暂停主动插话", self.name_of(chat), SILENCE_SEC)
+        elif addressed:
+            masters = getattr(self, "masters", None) or []
+            if payload.get("sender_id") in masters or payload.get("user_id") in masters:
+                table.pop(chat, None)
+
+    def _wait_qa_yield(self, chat: str, seq_before: int | None, delay: float) -> bool:
+        """主动答疑前先观察 delay 秒；期间若群里已有新消息（别人/主人接了话）或被暂停，返回 True 表示让贤。"""
+        if delay <= 0 or seq_before is None:
+            return False
+        seq_map = getattr(self, "_chat_msg_seq", None)
+        if seq_map is None:
+            return False
+        if seq_map.get(chat, 0) > seq_before:
+            return True
+        deadline = time.monotonic() + delay
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return seq_map.get(chat, 0) > seq_before or bool(getattr(self, "paused", False))
+            time.sleep(min(0.5, left))
+            if seq_map.get(chat, 0) > seq_before or getattr(self, "paused", False):
+                return True
+
     def _assist(self, chat: str, payload: dict) -> None:
         """产品助手群处理：
         1) 被 @ / 被回复：检索浮屿资料和仓库信息附给内核，答不上且像提问时转主人；
-        2) 未被 @：不打断他人对话的前提下，
-           - 浮屿提问且资料/仓库真能答上 → 按 fuyu_qa_pct（默认 90%）主动接话并附资料（答不上则安静，不转人工）；
+        2) 未被 @：不打断他人对话、不在静默期内，
+           - 浮屿提问且资料/仓库真能答上 → 观察避让秒数无人抢答后，按 fuyu_qa_pct（默认 90%）主动接话并附资料；
            - 普通聊浮屿（非提问）→ 按 fuyu_chat_pct（默认 20%）+ fuyu_chat_cooldown（默认 240s）偶尔插一句；
            - 与浮屿无关的闲聊 → 不介入，交回内核按普通插话概率（如 3% + 600s 冷却）处理。
         """
+        seq_before = payload.pop("_chat_seq", None)
         if not self.is_assistant_group(chat):
             return
         q = payload["text"]
         for n in payload.get("self_names") or []:
             q = q.replace(f"@{n}", " ")
         q = q.strip()
+        self._update_group_silence(chat, payload, q)
         if payload.get("at_me") or payload.get("reply_to_bot"):
             self._assist_addressed(chat, payload, q)
         else:
-            self._assist_proactive(chat, payload, q)
+            self._assist_proactive(chat, payload, q, seq_before)
 
     def _assist_addressed(self, chat: str, payload: dict, q: str) -> None:
         try:
@@ -98,21 +162,23 @@ class AssistMixin:
         if hits and knowledge.is_question(q):
             hits = self._judge(q, hits)
         notes, sure = self._fuyu_notes(q)
-        extra = ""
+        hits_header, hits_body, tail = "", "", ""
         if hits:
-            extra += ("\n\n（以下是浮屿的说明资料，回答浮屿用法问题时以它为准；资料里没写的不要编，"
-                      "就说不确定、已经转给主人了）\n" + knowledge.render(hits))
+            hits_header = ("\n\n（以下是浮屿的说明资料，回答浮屿用法问题时以它为准；资料里没写的不要编，"
+                           "就说不确定、已经转给主人了）\n")
+            hits_body = knowledge.render(hits)
             log.info("产品助手 %s：附上 %d 段资料（%s）", self.name_of(chat), len(hits), "、".join(h.title[:20] for h in hits))
         if notes:
-            extra += "\n\n（浮屿仓库的最新情况，回答版本、修没修时参考；开发记录未必就是对方说的问题，对不上就别提）\n" + "\n".join(notes)
+            tail += "\n\n（浮屿仓库的最新情况，回答版本、修没修时参考；开发记录未必就是对方说的问题，对不上就别提）\n" + "\n".join(notes)
             log.info("产品助手 %s：附上仓库信息 %d 条", self.name_of(chat), len(notes))
         if not hits and not sure and knowledge.is_question(q):
-            extra += "\n\n（浮屿资料里没找到这个问题的答案。不确定就直说，告诉对方已经转给主人了，不要编）"
+            tail += "\n\n（浮屿资料里没找到这个问题的答案。不确定就直说，告诉对方已经转给主人了，不要编）"
             self._handoff(chat, payload, q)
-        payload["text"] += extra
+        if hits_body or tail:
+            payload["text"] = _fit_append(payload["text"], hits_header, hits_body, tail)
 
-    def _assist_proactive(self, chat: str, payload: dict, q: str) -> None:
-        if len(q) < 2 or self._talking_to_other(payload):
+    def _assist_proactive(self, chat: str, payload: dict, q: str, seq_before: int | None = None) -> None:
+        if len(q) < 2 or self._talking_to_other(payload) or self._is_group_silenced(chat):
             return
         fuyu_mentioned = bool(FUYU_TOPIC_RE.search(q))
         has_issue = bool(ISSUE_NUM_RE.search(q))
@@ -124,7 +190,7 @@ class AssistMixin:
             hits = []
         notes, sure = self._fuyu_notes(q, strict=not (fuyu_mentioned or bool(hits)))
 
-        # ① 浮屿提问且资料或仓库真能答上：高概率主动帮答，并附上资料
+        # ① 浮屿提问且资料或仓库真能答上：高概率主动帮答，并附上资料（先等几秒看群里是否已有别人接话）
         if asked:
             qa_pct = self.cfg.get("fuyu_qa_pct")
             if qa_pct <= 0 or (not hits and not sure):
@@ -135,14 +201,18 @@ class AssistMixin:
                 return
             if random.random() * 100 >= qa_pct:
                 return
-            extra = ""
+            delay = self.cfg.get("fuyu_qa_delay")
+            if self._wait_qa_yield(chat, seq_before, delay):
+                log.info("产品助手 %s：主动答疑避让（%d 秒内群里已有新消息）", self.name_of(chat), delay)
+                return
+            hits_header, hits_body, tail = "", "", ""
             if hits:
-                extra += ("\n\n（以下是浮屿的说明资料，回答浮屿用法问题时以它为准；资料里没写的不要编）\n"
-                          + knowledge.render(hits))
+                hits_header = "\n\n（以下是浮屿的说明资料，回答浮屿用法问题时以它为准；资料里没写的不要编）\n"
+                hits_body = knowledge.render(hits)
             if notes:
-                extra += "\n\n（浮屿仓库的最新情况，回答版本、修没修时参考；对不上就别提）\n" + "\n".join(notes)
-            extra += "\n\n（群里没直接 @ 你，但这个问题资料里有答案；自然顺手帮答一句即可，别用客服腔）"
-            payload["text"] += extra
+                tail += "\n\n（浮屿仓库的最新情况，回答版本、修没修时参考；对不上就别提）\n" + "\n".join(notes)
+            tail += "\n\n（群里没直接 @ 你，但这个问题资料里有答案；自然顺手帮答一句即可，别用客服腔）"
+            payload["text"] = _fit_append(payload["text"], hits_header, hits_body, tail)
             payload["at_me"] = True
             self._mark_fuyu_proactive(chat)
             log.info("产品助手 %s：主动答疑（未 @，概率 %d%%，命中 %d 段资料/%d 条仓库）",
@@ -158,11 +228,10 @@ class AssistMixin:
             return
         if random.random() * 100 >= chat_pct:
             return
-        extra = ""
-        if hits:
-            extra += "\n\n（相关浮屿资料，仅作事实参考，不要照本宣科）\n" + knowledge.render(hits[:2])
-        extra += "\n\n（群里在聊浮屿，没直接 @ 你；像熟人一样自然搭一两句短话即可，不要用客服腔，没看到的内容不要编）"
-        payload["text"] += extra
+        hits_header = "\n\n（相关浮屿资料，仅作事实参考，不要照本宣科）\n" if hits else ""
+        hits_body = knowledge.render(hits[:2]) if hits else ""
+        tail = "\n\n（群里在聊浮屿，没直接 @ 你；像熟人一样自然搭一两句短话即可，不要用客服腔，没看到的内容不要编）"
+        payload["text"] = _fit_append(payload["text"], hits_header, hits_body, tail)
         payload["at_me"] = True
         self._mark_fuyu_proactive(chat)
         log.info("产品助手 %s：浮屿话题主动插话（未 @，概率 %d%%）", self.name_of(chat), chat_pct)

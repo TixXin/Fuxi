@@ -156,6 +156,14 @@ class SeeImagesTest(unittest.TestCase):
         b._understand("wxid_a", batch, timing.Trace(0, 0))
         self.assertEqual(batch[0].text, "[图片]")
 
+    def test_empty_vision_result_is_not_cached(self):
+        b = self.bridge()
+        b.kernel.vision.return_value = ""
+        batch = [img_msg(1)]
+        b._understand("wxid_a", batch, timing.Trace(0, 0))
+        self.assertEqual(batch[0].text, "[图片]")
+        self.assertEqual(len(b.media_cache), 0)
+
     def test_modes_and_other_senders(self):
         b = self.bridge()
         b.vision_mode = "private"

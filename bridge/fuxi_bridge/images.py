@@ -230,7 +230,7 @@ class Images:
                 out[tag] = max(hits, key=os.path.getmtime)
         return out
 
-    def load(self, chat: str, name: str, wait: float = 8.0) -> tuple[bytes, str]:
+    def load(self, chat: str, name: str, wait: float = 3.5) -> tuple[bytes, str]:
         """等原图/高清下好（最多 wait 秒，否则用缩略图），返回 (JPEG, 来源 full|h|t)。"""
         if not self.ensure_key():
             raise ValueError("还没有图片密钥")

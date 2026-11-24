@@ -17,7 +17,7 @@ export const TABS: SettingsTab[] = [
     groups: [
       { title: "回复范围", keys: ["reply_scope", "blocked_chats"] },
       { title: "谁和怎么回", keys: ["self_names", "owners", "quiet", "stickers"] },
-      { title: "节奏", keys: ["settle_ms", "stale_sec", "reply_self"] },
+      { title: "节奏", keys: ["settle_ms", "group_settle_ms", "stale_sec", "reply_self"] },
     ],
   },
   { id: "understand", label: "理解消息", groups: [{ title: "图片和语音", keys: ["vision", "voice"] }] },
@@ -35,7 +35,7 @@ export const TABS: SettingsTab[] = [
     id: "fuyu",
     label: "浮屿",
     groups: [
-      { title: "产品助手", keys: ["assistant_groups", "knowledge_repo", "fuyu_qa_pct", "fuyu_chat_pct", "fuyu_chat_cooldown"] },
+      { title: "产品助手", keys: ["assistant_groups", "knowledge_repo", "fuyu_qa_pct", "fuyu_qa_delay", "fuyu_chat_pct", "fuyu_chat_cooldown"] },
       { title: "群反馈", keys: ["feedback_groups", "digest_time", "group_summary_time"] },
       { title: "群营业", keys: ["outreach", "idle_hours", "open_hours", "fix_notify"] },
       { title: "浮屿仓库", keys: ["fuyu_sync", "fuyu_notify", "agent_token_expires"] },

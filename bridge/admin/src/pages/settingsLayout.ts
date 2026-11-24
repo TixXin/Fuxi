@@ -15,6 +15,7 @@ export const TABS: SettingsTab[] = [
     id: "reply",
     label: "回复",
     groups: [
+      { title: "回复范围", keys: ["reply_scope", "blocked_chats"] },
       { title: "谁和怎么回", keys: ["self_names", "owners", "quiet", "stickers"] },
       { title: "节奏", keys: ["settle_ms", "stale_sec", "reply_self"] },
     ],

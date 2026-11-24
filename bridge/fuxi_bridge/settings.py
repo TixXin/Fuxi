@@ -79,6 +79,11 @@ ITEMS: list[Item] = [
     Item("agent_token_expires", "代理凭据到期", "text", "", "浮屿仓库 secret CLAUDE_CODE_OAUTH_TOKEN 的到期日（如 2027-11-24），"
          "到期前 14 天每天提醒；空 = 不提醒（开 issue 的 token 到期日自动从 GitHub 读）"),
     Item("announce_to", "发版群", "text", "", "发版公告（POST /announce）默认发到哪个群：群名或 chat_id；空 = 调用方必须指定"),
+    Item("reply_scope", "回复范围", "choice", "list",
+         "除了白名单里的会话，还回哪些。放宽后陌生人也能和 bot 聊、会多花模型费用，也更容易被微信风控，建议先只开私聊观察；"
+         "群里仍按人设的群聊策略（默认被 @ 才回）",
+         {"list": "只回名单里的", "private": "名单 + 全部私聊", "groups": "名单 + 全部群", "all": "全部私聊和群"}),
+    Item("blocked_chats", "不回的会话", "list", [], "这些会话任何时候都不回、不主动发（群名、备注或 chat_id，多个用逗号），优先于白名单和回复范围"),
     Item("quiet", "静默时段", "text", "", "这段时间不自动回复、不主动搭话，如 00:30-07:30；空 = 不静默",
          env="FUXI_QUIET"),
     Item("rate_chat", "单会话限速", "int", 6, "每个会话每分钟最多发几条", env="FUXI_RATE_CHAT", min=1, max=60),

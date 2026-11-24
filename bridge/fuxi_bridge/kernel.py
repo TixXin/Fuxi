@@ -106,10 +106,13 @@ class Kernel:
         self._req("POST", "/api/wechat/contacts/sync",
                   {"account": account, "at": int(time.time() * 1000), "items": items}, timeout=30)
 
-    def set_whitelist(self, items: list[str]) -> None:
-        """内核第二道防线：whitelistOnly + care.whitelist（发送前拦截）。'*' = 关闭白名单。"""
+    def set_whitelist(self, items: list[str], open_: bool = False) -> None:
+        """内核第二道防线：whitelistOnly + care.whitelist（发送前拦截）。'*' = 关闭白名单。
+        open_：桥接放宽了回复范围（名单外的私聊/群也回），内核不再按名单拦，搭话名单照旧。"""
         if "*" in items:
             patch = {"wechat": {"whitelistOnly": False}, "care": {"whitelist": []}}
+        elif open_:
+            patch = {"wechat": {"whitelistOnly": False}, "care": {"whitelist": [i for i in items if i != "*"]}}
         else:
             patch = {"wechat": {"whitelistOnly": True}, "care": {"whitelist": list(items)}}
         r = self._req("POST", "/api/config", {"patch": patch}, timeout=15)

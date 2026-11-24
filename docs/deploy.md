@@ -168,6 +168,11 @@ watchdog 自己挂了）时，Kuma 按超时报警。
 
 bot 只回复白名单里的会话。空名单 = 谁都不回，`*` = 全部放行。
 
+**放宽范围**不用改名单：管理台「设置 → 回复 → 回复范围」或遥控 `/设置 回复范围 名单 + 全部私聊`，可选
+只回名单里的（默认）/ 名单 + 全部私聊 / 名单 + 全部群 / 全部私聊和群。群里仍按人设的群聊策略（默认被 @ 才回）。
+「不回的会话」（群名、备注或 chat_id）任何范围下都不回，优先于白名单。放宽后内核的 `whitelistOnly` 自动关掉，
+由桥接按范围把关；改回「只回名单里的」会重新打开。建议先只开私聊观察几天：陌生人多了模型费用会涨，也更容易被风控。
+
 ```bash
 # 看
 curl -s -H "Authorization: Bearer $T" 127.0.0.1:8790/allow
@@ -242,6 +247,17 @@ curl -s -H "Authorization: Bearer $T" -X POST 127.0.0.1:8790/resume
 
 ### 升级微信（提示版本过期时）
 
+收消息靠从微信进程内存里取数据库密钥，微信版本一变就可能取不到，所以**升级前先给能用的镜像留个标签**，出问题能退回。
+当前验证过的版本：微信 **4.1.13（build 29）**，服务器上标签 `nickrunning/wechat-selkies:wechat-4.1.13-b29`（2026-11-25 打的，
+和当时的 `:minimal` 是同一个镜像）。微信容器的 compose 仍写 `:minimal`：改成固定标签会让容器重建一次（要手机确认登录），
+所以没改；只要不主动拉新的 `:minimal`，重建也还是这个版本。
+
+```bash
+# 升级前：记下当前版本并打标签（版本号从这里看）
+docker exec wechat-selkies dpkg -l wechat | tail -1
+docker tag nickrunning/wechat-selkies:minimal nickrunning/wechat-selkies:wechat-<版本，点换成横线，如 4.1.13-b29>
+```
+
 wechat-selkies 照原来的方式更新（本机拉镜像 → 传到服务器 → `docker compose up -d`）。之后：
 
 1. 在手机上确认登录；
@@ -253,7 +269,14 @@ cd <fuxi-dir> && docker compose up -d --force-recreate bridge
 ```
 
 bridge 启动时会重新从内存扫描密钥（约 30 秒）。微信大版本更新后如果日志显示 `解出密钥 0 / N`，
-说明内存里的密钥格式变了，需要重新分析（见「排障」）。
+说明内存里的密钥格式变了，需要重新分析（见「排障」）。急着恢复就退回旧镜像：
+
+```bash
+docker tag nickrunning/wechat-selkies:wechat-<旧版本> nickrunning/wechat-selkies:minimal
+cd <微信容器目录> && docker compose up -d --force-recreate   # 手机上再确认一次登录
+```
+
+验证通过后，把上面「当前验证过的版本」改成新版本。
 
 ### 更新浮汐
 
@@ -286,7 +309,30 @@ FUXI_HOST=<host> FUXI_DIR=<fuxi-dir> scripts/deploy.sh rollback kernel e17da99  
 
 ### 备份
 
-需要备份的只有内核数据（记忆、人设演化、提醒、设置）和桥接的白名单/水位：
+需要备份的只有内核数据（记忆、人设演化、提醒、设置）和桥接状态（白名单、设置、水位、反馈库、公告、定时任务）。
+
+**自动备份**：看门狗每天 04:30 把两个卷打包到部署目录的 `backups/`（`kernel-data-日期.tgz`、`bridge-state-日期.tgz`，
+权限 600），留最近 14 份；备份失败会在 Kuma 里报出来。时间、份数、目录用 `.env` 的 `FUXI_BACKUP_AT` /
+`FUXI_BACKUP_KEEP` / `FUXI_BACKUP_DIR` 改（`FUXI_BACKUP_AT=` 设成空 = 不备份）。
+
+服务器坏了就没用，所以隔几天拉一份回本机（只拉本机还没有的，默认放 `~/fuxi-backups`，不能放仓库里——
+里面有记忆和含模型密钥的 config.json）：
+
+```bash
+scripts/deploy.sh backups            # 先立即备份一次，再拉回
+docker exec fuxi-watchdog /watchdog.sh backup   # 在服务器上只备份不拉
+```
+
+恢复：停掉对应容器，把 tgz 解回卷里再启动：
+
+```bash
+docker compose stop bridge kernel
+docker run --rm -v fuxi_kernel-data:/d -v "$PWD/backups":/b alpine sh -c 'rm -rf /d/* && tar xzf /b/kernel-data-<日期>.tgz -C /d'
+docker run --rm -v fuxi_bridge-state:/d -v "$PWD/backups":/b alpine sh -c 'rm -rf /d/* && tar xzf /b/bridge-state-<日期>.tgz -C /d'
+docker compose up -d kernel && docker compose up -d --no-deps --force-recreate bridge
+```
+
+手动打包（和自动备份一样的内容）：
 
 ```bash
 docker run --rm -v fuxi_kernel-data:/d -v "$PWD":/b alpine tar czf /b/kernel-data-$(date +%F).tgz -C /d .

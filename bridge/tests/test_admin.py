@@ -25,6 +25,7 @@ def fake_bridge():
     b.keyring.keys = {"a": 1, "b": 2}
     b.kernel_ok_at = b.last_poll_ok_at = b.started = time.time()
     b.allowlist.items = ["filehelper", "g@chatroom"]
+    b.allowlist.brief.return_value = "白名单 2 个会话"
     b.latency = timing.LatencyStats()
     b.announcer.pending.return_value = [{"code": "482", "to": "浮屿用户交流群", "created": time.time()}]
     b.cfg = settings.Settings(os.path.join(tempfile.mkdtemp(), "s.json"), {})

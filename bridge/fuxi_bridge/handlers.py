@@ -102,7 +102,7 @@ def overview(b: "Bridge") -> dict:
     poll_ok = now - b.last_poll_ok_at <= 120
     bridge = {"state": "bad" if b.halted or not poll_ok else "ok",
               "text": "已熔断" if b.halted else ("轮询停滞" if not poll_ok else "正常"),
-              "detail": b.halted or f"白名单 {len(b.allowlist.items)} 个会话"}
+              "detail": b.halted or b.allowlist.brief()}
     lat = b.latency.summary()
     todo = []
     for it in b.announcer.pending():

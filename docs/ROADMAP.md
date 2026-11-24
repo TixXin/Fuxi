@@ -68,6 +68,8 @@
       类型/默认值/说明），改了立即生效；遥控 `/设置`、API `GET/POST /settings`（管理台用）。内核管的项
       （表情包）只转发。旧环境变量只在第一次生成文件时搬一次。
 
+- [x] **B 站链接（S）**：`kernel/fuxi/links.js` 走 B 站公开接口读完整简介、UP 主、时长、播放、分 P，b23.tv 短链先解跳转；
+      字幕不登录基本拿不到，拿不到就注明。接口失败交回上游。
 - [x] **链接读取改进（S）**：原来只抽 og 标题/简介 + 前几个 `<p>` 截 600 字，GitHub 页抽到的全是导航。
       `kernel/fuxi/links.js` 替换上游 `links` 的导出（不改上游）：普通网页 Readability 抽正文（线程里跑、保留段落），
       GitHub issue / PR / release 走 API 拿状态和正文，短视频交回上游；读不到时给中文原因。
@@ -135,10 +137,18 @@
 - [x] 远程仓库 + CI（`.github/workflows/ci.yml`：每次推送跑仓库密钥规则 + gitleaks 全部历史、`scripts/test.sh`）。
 - [x] 版本号与镜像标签，部署可回滚：镜像按 git 提交号打标签，`deploy.sh rollback <服务> [版本]`、`deploy.sh versions`，
       `/状态` 与 `/healthz` 显示版本（见 docs/deploy.md「版本与回滚」）。
-- [ ] 上游 whale_girl 同步脚本，并校验 webhook 契约是否变化。
+- [x] 上游 whale_girl 同步脚本：`scripts/sync-upstream.sh`（`--check` 只看新提交和对接文件有没有变）。
+- [x] 每日自动备份：看门狗 04:30 打包内核数据和桥接状态到部署目录 `backups/`，留 14 份，失败在 Kuma 报警；
+      `scripts/deploy.sh backups` 拉回本机（`~/fuxi-backups`）。恢复步骤见 docs/deploy.md「备份」。
+- [x] 微信镜像留底：验证过的微信 4.1.13（build 29）镜像在服务器上打了固定标签，升级前打标签、取不到密钥就退回，见 docs/deploy.md「升级微信」。
+- [x] 拆分 `app.py`（1133 行 → 约 540 行）：发送 `sending.py`、回复后半段 `replying.py`、产品助手 `assist.py`、
+      浮屿用户群后台工作 `groupwork.py`，以 mixin 并入 `Bridge`，对外接口不变。
 - [x] AGPL 源码获取：私聊或群里 @ bot 问源码 / 开源时，桥接直接回 `source_url`（默认本仓库地址，空 = 不回），不经模型；问浮屿开不开源的不算。
+
+- [x] **回复范围做成设置（S）**：P0 已完成，放不放宽交给主人自己定。设置「回复范围」：只回名单里的（默认）/
+      名单 + 全部私聊 / 名单 + 全部群 / 全部私聊和群；「不回的会话」任何范围下都不回、优先于白名单。管理台「设置 → 回复」
+      和遥控 `/设置` 都能改，`/名单` 显示当前范围。放宽时自动关掉内核 `whitelistOnly`，改回时重新打开。
 
 ## 暂不做
 
-- 白名单全部放开：P0 完成前不做。
 - 对外 API 暴露公网：继续走 SSH。

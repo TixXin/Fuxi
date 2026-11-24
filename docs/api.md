@@ -64,6 +64,8 @@ bot 只回复白名单里的会话。名单存在桥接状态卷的 `allow.txt`�
 **改文件或调接口都立即生效，不用重启**，并自动同步到内核（`wechat.whitelistOnly` + `care.whitelist`）。
 
 - 空名单 = 谁都不回；`"*"` = 全部放行（慎用）。
+- 名单以外还回哪些、哪些会话永远不回，是设置「回复范围」`reply_scope` 和「不回的会话」`blocked_chats`
+  （`POST /settings`、管理台设置页、遥控 `/设置`），见 deploy.md「白名单」。
 - 元素可以是 chat_id 或**唯一**的显示名（备注/昵称/群名），有歧义返回 409。
 - `PUT {"items": [...]}` 整体替换；`POST {"add": [...], "remove": [...]}` 增删。
 

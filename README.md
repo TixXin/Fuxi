@@ -26,10 +26,11 @@
         └── 其他项目，如浮屿发版分享图 → 微信群
 ```
 
-桥接主循环（`bridge/fuxi_bridge/app.py`）：
+桥接主循环（`bridge/fuxi_bridge/app.py`；发送在 `sending.py`、回复后半段在 `replying.py`、
+产品助手在 `assist.py`、浮屿用户群的后台工作在 `groupwork.py`）：
 
 1. session/消息库有变化 → 找出时间戳变了的会话 → 按 sort_seq 水位取新消息；
-2. 过滤：只收**白名单**会话（`allow.txt` 热加载，见 `docs/api.md`）、只收文本和可读的 appmsg
+2. 过滤：只收**白名单**会话（`allow.txt` 热加载，见 `docs/api.md`；设置「回复范围」可放宽到全部私聊/群）、只收文本和可读的 appmsg
    （引用、链接、文件、小程序、聊天记录、拍一拍我），跳过自己发的、公众号、转账红包、
    超过 120 秒的旧消息；同一会话 1.5 秒内连发合并；
 3. 转成内核 webhook 格式（群聊带 `at_me`，从 source XML 的 `atuserlist` 和「@名字」判断；
@@ -53,13 +54,17 @@
 | 路径 | 内容 |
 |---|---|
 | `bridge/` | Linux 桥接（Python 3.12，依赖 cryptography、zstandard、RapidOCR；镜像另装 xdotool/xclip） |
-| `watchdog/` | 健康检查与告警推送（Uptime Kuma Push），微信/内核容器重建后自动重建 bridge |
-| `kernel/` | whale_girl Node 内核（上游文件未改，见 `kernel/UPSTREAM.md`） |
-| `docs/deploy.md` | 部署与运维（首次部署、白名单、熔断、升级微信、备份、排障） |
+| `bridge/admin/` | 网页管理台前端（React + Vite），打进桥接镜像 |
+| `watchdog/` | 健康检查与告警推送（Uptime Kuma Push），微信/内核容器重建后自动重建 bridge，每日备份 |
+| `kernel/` | whale_girl Node 内核（上游文件未改，见 `kernel/UPSTREAM.md`）；`kernel/fuxi/` 是我们的扩展（链接阅读、语音、补全） |
+| `docs/deploy.md` | 部署与运维（首次部署、白名单与回复范围、熔断、升级微信、备份与恢复、排障） |
 | `docs/api.md` | 对外发送 API 说明 |
-| `docs/ROADMAP.md` | 待办计划（P0 已完成） |
+| `docs/admin.md` | 网页管理台架构与接口 |
+| `docs/feedback-loop.md` | 浮屿群反馈闭环设计 |
+| `docs/ROADMAP.md` | 待办计划 |
 | `deploy/` | `compose.yaml` 与 `.env.example`；真实 `.env` 只在服务器 |
-| `scripts/deploy.sh` | 本机构建镜像并部署到服务器 |
+| `scripts/deploy.sh` | 本机构建镜像并部署到服务器；`rollback` 回滚、`backups` 拉备份 |
+| `scripts/sync-upstream.sh` | 同步 whale_girl 上游，`--check` 只看有没有新提交、对接文件变没变 |
 | `scripts/test.sh` | 在桥接镜像里跑单元测试 |
 | `scripts/check-secrets.sh` | 提交前拦截密钥/IP/wxid（`git config core.hooksPath .githooks` 启用） |
 

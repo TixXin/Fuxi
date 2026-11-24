@@ -15,39 +15,30 @@
 
 from __future__ import annotations
 
-import base64
 import collections
 import concurrent.futures as cf
-import hashlib
 import logging
 import os
 import queue
-import random
-import re
 import threading
 import time
-from dataclasses import dataclass, field
 
 from . import messages, store
 from . import announce, care, control, events, feedback, fuyu, images, issues, knowledge, outreach, schedule, settings, timing, voice
+from . import allow
 from .allow import AllowList
+from .assist import AssistMixin
+from .groupwork import GroupWorkMixin
 from .kernel import Kernel, KernelError
 from .messages import Message
-from .sender import Sender, SendError
+from .replying import ReplyMixin
+from .sender import Sender
+from .sending import SendingMixin, SendJob, _h, _squash  # noqa: F401  SendJob/_squash 其他模块和测试从这里导入
 
 log = logging.getLogger("fuxi")
 
 # 交给内核的消息类型：文本 + 解析过的 appmsg（引用、链接、文件、拍一拍…）
 ACCEPT_TYPES = ("text",) + messages.APP_KINDS + messages.MEDIA_KINDS
-
-
-def _h(text: str) -> str:
-    return hashlib.sha1(text.strip().encode()).hexdigest()
-
-
-def _squash(text: str) -> str:
-    """核对用：去掉所有空白（微信存库时可能改动换行/空格），其余逐字比较。"""
-    return "".join(text.split())
 
 
 def _brief(text: str) -> str:
@@ -58,40 +49,10 @@ def _brief(text: str) -> str:
     return f"<{len(text)}字 #{_h(text)[:8]}>"
 
 
-VERSION_Q = re.compile(r"版本|新版|更新|升级|发版|最新|release|v\d+\.\d+", re.I)
-BUG_Q = re.compile(r"修(了|好|复)|bug|问题|没反应|不行|不了|不能|看不到|打不开|闪退|崩|卡|报错|失败|异常|不显示|没效果", re.I)
-SOURCE_Q = re.compile(r"源码|源代码|开源|source ?code|代码在哪", re.I)
+class Bridge(SendingMixin, ReplyMixin, AssistMixin, GroupWorkMixin):
+    """桥接主体。按职责拆在几个 mixin 里：发送（sending.py）、回复后半段（replying.py）、
+    产品助手（assist.py）、浮屿用户群的后台工作（groupwork.py）；这里是收消息、交给内核、设置和启动。"""
 
-
-@dataclass
-class SendJob:
-    chat: str               # username
-    text: str | None = None
-    source: str = "bot"     # bot（自动回复，受限速）| reminder | api
-    image: str | None = None
-    sticker: str | None = None  # 表情包文件（按文件粘贴，GIF 保持动图）
-    at: str = ""                # 群里真 @ 的对象（成员在群里的显示名）；用不上真 @ 时退回文字「@名字」
-    verify: bool = True
-    done: threading.Event = field(default_factory=threading.Event)
-    ok: bool = False
-    verified: bool | None = None
-    error: str = ""
-    # 耗时（time.monotonic）：入队、开始处理、回车发出、核对完成；进入会话用时（秒）
-    t_queued: float = 0.0
-    t_start: float = 0.0
-    t_sent: float = 0.0
-    t_done: float = 0.0
-    open_s: float = 0.0
-
-
-def _date_ts(d: str) -> float:
-    try:
-        return time.mktime(time.strptime(d[:10], "%Y-%m-%d"))
-    except ValueError:
-        return float("inf")
-
-
-class Bridge:
     def __init__(self) -> None:
         env = os.environ
         self.db_root = env.get("FUXI_DB_ROOT") or store.find_db_root(env.get("FUXI_WX_CONFIG", "/wxconfig"))
@@ -117,6 +78,7 @@ class Bridge:
         # 白名单：/state/allow.txt 热加载；文件不存在时（第一次）只放行文件传输助手
         self.allowlist = AllowList(os.path.join(state, "allow.txt"), env.get("FUXI_ALLOW", "filehelper"),
                                    on_change=self._sync_kernel_allow)
+        self.allowlist.name_of = self.name_of
 
         self.sendq: "queue.Queue[SendJob]" = queue.Queue()
         self.sent_hashes: collections.deque[str] = collections.deque(maxlen=500)
@@ -180,6 +142,20 @@ class Bridge:
             if getattr(self, attr, None) != v:
                 setattr(self, attr, v)
                 changed.append(attr)
+        al = getattr(self, "allowlist", None)
+        scope, blocked = c.get("reply_scope"), set(c.get("blocked_chats"))
+        if al is not None and (scope, blocked) != (al.scope, al.blocked):
+            if scope != al.scope:
+                changed.append("reply_scope")
+                log.warning("回复范围：%s", allow.SCOPES.get(scope, scope))
+            if blocked != al.blocked:
+                changed.append("blocked_chats")
+            al.scope, al.blocked = scope, blocked
+            if "reply_scope" in changed and self.kernel_ready:
+                try:
+                    self._sync_kernel_allow(al.items)
+                except Exception as e:
+                    log.warning("同步白名单到内核失败：%s", e)
         if "masters" in changed and self.kernel_ready:
             self._sync_master()
         if "vision_mode" in changed and self.vision_mode != "off" and self.kernel_ready:
@@ -245,151 +221,6 @@ class Bridge:
     def self_names(self) -> list[str]:
         return list(dict.fromkeys(self.extra_names + self.reader.self_names()))
 
-    # ---------- 节奏 ----------
-    def in_quiet_hours(self, now: float | None = None) -> bool:
-        if not self.quiet or "-" not in self.quiet:
-            return False
-        try:
-            a, b = (int(x[:2]) * 60 + int(x[3:5]) for x in self.quiet.split("-", 1))
-        except ValueError:
-            return False
-        t = time.localtime(now or time.time())
-        m = t.tm_hour * 60 + t.tm_min
-        return a <= m < b if a <= b else (m >= a or m < b)
-
-    def rate_ok(self, chat: str) -> bool:
-        cut = time.time() - 60
-        recent = [c for t, c in self.sent_times if t >= cut]
-        return len(recent) < self.rate_global and recent.count(chat) < self.rate_chat
-
-    @staticmethod
-    def typing_delay(text: str) -> float:
-        """模拟打字：约每秒 6 字，0.8~6 秒，加随机抖动。"""
-        return min(6.0, 0.8 + len(text) / 6) + random.uniform(0, 0.8)
-
-    @classmethod
-    def first_delay(cls, text: str, spent: float) -> float:
-        """第一个气泡：像人边想边打，模型已经花掉的时间算进打字时间里，至少留 0.3~0.8 秒。"""
-        return max(random.uniform(0.3, 0.8), cls.typing_delay(text) - spent)
-
-    # ---------- 发送（单线程串行） ----------
-    def send(self, job: SendJob, timeout: float = 90) -> SendJob:
-        job.t_queued = time.monotonic()
-        self.sendq.put(job)
-        job.done.wait(timeout)
-        if not job.done.is_set():
-            job.error = "发送排队超时"
-        return job
-
-    def _send_worker(self) -> None:
-        while True:
-            job = self.sendq.get()
-            # 遥控回报（只发文件传输助手）在熔断时也放行，否则主人看不到 /状态
-            if self.halted and not (job.source == "control" and job.chat == "filehelper"):
-                job.error = f"发送已熔断：{self.halted}"
-                job.done.set()
-                continue
-            try:
-                self._attempt(job)
-                for retry in range(self.RETRIES):
-                    if not (job.error and "放弃发送" in job.error) or self.halted:
-                        break
-                    log.warning("发送到 %s 被放弃，%.1f 秒后重试（%d/%d）：%s", self.name_of(job.chat),
-                                self.RETRY_DELAY, retry + 1, self.RETRIES, job.error)
-                    time.sleep(self.RETRY_DELAY)
-                    job.error = ""
-                    self._attempt(job)
-            finally:
-                job.t_done = time.monotonic()
-                job.done.set()
-                time.sleep(0.6)  # 气泡间隔
-
-    RETRIES = 1          # 「放弃发送」（还没输入任何内容）后重试次数
-    RETRY_DELAY = 1.5
-
-    def _wait_for_human(self, job: SendJob) -> bool:
-        """有人正在网页版微信里操作时先等他停手，免得抢键盘鼠标、把他打了一半的字一起发出去。"""
-        quiet, max_wait = self.cfg.get("human_quiet_s"), self.cfg.get("human_max_wait_s")
-        if not quiet:
-            return True
-        t0 = time.monotonic()
-        while True:
-            idle = self.sender.human_idle()
-            if idle is None or idle >= quiet:
-                if time.monotonic() - t0 > 0.5:
-                    log.info("等人停手 %.0f 秒后发往 %s", time.monotonic() - t0, self.name_of(job.chat))
-                return True
-            if time.monotonic() - t0 >= max_wait:
-                job.error = f"有人在用微信，等了 {max_wait} 秒还没停手，这条没发"
-                self.last_abort = (time.time(), job.error)
-                log.warning("发往 %s 没发：%s", self.name_of(job.chat), job.error)
-                return False
-            if time.monotonic() - t0 < 0.5:
-                log.info("有人在用微信（%.0f 秒前操作过），等停手 %d 秒再发往 %s", idle, quiet, self.name_of(job.chat))
-            time.sleep(max(0.5, min(3.0, quiet - idle)))
-
-    def _attempt(self, job: SendJob) -> None:
-        """发送一次。放弃（未发出）只记 job.error；粘贴之后出错或核对失败才熔断。"""
-        if not self._wait_for_human(job):
-            self.last_send_ok = False
-            return
-        try:
-            t0 = int(time.time()) - 2
-            job.t_start = time.monotonic()
-            self.sender.last_open = 0.0
-            name = self.name_of(job.chat)
-            if job.text is not None and job.at:
-                self.sent_hashes.append(_h(job.text))
-                self.sender.send_text_at(name, job.at, job.text)
-            elif job.text is not None:
-                self.sent_hashes.append(_h(job.text))
-                self.sender.send_text(name, job.text)
-            if job.image:
-                self.sender.send_image(name, job.image)
-            if job.sticker:
-                self.sender.send_sticker(name, job.sticker)
-            if job.image or job.sticker:
-                self.media_sent[job.chat] = time.time()
-            job.ok = True
-            job.t_sent = time.monotonic()
-            job.open_s = self.sender.last_open
-            if job.verify:
-                job.verified = self._verify(job, t0)
-                if not job.verified:
-                    self.sender.forget_chat()
-                    self.halted = f"{time.strftime('%H:%M:%S')} 发往「{name}」后核对失败，可能发错会话"
-                    log.critical("已熔断，停止一切发送：%s。确认无误后 POST /resume 恢复", self.halted)
-            self.last_send_ok = job.verified is not False
-        except (SendError, OSError) as e:
-            job.error = str(e)
-            # 回车之后出错时界面状态未知，保守起见熔断；回车之前的错误都带「放弃发送」
-            if "放弃发送" not in str(e):
-                self.halted = f"{time.strftime('%H:%M:%S')} 发往「{job.chat}」时出错：{e}"
-                log.critical("已熔断：%s", self.halted)
-            else:
-                self.last_abort = (time.time(), str(e))
-            self.last_send_ok = False
-            log.error("发送到 %s 失败：%s", job.chat, e)
-
-    def _verify(self, job: SendJob, t0: int, wait: float = 8) -> bool:
-        want = _squash(job.text or "")
-        deadline = time.monotonic() + wait
-        while time.monotonic() < deadline:
-            try:
-                for mtype, text in self.reader.self_sent_since(job.chat, t0):
-                    if job.image and mtype == "image":
-                        return True
-                    if job.sticker and mtype in ("emoji", "image"):
-                        return True
-                    if job.text is not None and _squash(text) == want:
-                        return True
-                    if job.at and _squash(text).startswith("@") and _squash(text).endswith(want):
-                        return True   # 真 @ 存库是「@群昵称\u2005正文」
-            except Exception:
-                log.debug("核对读取失败", exc_info=True)
-            time.sleep(0.5)
-        return False
-
     # ---------- 收 ----------
     def _changed_chats(self) -> list[str]:
         changed = self.cache.refresh("session/session.db")
@@ -414,8 +245,8 @@ class Bridge:
     def _sync_kernel_allow(self, items: list[str]) -> None:
         if not getattr(self, "kernel_ready", False):
             return  # 内核就绪后 run() 里会补一次
-        self.kernel.set_whitelist(items)
-        log.info("白名单已同步到内核（%s）", "全部放行" if "*" in items else f"{len(items)} 个会话")
+        self.kernel.set_whitelist(items, open_=self.allowlist.open)
+        log.info("白名单已同步到内核（%s）", self.allowlist.brief())
 
     def _accept(self, m: Message) -> bool:
         if m.type not in ACCEPT_TYPES or not m.text.strip():
@@ -571,428 +402,6 @@ class Bridge:
             finally:
                 if sticker:
                     self._send_sticker(chat, sticker, delivered)
-
-    def _source_asked(self, payload: dict) -> bool:
-        """有人直接问 bot 的源码（私聊，或群里 @ / 引用 bot）。问浮屿开不开源的不算。"""
-        if not self.cfg.get("source_url"):
-            return False
-        if payload["chat_type"] == "group" and not (payload.get("at_me") or payload.get("reply_to_bot")):
-            return False
-        text = payload["text"]
-        for n in payload.get("self_names") or []:
-            text = text.replace(f"@{n}", " ")
-        return bool(SOURCE_Q.search(text)) and not re.search(r"浮屿|fuyu", text, re.I) and len(text.strip()) <= 40
-
-    # ---------- 产品助手 ----------
-    def is_assistant_group(self, chat: str) -> bool:
-        groups = self.cfg.get("assistant_groups")
-        return bool(groups) and chat.endswith("@chatroom") and (chat in groups or self.name_of(chat) in groups)
-
-    def _assist(self, chat: str, payload: dict) -> None:
-        """产品助手群里被 @ / 被回复时：从浮屿资料里找相关段落附在消息后面给内核参考；
-        找不到又像是提问时，提示内核如实说不确定，并私聊主人。"""
-        if not self.is_assistant_group(chat) or not (payload.get("at_me") or payload.get("reply_to_bot")):
-            return
-        q = payload["text"]
-        for n in payload.get("self_names") or []:
-            q = q.replace(f"@{n}", " ")
-        q = q.strip()
-        try:
-            hits = self.knowledge.search(q)
-        except Exception as e:   # 检索出错不能挡住回复
-            log.warning("资料检索出错：%s", e)
-            hits = []
-        if hits and knowledge.is_question(q):
-            hits = self._judge(q, hits)
-        notes, sure = self._fuyu_notes(q)
-        extra = ""
-        if hits:
-            extra += ("\n\n（以下是浮屿的说明资料，回答浮屿用法问题时以它为准；资料里没写的不要编，"
-                      "就说不确定、已经转给主人了）\n" + knowledge.render(hits))
-            log.info("产品助手 %s：附上 %d 段资料（%s）", self.name_of(chat), len(hits), "、".join(h.title[:20] for h in hits))
-        if notes:
-            extra += "\n\n（浮屿仓库的最新情况，回答版本、修没修时参考；开发记录未必就是对方说的问题，对不上就别提）\n" + "\n".join(notes)
-            log.info("产品助手 %s：附上仓库信息 %d 条", self.name_of(chat), len(notes))
-        if not hits and not sure and knowledge.is_question(q):
-            extra += "\n\n（浮屿资料里没找到这个问题的答案。不确定就直说，告诉对方已经转给主人了，不要编）"
-            self._handoff(chat, payload, q)
-        payload["text"] += extra
-
-    def _judge(self, q: str, hits: list) -> list:
-        """关键词检索只能找到「相关」的段落，让模型挑出真能回答这个问题的；都不能就返回空（转人工）。
-        模型出错或超时就原样返回，宁可多给资料也不挡回复。"""
-        listing = "\n\n".join(f"[{i}] {c.title}\n{c.text[:600]}" for i, c in enumerate(hits, 1))
-        system = ("你在帮浮屿（一款桌面应用）的用户群答疑做资料筛选。给你用户的问题和几段编号的说明资料，"
-                  "找出能直接回答这个问题的资料编号。只输出编号，用英文逗号分隔；没有任何一段能回答就只输出 0。")
-        pool = cf.ThreadPoolExecutor(max_workers=1)
-        try:
-            out = pool.submit(self.kernel.complete, system, f"问题：{q}\n\n资料：\n{listing}", 20).result(timeout=20)
-        except Exception as e:
-            log.warning("资料筛选出错，原样附上：%s", e)
-            return hits
-        finally:
-            pool.shutdown(wait=False)
-        picked = [int(n) for n in re.findall(r"\d+", out) if 1 <= int(n) <= len(hits)]
-        log.info("产品助手资料筛选：%s → %s", out[:20], picked or "都不能回答")
-        return [hits[i - 1] for i in dict.fromkeys(picked)]
-
-    def _fuyu_notes(self, q: str) -> tuple[list[str], bool]:
-        """版本 / #编号 / 像问题反馈时，从 F2 的仓库缓存里找参考。返回 (几行说明, 是否把握较大可不转人工)。"""
-        notes, sure = [], False
-        try:
-            bug = bool(BUG_Q.search(q))   # 「更新后打不开了」是故障反馈，不算问版本
-            if VERSION_Q.search(q):
-                notes.append(self.fuyu.version_brief())
-                sure = bool(self.fuyu.latest()) and not bug
-            numbers = list(dict.fromkeys(int(x) for x in re.findall(r"#(\d{1,6})", q)))
-            for n in numbers:
-                notes.append(self.fuyu.status(n))
-                sure = True
-            if bug and not numbers:
-                for score, it in self.fuyu.find(q, k=2):
-                    if score >= 0.45:
-                        notes.append(self.fuyu.status(it["number"]))
-                        sure = sure or score >= 0.55
-        except Exception as e:
-            log.warning("浮屿仓库信息出错：%s", e)
-        return notes, sure
-
-    def tell_owner(self, text: str) -> None:
-        """私聊主人（发到文件传输助手），不等结果。"""
-        def go():
-            job = self.send(SendJob(chat="filehelper", text=text, source="control"))
-            if not job.ok:
-                log.warning("给主人的通知没发出去：%s", job.error)
-        threading.Thread(target=go, name="tell-owner", daemon=True).start()
-
-    def _handoff(self, chat: str, payload: dict, q: str) -> None:
-        now = time.time()
-        recent = [t for t, c in self.handoffs if now - t < 3600]
-        if len(recent) >= 10 or any(c == chat and now - t < 180 for t, c in self.handoffs):
-            log.info("产品助手 %s：转人工太频繁，这次不私聊主人", self.name_of(chat))
-            return
-        self.handoffs.append((now, chat))
-        self.events.publish("handoff", {"chat": chat, "chat_name": self.name_of(chat),
-                                        "sender": payload.get("senderName") or "", "question": q[:300]})
-        text = (f"【浮屿群求助】{payload.get('senderName') or '有人'} 在「{self.name_of(chat)}」问：\n{q[:300]}\n"
-                "资料里没找到相关内容，可能需要你来回。")
-
-        def go():
-            job = self.send(SendJob(chat="filehelper", text=text, source="control"))
-            if not job.ok:
-                log.warning("转人工通知没发出去：%s", job.error)
-        threading.Thread(target=go, name="handoff", daemon=True).start()
-        log.info("产品助手 %s：资料里没找到，已转主人", self.name_of(chat))
-
-    # ---------- 群反馈（F1） ----------
-    def is_feedback_group(self, chat: str) -> bool:
-        groups = self.cfg.get("feedback_groups")
-        return bool(groups) and chat.endswith("@chatroom") and (chat in groups or self.name_of(chat) in groups)
-
-    def _collect(self, new: list[Message]) -> None:
-        """反馈群的每条消息都记下来（不管白名单、静默、有没有 @ bot），整理交给 feedback.py。"""
-        for m in new:
-            try:
-                self.outreach.observe(m)
-            except Exception:
-                log.exception("群营业观察消息出错")
-            if m.type in ("system", "revoke") or not m.text.strip():
-                continue
-            if m.is_self:
-                role, name = "bot", "浮汐"
-            else:
-                role = "owner" if m.sender in self.masters else ""
-                name = self.name_of(m.sender) if m.sender else "群友"
-            try:
-                self.feedback.add(m.msg_id, float(m.create_time), m.chat, m.sender, name, self._render(m), role)
-            except OSError as e:
-                log.warning("反馈收集写入失败：%s", e)
-
-    def _feedback_loop(self) -> None:
-        """每分钟看一次：整点前后整理（每小时）、到点发摘要和群小结。"""
-        time.sleep(60)
-        while True:
-            try:
-                self._feedback_tick()
-            except Exception:
-                log.exception("群反馈定时任务出错")
-            time.sleep(60)
-
-    def _feedback_tick(self, now: float | None = None) -> None:
-        if not self.cfg.get("feedback_groups"):
-            return
-        fb, now = self.feedback, now or time.time()
-        try:
-            self.outreach.tick(now)
-        except Exception:
-            log.exception("群营业定时任务出错")
-        try:
-            self._agent_watch(now)
-        except Exception:
-            log.exception("云端代理检查出错")
-        digest_due = fb.due("digest", self.cfg.get("digest_time"), now)
-        group_due = fb.due("group", self.cfg.get("group_summary_time"), now)
-        if digest_due or group_due or now - float(fb.meta.get("classified_at") or 0) >= feedback.CLASSIFY_EVERY:
-            try:
-                msg = fb.classify(now)
-                if msg != "没有新消息":
-                    log.info("群反馈：%s", msg)
-            except Exception as e:   # 整理失败也照样发（用已有的条目），错误会写在摘要末尾
-                log.warning("群反馈整理失败：%s", e)
-        if digest_due:
-            since = float(fb.meta.get("digest_at") or 0) or now - 86400
-            text = fb.digest(since=max(since, now - 3 * 86400))
-            to = self.masters[0] if self.masters else "filehelper"
-            fb.mark("digest", now)
-            job = self.send(SendJob(chat=to, text=text, source="control"))
-            if job.ok:
-                log.info("反馈摘要已发给主人")
-            else:
-                log.warning("反馈摘要没发出去：%s", job.error)
-        if group_due:
-            fb.mark("group", now)
-            text = fb.group_summary(feedback._day(now))
-            if not text:
-                log.info("群反馈：今天没有反馈，不发群小结")
-                return
-            day = feedback._day(now)
-            chats = {c for i in fb.items if feedback._day(i["last_seen"]) == day for c in i["chats"]}
-            for chat in sorted(chats):
-                if not self.is_feedback_group(chat) or not self._allowed_chat(chat):
-                    continue
-                job = self.send(SendJob(chat=chat, text=text, source="control"))
-                if job.ok:
-                    self.outreach.bot_posted(chat, now)
-                    log.info("群小结已发到 %s", self.name_of(chat))
-                else:
-                    log.warning("群小结没发到 %s：%s", self.name_of(chat), job.error)
-
-    AGENT_LATE = 2 * 3600
-
-    def _agent_watch(self, now: float) -> None:
-        """派给代理超过 2 小时还没结果就提醒主人一次（错过了 PR 事件的，用 PR 缓存补上）；
-        开 issue 的 token、代理凭据到期前 14 天每天提醒一次。"""
-        texts = []
-        for it in self.feedback.agent_waiting():
-            prs = [p for p in self.fuyu.fixes_for(it["issue"]) if fuyu._ts(p.get("created_at")) >= it["agent_at"] - 60]
-            if prs:
-                self.feedback.set_fields(it, agent_pr=prs[-1]["number"])
-            elif now - it["agent_at"] > self.AGENT_LATE and not it.get("agent_late"):
-                self.feedback.set_fields(it, agent_late=True)
-                repo = self.cfg.get("knowledge_repo") or self.fuyu.repo
-                look = ("Mac 开着吗？日志在 ~/.fuxi-fix/logs/" if it.get("agent_where") == "local"
-                        else f"看看运行记录：https://github.com/{repo}/actions/workflows/claude-fix.yml")
-                texts.append(f"【代理还没结果】反馈 #{it['id']}「{it['title']}」→ issue #{it['issue']}，派出已超过 2 小时。\n{look}")
-        gh = self.fixflow.gh
-        if gh.ready and now - gh.checked_at > 86400:
-            try:
-                gh.check()
-            except Exception as e:
-                log.warning("检查开 issue 的 token 失败：%s", e)
-        day = feedback._day(now)
-        if self.feedback.meta.get("expiry_day") != day:
-            soon = [f"{name}将在 {d} 到期" for name, d in self.token_expiry() if 0 <= (_date_ts(d) - now) / 86400 <= 14]
-            soon += [f"{name}已在 {d} 过期" for name, d in self.token_expiry() if _date_ts(d) < now]
-            if soon:
-                self.feedback.meta["expiry_day"] = day
-                self.feedback._save()
-                texts.append("【到期提醒】" + "；".join(soon) + "。到期后 /修 用不了，记得换新的（步骤见 docs/feedback-loop.md）。")
-        for text in texts:
-            job = self.send(SendJob(chat="filehelper", text=text, source="control"))
-            if not job.ok:
-                log.warning("云端代理提醒没发出去：%s", job.error)
-
-    def token_expiry(self) -> list[tuple[str, str]]:
-        """[(名称, YYYY-MM-DD)]：开 issue 的 token（GitHub 响应头）、代理凭据（设置「代理凭据到期」）。"""
-        out = []
-        if self.fixflow.gh.expires:
-            out.append(("开 issue 的 token", self.fixflow.gh.expires[:10]))
-        if self.cfg.get("agent_token_expires"):
-            out.append(("代理凭据 CLAUDE_CODE_OAUTH_TOKEN", self.cfg.get("agent_token_expires")))
-        return out
-
-    def _fuyu_events(self, events: list[dict]) -> None:
-        """浮屿仓库同步发现变化：发正式版时通知群里的反馈人（见 outreach.py）；按「浮屿动态」设置私聊主人（文件传输助手）。"""
-        for e in events:
-            if e.get("type") == "new_release" and not e.get("prerelease") and self.cfg.get("outreach"):
-                threading.Thread(target=self.outreach.on_release, args=(e["tag"],), name="fix-notify", daemon=True).start()
-        texts = []
-        for e in events:   # /修 派给代理的 issue 有结果了：不管「浮屿动态」怎么设都告诉主人
-            if e.get("type") == "pr_opened":
-                for it in self.feedback.agent_items(e.get("refs") or []):
-                    if it.get("agent_pr"):
-                        continue
-                    self.feedback.set_fields(it, agent_pr=e["number"])
-                    texts.append(f"【代理出 PR 了】反馈 #{it['id']}「{it['title']}」→ issue #{it['issue']}\n"
-                                 f"PR #{e['number']}：{e['title']}\n{e['url']}\n看过没问题就在 GitHub 上转正式并合并。")
-            elif e.get("type") == "agent_stuck":
-                for it in self.feedback.agent_items([e["number"]]):
-                    if it.get("agent_stuck") or it.get("agent_pr"):
-                        continue
-                    self.feedback.set_fields(it, agent_stuck=True)
-                    texts.append(f"【代理没修成】反馈 #{it['id']}「{it['title']}」→ issue #{it['issue']}\n"
-                                 f"它查到的情况写在 issue 评论里：{e['url']}\n可以补充线索后再 /修 {it['id']}，或者自己修。")
-        mode = self.cfg.get("fuyu_notify")
-        if mode == "release":
-            events = [e for e in events if e.get("type") == "new_release"]
-        if events and mode != "off":
-            lines = [fuyu.render_event(e) for e in events[:12]]
-            if len(events) > 12:
-                lines.append(f"……还有 {len(events) - 12} 条（/浮屿 看最近动态）")
-            texts.append("【浮屿动态】\n" + "\n".join("- " + x for x in lines))
-        if not texts:
-            return
-        text = "\n\n".join(texts)
-
-        def go():   # 同步线程还拿着锁，发送可能要等几十秒，放到别的线程里
-            job = self.send(SendJob(chat="filehelper", text=text, source="control"))
-            if not job.ok:
-                log.warning("浮屿动态通知没发出去：%s", job.error)
-        threading.Thread(target=go, name="fuyu-notify", daemon=True).start()
-
-    def _understand(self, chat: str, batch: list[Message], tr: "timing.Trace") -> None:
-        """图片、语音交给内核前先看懂/听懂：「[图片]（图片内容：…）」「[语音 5秒]（语音内容：…）」。
-        只处理最后发言人的（_payload 只带这些），每种最多最后三条。任何失败都保留原占位，不影响回复。"""
-        group = chat.endswith("@chatroom")
-        last = batch[-1].sender
-        t0 = time.monotonic()
-        did = False
-        for kind, mode, label in (("image", self.vision_mode, "图片内容"), ("voice", self.voice_mode, "语音内容")):
-            if mode == "off" or (mode == "private" and group):
-                continue
-            todo = [m for m in batch if m.type == kind and m.media and m.sender == last]
-            for m in todo[-3:]:
-                key = f"{kind}:{chat}:{m.media}"
-                got = self.media_cache.get(key)
-                if got is None:
-                    did = True
-                    try:
-                        got = self._recognize(chat, kind, m.media)
-                    except (ValueError, KernelError) as e:
-                        log.info("%s失败 %s：%s", "看图" if kind == "image" else "语音识别", self.name_of(chat), e)
-                        continue
-                    self.media_cache[key] = got
-                    while len(self.media_cache) > 300:
-                        self.media_cache.popitem(last=False)
-                if got:
-                    m.text = f"{m.text}（{label}：{got}）"
-                    if self.is_feedback_group(chat):
-                        self.feedback.annotate(m.msg_id, self._render(m))
-        if did:
-            tr.add("vision", time.monotonic() - t0)
-
-    def _recognize(self, chat: str, kind: str, media: str) -> str:
-        if kind == "image":
-            jpeg, src = self.images.load(chat, media)
-            text = self.kernel.vision(base64.b64encode(jpeg).decode())
-            log.info("看图 %s：%s（%d 字）", self.name_of(chat), src, len(text))
-            return text
-        wav = self.voices.load(chat, int(media))
-        text = self.kernel.asr(base64.b64encode(wav).decode())
-        log.info("语音识别 %s：%.1f 秒 → %d 字", self.name_of(chat), (len(wav) - 44) / 32000, len(text))
-        return text
-
-    def _deliver(self, chat: str, batch: list[Message], resp: dict, tr: "timing.Trace", k0: float) -> bool:
-        """发出内核的文字回复；全部气泡都发成功才返回 True（随后才发表情包）。"""
-        if resp.get("action") != "reply":
-            log.info("内核不回复：%s", resp.get("reason") or resp.get("skipped") or resp.get("action"))
-            tr.reason = f"内核决定不回：{resp.get('reason') or resp.get('skipped') or resp.get('action')}"
-            return False
-        bubbles = [b for b in (resp.get("bubbles") or [resp.get("reply") or ""]) if b and b.strip()]
-        allowed, reason = self.kernel.send_permission(chat, self.name_of(chat))
-        if not allowed:
-            log.info("内核不允许在 %s 发言：%s", chat, reason)
-            tr.reason = f"不允许发言：{reason}"
-            return False
-        tr.add("kernel", time.monotonic() - k0)
-        mention = resp.get("mention") or ""
-        for i, b in enumerate(bubbles):
-            if self.paused:
-                tr.reason = "发送途中被暂停"
-                return False
-            if not self.rate_ok(chat):
-                tr.reason = "超过发送频率上限"
-                log.warning("超过发送频率上限，丢弃 %s 的剩余 %d 条回复", self.name_of(chat), len(bubbles) - i)
-                return False
-            at, text = "", b
-            if i == 0 and mention and chat.endswith("@chatroom"):
-                at = self._mention_name(chat, batch, mention)
-                head = text.lstrip()
-                if head.startswith("@" + mention):   # 模型自己写了「@名字」开头：去掉，换成真 @
-                    text = head[len(mention) + 1:].lstrip(" \u2005：:，,") or text
-            delay = self.first_delay(text, tr.s["kernel"]) if i == 0 else self.typing_delay(text)
-            time.sleep(delay)
-            tr.add("typing", delay)
-            if i == 0 and self._revoked(batch):
-                log.info("%s 在生成回复期间撤回了消息，放弃这次回复", self.name_of(chat))
-                tr.reason = "对方撤回了"
-                return False
-            self.sent_times.append((time.time(), chat))
-            job = self.send(SendJob(chat=chat, text=text, at=at))
-            if not job.ok:
-                tr.reason = f"发送失败：{job.error}"
-                return False
-            tr.replies.append(text)
-            if job.t_sent:
-                tr.add("queue", job.t_start - job.t_queued)
-                tr.add("open", job.open_s)
-                tr.add("paste", job.t_sent - job.t_start - job.open_s)
-                tr.add("verify", job.t_done - job.t_sent)
-                tr.bubble_sent(time.time() - (time.monotonic() - job.t_sent))
-        return True
-
-    def _mention_name(self, chat: str, batch: list[Message], mention: str) -> str:
-        """内核给的 @ 对象（名字）→ 该成员在群里的显示名（@ 弹窗按它过滤）。
-        认不出是这批消息里的谁，就原样用内核给的名字（多半会退回文字 @）。"""
-        for m in reversed(batch):
-            if not m.sender or m.sender == self.self_wxid:
-                continue
-            try:
-                shown = self.reader.member_name(chat, m.sender)
-            except Exception:
-                log.debug("读群昵称失败", exc_info=True)
-                shown = ""
-            names = [n for n in (shown, self.name_of(m.sender)) if n]
-            # 内核取 @ 名字时遇空格截断（「tixxin - 建议…」→「tixxin」），所以前缀也算
-            if mention == m.sender or any(n == mention or n.startswith(mention) for n in names):
-                return shown or mention
-        return mention
-
-    def _sticker_file(self, path: str) -> str:
-        """内核容器里的路径（/app/data/...）→ 桥接这边只读挂载的同一个文件。"""
-        for prefix in ("/app/data/", "data/"):
-            if path.startswith(prefix):
-                return os.path.join(self.kernel_data, path[len(prefix):])
-        return path
-
-    def _send_sticker(self, chat: str, item: dict, delivered: bool) -> None:
-        """文字发完后发内核预留的表情包：领取 → 发送 → 回执。文字没发成就取消预留。"""
-        sid = item.get("id") or ""
-        try:
-            if not delivered or self.paused or self.halted or not self.rate_ok(chat):
-                self.kernel.sticker_cancel(item)
-                log.info("取消表情包任务（文字回复没发完或已暂停）")
-                return
-            got = self.kernel.sticker_claim(sid)
-            path = self._sticker_file(got.get("path") or item.get("path") or "")
-            if not os.path.isfile(path):
-                self.kernel.sticker_ack(sid, "failed", "表情包文件桥接读不到（内核 data 卷没挂载？）")
-                log.error("表情包文件读不到：%s", path)
-                return
-            time.sleep(random.uniform(0.8, 2.0))
-            self.sent_times.append((time.time(), chat))
-            job = self.send(SendJob(chat=chat, sticker=path))
-            status = "failed" if not job.ok else ("confirmed" if job.verified else "unconfirmed")
-            self.kernel.sticker_ack(sid, status, job.error)
-        except KernelError as e:
-            log.warning("表情包任务处理失败：%s", e)
-
-    def _revoked(self, batch: list[Message]) -> set[str]:
-        try:
-            return self.reader.revoked(batch)
-        except Exception:
-            log.exception("检查撤回失败")
-            return set()
 
     # ---------- 健康 ----------
     def problems(self) -> list[str]:

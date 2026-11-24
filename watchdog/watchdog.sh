@@ -2,6 +2,8 @@
 # 浮汐看门狗：跑在宿主网络上，每分钟做两件事
 #   1. 微信容器或内核容器被重建 → bridge 还挂在旧的 pid/网络命名空间上 → 重建 bridge
 #   2. 读 bridge /healthz → 推送到 Uptime Kuma Push 监控（Kuma 负责 Bark 等通知）
+# 另外每天 BACKUP_AT（默认 04:30）把内核数据和桥接状态打包到 /backups（compose 挂到部署目录的 backups/），
+# 留最近 BACKUP_KEEP（默认 14）份；备份失败会在 Kuma 里报出来。
 # 所需环境变量见 deploy/.env.example；KUMA_PUSH_URL 为空时只写日志。
 set -u
 
@@ -10,6 +12,10 @@ WECHAT="${WECHAT_CONTAINER:-wechat-selkies}"
 API="http://127.0.0.1:${FUXI_API_PORT:-8790}"
 COMPOSE="docker compose --project-directory /fuxi"
 last_status=""
+BACKUP_AT="${BACKUP_AT:-04:30}"
+BACKUP_KEEP="${BACKUP_KEEP:-14}"
+backup_day=""
+backup_err=""
 down_count=0
 DOWN_AFTER="${WATCHDOG_DOWN_AFTER:-3}"   # 连续几次异常才报警（部署重启约 30 秒，避免误报）
 
@@ -39,6 +45,36 @@ check_namespaces() {
   fi
 }
 
+# 备份：两个卷只读挂在 /src 下；先写 .tmp 再改名，半截文件不会被当成备份
+backup_now() {
+  [ -d /backups ] && [ -d /src ] || { backup_err="备份目录没挂载"; return 1; }
+  stamp=$(date +%Y%m%d-%H%M)
+  for v in kernel-data bridge-state; do
+    [ -d "/src/$v" ] || continue
+    out="/backups/$v-$stamp.tgz"
+    if ! tar czf "$out.tmp" -C "/src/$v" . 2>/tmp/backup.err; then
+      rm -f "$out.tmp"
+      backup_err="备份 $v 失败：$(head -c 200 /tmp/backup.err)"
+      log "$backup_err"
+      return 1
+    fi
+    chmod 600 "$out.tmp" && mv "$out.tmp" "$out"
+    # 只留最近 BACKUP_KEEP 份
+    ls -1t /backups/"$v"-*.tgz 2>/dev/null | tail -n +"$((BACKUP_KEEP + 1))" | xargs -r rm -f
+  done
+  backup_err=""
+  log "备份完成：$(ls -1t /backups/*.tgz | head -2 | xargs -n1 basename | tr '\n' ' ')"
+}
+
+maybe_backup() {
+  [ -n "$BACKUP_AT" ] || return 0
+  today=$(date +%F)
+  # 前面补个 1 再按数字比：0430 → 10430，避免前导 0 被当成八进制
+  [ "$backup_day" != "$today" ] && [ "1$(date +%H%M)" -ge "1$(echo "$BACKUP_AT" | tr -d :)" ] || return 0
+  backup_day=$today
+  backup_now
+}
+
 check_health() {
   body=$(curl -s -m 10 -H "Authorization: Bearer ${FUXI_API_TOKEN:-}" "$API/healthz")
   if [ -z "$body" ]; then
@@ -50,6 +86,10 @@ check_health() {
     # 取 problems 数组内容，压成一行
     msg=$(echo "$body" | sed -n 's/.*"problems": \[\(.*\)\], "wechat".*/\1/p' | sed 's/", "/；/g; s/"//g')
     [ -n "$msg" ] || msg="桥接不健康"
+  fi
+  if [ -n "$backup_err" ]; then
+    if [ "$status" = up ]; then msg="$backup_err"; else msg="$msg；$backup_err"; fi
+    status=down
   fi
   if [ "$status" = down ]; then down_count=$((down_count + 1)); else down_count=0; fi
   # 熔断立即报警；其他问题连续 DOWN_AFTER 次才报
@@ -63,8 +103,12 @@ check_health() {
   push "$status" "$msg"
 }
 
-log "看门狗启动：间隔 ${INTERVAL}s，Kuma 推送$([ -n "${KUMA_PUSH_URL:-}" ] && echo 已配置 || echo 未配置)"
+log "看门狗启动：间隔 ${INTERVAL}s，Kuma 推送$([ -n "${KUMA_PUSH_URL:-}" ] && echo 已配置 || echo 未配置)，每天 ${BACKUP_AT:-（不备份）} 备份"
+[ "${1:-}" = backup ] && { backup_now; exit $?; }   # docker exec fuxi-watchdog /watchdog.sh backup：立即备份一次
+# 启动时如果今天还没有备份（比如 04:30 时容器没在跑），过了时间点就补一次
+ls /backups/kernel-data-"$(date +%Y%m%d)"-*.tgz >/dev/null 2>&1 && backup_day=$(date +%F)
 while true; do
+  maybe_backup
   if check_namespaces; then check_health; fi
   sleep "$INTERVAL"
 done

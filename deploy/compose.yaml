@@ -70,9 +70,15 @@ services:
       FUXI_API_PORT: ${FUXI_API_PORT:-8790}
       FUXI_API_TOKEN: ${FUXI_API_TOKEN:-}
       KUMA_PUSH_URL: ${KUMA_PUSH_URL:-}
+      BACKUP_AT: ${FUXI_BACKUP_AT-04:30}            # 每天备份的时间；设成空 = 不备份
+      BACKUP_KEEP: ${FUXI_BACKUP_KEEP:-14}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock   # 只用于 inspect 与重建 bridge
       - .:/fuxi:ro                                    # compose.yaml 与 .env
+      # 每日备份：两个卷只读挂进来打包，放到部署目录的 backups/（scripts/deploy.sh backups 拉回本机）
+      - kernel-data:/src/kernel-data:ro
+      - bridge-state:/src/bridge-state:ro
+      - ${FUXI_BACKUP_DIR:-./backups}:/backups
 
 volumes:
   kernel-data:

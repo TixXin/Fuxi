@@ -33,6 +33,46 @@ class AllowListTest(unittest.TestCase):
         self.assertTrue(a.allows("anyone"))
         self.assertGreaterEqual(len(self.changes), 4)
 
+    def test_scope_and_blocked(self):
+        a = AllowList(self.path, "filehelper, g1@chatroom")
+        a.name_of = {"wxid_bad": "讨厌鬼", "g2@chatroom": "吵闹群"}.get
+        self.assertFalse(a.allows("wxid_x") or a.allows("g2@chatroom"))
+        self.assertFalse(a.open)
+        a.scope = "private"
+        self.assertTrue(a.allows("wxid_x") and a.open)
+        self.assertFalse(a.allows("g2@chatroom"))
+        self.assertTrue(a.allows("g1@chatroom"))      # 名单里的群照回
+        a.scope = "groups"
+        self.assertTrue(a.allows("g2@chatroom"))
+        self.assertFalse(a.allows("wxid_x"))
+        a.scope = "all"
+        a.blocked = {"讨厌鬼", "g1@chatroom", "filehelper"}
+        self.assertFalse(a.allows("wxid_bad"))         # 按名字拉黑
+        self.assertFalse(a.allows("g1@chatroom"))      # 黑名单优先于白名单
+        self.assertTrue(a.allows("filehelper"))        # 文件传输助手不受影响（遥控要用）
+        self.assertEqual(a.brief(), "全部私聊和群（名单 2 个），3 个不回")
+
+    def test_scope_setting_syncs_kernel(self):
+        from unittest import mock
+
+        b = Bridge.__new__(Bridge)
+        b.allowlist = AllowList(self.path, "filehelper")
+        b.kernel_ready = True
+        b.kernel = mock.Mock()
+        from fuxi_bridge import settings
+        b.cfg = settings.Settings(os.path.join(os.path.dirname(self.path), "settings.json"), {})
+        b.images = mock.Mock()
+        b.apply_settings()
+        b.kernel.set_whitelist.assert_not_called()   # 默认就是只回名单，不用同步
+        b.cfg.set("reply_scope", "private")
+        changed = b.apply_settings()
+        self.assertIn("回复范围", changed)
+        b.kernel.set_whitelist.assert_called_with(["filehelper"], open_=True)
+        self.assertTrue(b.allowlist.allows("wxid_someone"))
+        b.cfg.set("blocked_chats", "wxid_someone")
+        b.apply_settings()
+        self.assertFalse(b.allowlist.allows("wxid_someone"))
+
     def test_seed_only_when_missing(self):
         with open(self.path, "w") as f:
             f.write("filehelper\n")

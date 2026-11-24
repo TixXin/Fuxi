@@ -35,6 +35,8 @@ import os
 import time
 from typing import TYPE_CHECKING
 
+from . import allow
+
 if TYPE_CHECKING:
     from .app import Bridge
     from .messages import Message
@@ -141,10 +143,14 @@ class Control:
         return "已恢复。" + (f"（解除了熔断：{was}）" if was else "")
 
     def list_allow(self, _arg: str) -> str:
-        items = self.b.allowlist.items
+        al = self.b.allowlist
+        items = al.items
+        head = f"回复范围：{allow.SCOPES.get(al.scope, al.scope)}（/设置 回复范围 改）\n"
+        if al.blocked:
+            head += "不回的会话：" + "、".join(sorted(al.blocked)) + "\n"
         if not items:
-            return "白名单为空（谁都不回）。"
-        return "白名单：\n" + "\n".join(f"- {'全部放行' if i == '*' else self.b.name_of(i)}" for i in items)
+            return head + ("白名单为空。" if al.open else "白名单为空（谁都不回）。")
+        return head + "白名单：\n" + "\n".join(f"- {'全部放行' if i == '*' else self.b.name_of(i)}" for i in items)
 
     def allow(self, arg: str) -> str:
         chat, err = self._resolve(arg)
@@ -407,8 +413,7 @@ class Control:
 
     # ---- 工具 ----
     def _allow_brief(self) -> str:
-        items = self.b.allowlist.items
-        return "全部放行" if "*" in items else f"{len(items)} 个会话"
+        return self.b.allowlist.brief()
 
     def _resolve(self, arg: str) -> tuple[str, str]:
         arg = arg.strip()

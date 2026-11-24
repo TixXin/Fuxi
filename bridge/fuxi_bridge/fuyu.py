@@ -1,10 +1,10 @@
 """浮屿仓库只读同步（F2，见 docs/feedback-loop.md）：版本、issue、PR 缓存到 /state/fuyu/，供查进度、反馈查重用。
 
 来源：公开仓库（默认 TixXin/Fuyu，与产品助手共用 /设置 资料仓库）。桥接每 30 分钟同步一次：
-  releases   GET /releases（带 ETag，没变化时 GitHub 回 304，不占次数）
+  releases   GET /releases：第一次分页全拉，之后只拉第一页并带 ETag（没变化时 GitHub 回 304，不占次数）
   issue / PR GET /issues?state=all&since=上次（issue 接口同时返回 PR，按 pull_request 字段分开）
-未登录每小时 60 次，第一次全量约 15 次请求，之后每轮 2 次左右。部署时可在 .env 设 FUXI_GITHUB_TOKEN 提高额度
-（只读、只授权浮屿仓库即可）。机房直连 GitHub API 约 2 秒，不用走代理。
+未登录每小时 60 次，第一次全量约 30 次请求，之后每轮 2 次左右。部署时可在 .env 设 FUXI_GITHUB_TOKEN 提高额度
+（只读、只授权浮屿仓库即可）。机房直连 GitHub API 约 2 秒，不用走代理；但大响应常读到一半断，所以分小页、断了重试。
 
 存在 /state/fuyu/：
   releases.json  [{tag_name, name, body, published_at, html_url, prerelease}]，新的在前，不含草稿
@@ -26,6 +26,7 @@ import math
 import os
 import re
 import threading
+import http.client
 import time
 import urllib.error
 import urllib.parse
@@ -37,7 +38,8 @@ log = logging.getLogger("fuxi.fuyu")
 
 API = "https://api.github.com/repos/{repo}"
 SYNC_EVERY = 30 * 60
-MAX_PAGES = 30
+MAX_PAGES = 60
+RELEASE_PAGE = 20   # 版本说明很长：一页 100 个约 1 MB，机房跨境链路经常读到一半断
 BODY_MAX = 2000
 EVENTS_MAX = 200
 
@@ -133,7 +135,14 @@ class Fuyu:
             raise RuntimeError(f"GitHub 返回 {e.code}") from None
 
     def _get_json(self, url: str, etag: str = ""):
-        status, headers, body = self.http(url, etag)
+        for attempt in range(3):   # 跨境链路偶尔读到一半断开，重试
+            try:
+                status, headers, body = self.http(url, etag)
+                break
+            except (OSError, http.client.HTTPException) as e:
+                if attempt == 2:
+                    raise RuntimeError(f"网络中断（{type(e).__name__}）") from None
+                time.sleep(3 * (attempt + 1))
         if status == 304:
             return 304, headers, None
         return status, headers, json.loads(body or b"null")
@@ -158,21 +167,33 @@ class Fuyu:
         events: list[dict] = []
         now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
-        # releases
-        status, headers, data = self._get_json(base + "/releases?per_page=100", self.meta.get("releases_etag", ""))
+        # releases：第一次全部分页拉；之后只看第一页（新版本总在最前面），没变化时 304
+        old = {r["tag_name"]: r for r in self.releases}
+        status, headers, data = self._get_json(f"{base}/releases?per_page={RELEASE_PAGE}",
+                                               "" if first else self.meta.get("releases_etag", ""))
         if status != 304:
-            old = {r["tag_name"] for r in self.releases}
-            rels = sorted((_release(r) for r in data or [] if not r.get("draft")),
-                          key=lambda r: _ts(r["published_at"]), reverse=True)
+            etag = headers.get("ETag") or headers.get("etag") or ""
+            got = list(data or [])
+            if first:
+                for page in range(2, MAX_PAGES + 1):
+                    if len(data or []) < RELEASE_PAGE:
+                        break
+                    _, _, data = self._get_json(f"{base}/releases?per_page={RELEASE_PAGE}&page={page}")
+                    got += data or []
+            fresh = {r["tag_name"]: _release(r) for r in got if not r.get("draft")}
             if not first:
                 events += [{"type": "new_release", "tag": r["tag_name"], "prerelease": r["prerelease"],
-                            "url": r["html_url"], "at": r["published_at"]} for r in rels if r["tag_name"] not in old]
-            self.releases = rels
-            self.meta["releases_etag"] = headers.get("ETag") or headers.get("etag") or ""
+                            "url": r["html_url"], "at": r["published_at"]} for t, r in fresh.items() if t not in old]
+            merged = {**old, **fresh}
+            if not first:   # 第一页里消失的（删掉或改回草稿）只可能是最近的版本：比第一页最旧的还新就去掉
+                oldest = min((_ts(r["published_at"]) for r in fresh.values()), default=0)
+                merged = {t: r for t, r in merged.items() if t in fresh or _ts(r["published_at"]) < oldest}
+            self.releases = sorted(merged.values(), key=lambda r: _ts(r["published_at"]), reverse=True)
+            self.meta["releases_etag"] = etag
             self._write("releases.json", self.releases)
 
         # issues + PRs（增量）
-        q = {"state": "all", "sort": "updated", "direction": "asc", "per_page": "100"}
+        q = {"state": "all", "sort": "updated", "direction": "asc", "per_page": "50"}
         if self.meta.get("since"):
             q["since"] = self.meta["since"]
         url = base + "/issues?" + urllib.parse.urlencode(q)

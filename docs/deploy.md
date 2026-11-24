@@ -74,6 +74,7 @@ ssh <host> 'chmod 600 <fuxi-dir>/.env'
 | `FUXI_QUIET` | 夜间静默时段，如 `23:30-07:00`（北京时间）；留空不静默。静默期间收到的消息不回复 |
 | `FUXI_OWNER_WXIDS` | 主人的 wxid（逗号分隔）。主动搭话只找主人；留空则不会主动搭话 |
 | `FUXI_CARE` | `0` 关闭主动搭话；时间段、间隔、每日上限在内核配置的 `care` 段 |
+| `FUXI_VISION` | 看图：`1`（默认）私聊群聊都看，`private` 只看私聊，`0` 关闭。图片解密密钥首次自动推算并存在 `/state/imgkey.json`；看图模型用内核的配置 |
 | `FUXI_STICKERS` | `1` 开启表情包（内核按回复情绪挑图，桥接发动图）。图库用遥控指令 `/存表情 分类` 填 |
 | `KUMA_PUSH_URL` | 告警用的 Uptime Kuma Push 地址，见「告警」；留空只写日志 |
 

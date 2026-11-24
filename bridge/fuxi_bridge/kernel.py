@@ -104,6 +104,13 @@ class Kernel:
         if not r.get("ok"):
             raise KernelError(f"内核拒绝主人配置：{r.get('error')}")
 
+    def vision(self, jpeg_b64: str, prompt: str = "") -> str:
+        """看图：返回内核视觉模型的描述（空 prompt 用内核默认的「截图逐条转写」提示）。"""
+        r = self._req("POST", "/api/vision", {"image": jpeg_b64, "mime": "image/jpeg", "prompt": prompt}, timeout=60)
+        if not r.get("ok"):
+            raise KernelError(f"看图失败：{r.get('error')}")
+        return str(r.get("text") or "").strip()
+
     def config(self) -> dict:
         return self._req("GET", "/api/config", timeout=10).get("config") or {}
 

@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import base64
 import collections
 import concurrent.futures as cf
 import hashlib
@@ -31,7 +32,7 @@ import time
 from dataclasses import dataclass, field
 
 from . import messages, store
-from . import care, control, timing
+from . import care, control, images, timing
 from .allow import AllowList
 from .kernel import Kernel, KernelError
 from .messages import Message
@@ -135,6 +136,11 @@ class Bridge:
         self.care = care.Care(self, os.path.join(state, "care.json"))
         self.stickers_env = env.get("FUXI_STICKERS", "").strip()        # 1 / 0；留空 = 不改内核设置
         self.kernel_data = env.get("FUXI_KERNEL_DATA", "/kernel-data")  # 内核 data 卷（只读）挂在这里
+        # 看图：1 = 私聊群聊都看，private = 只看私聊，0 = 不看（只给内核「[图片]」占位）
+        self.vision_mode = env.get("FUXI_VISION", "1").strip() or "1"
+        self.images = images.Images(os.path.dirname(os.path.normpath(self.db_root)), self.self_wxid,
+                                    os.path.join(state, "imgkey.json"))
+        self.vision_cache: collections.OrderedDict[str, str] = collections.OrderedDict()
         self.control = control.Control(self)
 
     def set_paused(self, on: bool) -> None:
@@ -415,6 +421,7 @@ class Bridge:
                 log.info("%s 撤回了 %d 条消息，不再回复它们", self.name_of(chat), len(gone))
                 if not batch:
                     return
+            self._see_images(chat, batch, tr)
             k0 = time.monotonic()
             payload = self._payload(chat, batch)
             log.info("→ 内核 %s [%s] %s", payload["chat_title"] or self.name_of(chat), payload["senderName"],
@@ -431,6 +438,34 @@ class Bridge:
             finally:
                 if sticker:
                     self._send_sticker(chat, sticker, delivered)
+
+    def _see_images(self, chat: str, batch: list[Message], tr: "timing.Trace") -> None:
+        """把要交给内核的图片换成「[图片] 描述」。只看最后发言人的图（_payload 只带这些）。
+        任何失败都保留原占位，不影响回复。"""
+        mode = self.vision_mode
+        if mode == "0" or (mode == "private" and chat.endswith("@chatroom")):
+            return
+        last = batch[-1].sender
+        todo = [m for m in batch if m.type == "image" and m.media and m.sender == last]
+        if not todo:
+            return
+        t0 = time.monotonic()
+        for m in todo[-3:]:   # 一口气发很多张时只看最后三张
+            desc = self.vision_cache.get(m.media)
+            if desc is None:
+                try:
+                    jpeg, src = self.images.load(chat, m.media)
+                    desc = self.kernel.vision(base64.b64encode(jpeg).decode())
+                    log.info("看图 %s：%s（%d 字）", self.name_of(chat), src, len(desc))
+                except (ValueError, KernelError) as e:
+                    log.info("看图失败 %s：%s", self.name_of(chat), e)
+                    continue
+                self.vision_cache[m.media] = desc
+                while len(self.vision_cache) > 200:
+                    self.vision_cache.popitem(last=False)
+            if desc:
+                m.text = f"{m.text}（图片内容：{desc}）"
+        tr.add("vision", time.monotonic() - t0)
 
     def _deliver(self, chat: str, batch: list[Message], resp: dict, tr: "timing.Trace", k0: float) -> bool:
         """发出内核的文字回复；全部气泡都发成功才返回 True（随后才发表情包）。"""
@@ -628,6 +663,8 @@ class Bridge:
         self.pending_boot = self._changed_chats()  # 记下各会话进度；过期窗口内有动静的稍后补处理
         threading.Thread(target=self._send_worker, name="send", daemon=True).start()
         threading.Thread(target=self._reminder_loop, name="reminders", daemon=True).start()
+        if self.vision_mode != "0":
+            threading.Thread(target=self.images.ensure_key, name="imgkey", daemon=True).start()
         if self.care_on:
             threading.Thread(target=self.care.loop, name="care", daemon=True).start()
         threading.Thread(target=self._heartbeat_loop, name="heartbeat", daemon=True).start()

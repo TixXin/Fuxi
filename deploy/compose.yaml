@@ -55,6 +55,7 @@ services:
       FUXI_OWNER_WXIDS: ${FUXI_OWNER_WXIDS:-}
       FUXI_CARE: ${FUXI_CARE:-1}
       FUXI_STICKERS: ${FUXI_STICKERS:-}
+      FUXI_VISION: ${FUXI_VISION:-1}
       DISPLAY: ":1"
     volumes:
       - ${WX_CONFIG_DIR:?请在 .env 设置 WX_CONFIG_DIR}:/wxconfig:ro   # 微信数据，只读

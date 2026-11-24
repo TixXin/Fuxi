@@ -227,6 +227,11 @@ class AssistTest(unittest.TestCase):
         b._assist("g@chatroom", p)
         self.assertIn("【截图 › 贴图】", p["text"])
 
+    def test_is_question(self):
+        for q in ("翻译用的什么引擎", "剪贴板历史能保存多久", "更新后打不开了", "能导出吗"):
+            self.assertTrue(kn.is_question(q), q)
+        self.assertFalse(kn.is_question("哈哈哈好用"))
+
     def test_clean_question_words(self):
         self.assertNotIn("么用", kn.tokens(kn.clean("截图怎么用")))
 

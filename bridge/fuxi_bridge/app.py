@@ -530,6 +530,8 @@ class Bridge:
         except Exception as e:   # 检索出错不能挡住回复
             log.warning("资料检索出错：%s", e)
             hits = []
+        if hits and knowledge.is_question(q):
+            hits = self._judge(q, hits)
         notes, sure = self._fuyu_notes(q)
         extra = ""
         if hits:
@@ -543,6 +545,24 @@ class Bridge:
             extra += "\n\n（浮屿资料里没找到这个问题的答案。不确定就直说，告诉对方已经转给主人了，不要编）"
             self._handoff(chat, payload, q)
         payload["text"] += extra
+
+    def _judge(self, q: str, hits: list) -> list:
+        """关键词检索只能找到「相关」的段落，让模型挑出真能回答这个问题的；都不能就返回空（转人工）。
+        模型出错或超时就原样返回，宁可多给资料也不挡回复。"""
+        listing = "\n\n".join(f"[{i}] {c.title}\n{c.text[:600]}" for i, c in enumerate(hits, 1))
+        system = ("你在帮浮屿（一款桌面应用）的用户群答疑做资料筛选。给你用户的问题和几段编号的说明资料，"
+                  "找出能直接回答这个问题的资料编号。只输出编号，用英文逗号分隔；没有任何一段能回答就只输出 0。")
+        pool = cf.ThreadPoolExecutor(max_workers=1)
+        try:
+            out = pool.submit(self.kernel.complete, system, f"问题：{q}\n\n资料：\n{listing}", 20).result(timeout=20)
+        except Exception as e:
+            log.warning("资料筛选出错，原样附上：%s", e)
+            return hits
+        finally:
+            pool.shutdown(wait=False)
+        picked = [int(n) for n in re.findall(r"\d+", out) if 1 <= int(n) <= len(hits)]
+        log.info("产品助手资料筛选：%s → %s", out[:20], picked or "都不能回答")
+        return [hits[i - 1] for i in dict.fromkeys(picked)]
 
     def _fuyu_notes(self, q: str) -> tuple[list[str], bool]:
         """版本 / #编号 / 像问题反馈时，从 F2 的仓库缓存里找参考。返回 (几行说明, 是否把握较大可不转人工)。"""

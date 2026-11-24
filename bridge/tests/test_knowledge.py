@@ -132,6 +132,8 @@ def assist_bridge():
     b.knowledge = k
     b.fuyu = mock.Mock(latest=mock.Mock(return_value=None), find=mock.Mock(return_value=[]),
                        version_brief=mock.Mock(return_value="还没有同步到浮屿的版本信息"))
+    b.kernel = mock.Mock()
+    b.kernel.complete.side_effect = lambda system, text, n: "1" if "贴" in text.split("资料：")[0] else "0"
     b.handoffs = collections.deque(maxlen=50)
     b.send = mock.Mock(return_value=mock.Mock(ok=True))
     return b
@@ -206,6 +208,27 @@ class AssistTest(unittest.TestCase):
         b.fuyu.find.reset_mock()
         b._assist("g@chatroom", payload("@浮汐 怎么设置开机自启"))     # 用法问题不查 issue
         b.fuyu.find.assert_not_called()
+
+    def test_judge_drops_unrelated_and_hands_off(self):
+        b = assist_bridge()
+        b.kernel.complete.side_effect = None
+        b.kernel.complete.return_value = "0"
+        b._handoff = mock.Mock()                 # 不能 patch threading.Thread：_judge 的线程池也用它
+        p = payload("@浮汐 截图能自动上传到图床吗")
+        b._assist("g@chatroom", p)
+        b._handoff.assert_called_once()
+        self.assertNotIn("【截图", p["text"])
+        self.assertIn("已经转给主人", p["text"])
+
+    def test_judge_error_keeps_hits(self):
+        b = assist_bridge()
+        b.kernel.complete.side_effect = RuntimeError("内核挂了")
+        p = payload("@浮汐 截图怎么贴到屏幕上")
+        b._assist("g@chatroom", p)
+        self.assertIn("【截图 › 贴图】", p["text"])
+
+    def test_clean_question_words(self):
+        self.assertNotIn("么用", kn.tokens(kn.clean("截图怎么用")))
 
 
 if __name__ == "__main__":

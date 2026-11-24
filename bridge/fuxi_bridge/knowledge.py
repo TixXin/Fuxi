@@ -40,6 +40,7 @@ SYNC_EVERY = 6 * 3600
 # 问句里常见、但区分不了内容的二元组
 STOP = set("怎么 什么 可以 浮屿 一下 这个 那个 能不 不能 为什 么能 么办 怎样 如何 有没 没有 请问 是不 不是 我的 你们 "
            "一个 现在 还是 就是 的话 吗？ 了吗 么样 在哪 哪里 知道 问一 问下 支持 功能 设置".split())
+NOISE = re.compile(r"怎么用|怎么样|怎么办|怎么|如何|为什么|为啥|能不能|可不可以|会不会|有没有|是不是|是否|请问|一下|吗|呢|吧|啊|呀|会|要|能|的")
 QUESTION = re.compile(r"[?？]|吗|怎么|如何|为什么|为啥|能不能|可不可以|有没有|哪里|在哪|怎样|咋|是否|求助|请问|报错|不行|失败")
 
 
@@ -349,11 +350,17 @@ class Knowledge:
             time.sleep(600)
 
     # ---- 检索 ----
-    floor = 12.0   # BM25 分数下限（按浮屿真实文档调的：相关 13~37，无关 5~9）
-    cover = 0.4    # 最相关那段至少覆盖问句 40%（按 idf 加权）
+    # 这里只粗筛、宁多勿漏：资料到底能不能回答，由桥接再让模型判断一次（Bridge._judge）。
+    floor = 5.0    # BM25 分数下限
+    cover = 0.5    # 最相关那段至少覆盖问句一半（按 idf 加权）
+    boost = 1.6    # 功能说明比版本说明优先：版本说明段落多，按词频容易挤到前面
 
-    def search(self, query: str, k: int = 3, budget: int = 1600) -> list[Chunk]:
-        hits = self.index.search(query, k)
+    def search(self, query: str, k: int = 4, budget: int = 2400) -> list[Chunk]:
+        query = clean(query)
+        hits = [((s if c.source.startswith("docs/releases/") else s * self.boost), c)
+                for s, c in self.index.search(query, 40)]
+        hits.sort(key=lambda h: -h[0])
+        hits = hits[:k]
         if not hits or hits[0][0] < self.floor or self.index.coverage(query, hits[0][1]) < self.cover:
             return []
         out, used = [], 0
@@ -363,6 +370,11 @@ class Knowledge:
             out.append(c)
             used += len(c.text)
         return out
+
+
+def clean(query: str) -> str:
+    """去掉问句里的「怎么、吗、能」之类：它们和前后字拼出的二元组（如「么用」）会误中标题里的「怎么用」。"""
+    return NOISE.sub(" ", query)
 
 
 def is_question(text: str) -> bool:

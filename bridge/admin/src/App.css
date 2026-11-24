@@ -1,0 +1,33 @@
+.app {
+  height: 100%;
+  display: grid;
+  grid-template-columns: 196px minmax(0, 1fr);
+}
+
+.app__main {
+  min-width: 0;
+  overflow-y: auto;
+}
+
+.placeholder {
+  display: grid;
+  place-items: center;
+  gap: var(--space-sm);
+  padding: 34px 16px;
+  color: var(--color-text-subtle);
+  text-align: center;
+}
+
+.placeholder svg {
+  opacity: 0.6;
+}
+
+.placeholder__sub {
+  font-size: 12px;
+}
+
+@media (max-width: 760px) {
+  .app {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

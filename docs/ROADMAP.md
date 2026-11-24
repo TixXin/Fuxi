@@ -122,7 +122,8 @@
 - [ ] **网页管理台（M）**：单独的管理台域名，和网页版微信同一组 Basic 认证。React + Vite + lucide，视觉沿用浮屿设置窗口。
       架构与接口见 [admin.md](admin.md)，界面约定见 [design/admin.md](design/admin.md)，预览 [design/admin-preview.html](design/admin-preview.html)。
   - [x] 开发前准备：方案与预览（用户确认）、界面约定、架构与接口草案、前端骨架 `bridge/admin/`
-  - [ ] A 骨架：管理服务（8791，口令头 + 防跨站）、事件中心、`handlers.py` 抽取；概览页
+  - [ ] A 骨架：管理服务（8791，口令头 + 防跨站）、事件中心、`handlers.py` 抽取；概览页。代码已完成（镜像里带前端，
+        没设 `FUXI_ADMIN_TOKEN` 时不启动），待服务器配置：`.env` 口令、htpasswd、OpenResty 站点
   - [ ] B 只读：对话流（SSE，带耗时）、设置页（自动生成）、资料库页
   - [ ] C 管理：会话/白名单、发版公告、群反馈
   - [ ] D 编辑：人设、手动发送（空跑 + 确认）

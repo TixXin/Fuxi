@@ -25,6 +25,8 @@ services:
     ports:
       # 桥接与内核共用这个网络命名空间；对外发送 API 只暴露在宿主回环
       - "127.0.0.1:${FUXI_API_PORT:-8790}:8790"
+      # 网页管理台：只绑宿主回环，由 OpenResty 做 Basic 认证并补口令头后反代出去（docs/admin.md）
+      - "127.0.0.1:${FUXI_ADMIN_PORT:-8791}:8791"
 
   bridge:
     image: fuxi-bridge:${FUXI_VERSION:-dev}
@@ -45,6 +47,7 @@ services:
       FUXI_KERNEL_TOKEN: ${FUXI_KERNEL_TOKEN}
       FUXI_API_TOKEN: ${FUXI_API_TOKEN:-}
       FUXI_API_PORT: "8790"
+      FUXI_ADMIN_TOKEN: ${FUXI_ADMIN_TOKEN:-}   # 管理台口令（OpenResty 补到 X-Fuxi-Admin）；留空则管理台不启动
       FUXI_GITHUB_ISSUE_TOKEN: ${FUXI_GITHUB_ISSUE_TOKEN:-}   # /修 开 issue 用（只授权浮屿仓库 Issues 读写）
       DISPLAY: ":1"
     volumes:

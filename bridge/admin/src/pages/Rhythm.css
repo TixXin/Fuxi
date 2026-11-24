@@ -1,0 +1,32 @@
+.rhythm + .rhythm {
+  border-top: 1px solid var(--color-white-a06);
+}
+
+.rhythm .row {
+  border-bottom: 0;
+}
+
+.rhythm__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 10px 16px;
+  margin: 0;
+  padding: 0 16px 14px 58px;
+}
+
+.rhythm__grid dt {
+  color: var(--color-text-subtle);
+  font-size: 12px;
+}
+
+.rhythm__grid dd {
+  margin: 2px 0 0;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 640px) {
+  .rhythm__grid {
+    padding-left: 16px;
+  }
+}

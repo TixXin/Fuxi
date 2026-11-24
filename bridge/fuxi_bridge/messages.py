@@ -159,7 +159,17 @@ class MessageReader:
                 return []
             self.watermarks[chat] = 0
             min_time = int(since_time)
-        after = self.watermarks[chat]
+        out = self._read(chat, self.watermarks[chat], min_time)
+        if out:
+            self.watermarks[chat] = out[-1].sort_seq
+            self._save()
+        return out
+
+    def history(self, chat: str, since_time: int) -> list[Message]:
+        """只读：取 since_time（秒）以来的消息，不动水位（管理台统计用）。"""
+        return self._read(chat, 0, int(since_time))
+
+    def _read(self, chat: str, after: int, min_time: int) -> list[Message]:
         out: list[Message] = []
         for shard in self.shards():
             for r, sender in self._rows(shard, chat, after, min_time=min_time):
@@ -188,9 +198,6 @@ class MessageReader:
                     text=text, source=_decode(r["source"], None), shard=os.path.basename(shard), **extra,
                 ))
         out.sort(key=lambda m: (m.sort_seq, m.local_id))
-        if out:
-            self.watermarks[chat] = out[-1].sort_seq
-            self._save()
         return out
 
     def revoked(self, msgs: list[Message]) -> set[str]:

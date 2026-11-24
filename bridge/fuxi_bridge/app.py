@@ -29,7 +29,7 @@ import time
 from dataclasses import dataclass, field
 
 from . import messages, store
-from . import announce, care, control, events, feedback, fuyu, images, issues, knowledge, outreach, settings, timing, voice
+from . import announce, care, control, events, feedback, fuyu, images, issues, knowledge, outreach, schedule, settings, timing, voice
 from .allow import AllowList
 from .kernel import Kernel, KernelError
 from .messages import Message
@@ -148,6 +148,9 @@ class Bridge:
         self.voices = voice.Voices(self.cache)
         self.media_cache: collections.OrderedDict[str, str] = collections.OrderedDict()   # 看图/语音结果
         self.announcer = announce.Announcer(self, os.path.join(state, "announce"))
+        self.templates = schedule.Templates(os.path.join(state, "templates.json"))
+        self.scheduler = schedule.Scheduler(self, state)
+        self.jobs = schedule.AsyncJobs(self)
         self.knowledge = knowledge.Knowledge(os.path.join(state, "knowledge"))
         self.fuyu = fuyu.Fuyu(os.path.join(state, "fuyu"))
         self.fuyu.on_events = self._fuyu_events
@@ -196,7 +199,9 @@ class Bridge:
             v = self.kernel.config()
             for p in it.kernel:
                 v = v.get(p, {}) if isinstance(v, dict) else {}
-            return it.default if v == {} else v
+            if v == {}:
+                return it.default
+            return round(v * it.scale) if it.scale != 1 and isinstance(v, (int, float)) else v
         return self.cfg.get(key)
 
     def set_setting(self, key: str, raw) -> object:
@@ -204,7 +209,7 @@ class Bridge:
         it = settings.BY_KEY[key]
         if it.kernel:
             v = settings.parse(it, raw)
-            self.kernel.patch_config(it.kernel, v)
+            self.kernel.patch_config(it.kernel, v / it.scale if it.scale != 1 else v)
             return v
         v = self.cfg.set(key, raw)
         self.apply_settings()
@@ -652,6 +657,14 @@ class Bridge:
             log.warning("浮屿仓库信息出错：%s", e)
         return notes, sure
 
+    def tell_owner(self, text: str) -> None:
+        """私聊主人（发到文件传输助手），不等结果。"""
+        def go():
+            job = self.send(SendJob(chat="filehelper", text=text, source="control"))
+            if not job.ok:
+                log.warning("给主人的通知没发出去：%s", job.error)
+        threading.Thread(target=go, name="tell-owner", daemon=True).start()
+
     def _handoff(self, chat: str, payload: dict, q: str) -> None:
         now = time.time()
         recent = [t for t, c in self.handoffs if now - t < 3600]
@@ -738,7 +751,7 @@ class Bridge:
                 log.warning("反馈摘要没发出去：%s", job.error)
         if group_due:
             fb.mark("group", now)
-            text = fb.group_summary()
+            text = fb.group_summary(feedback._day(now))
             if not text:
                 log.info("群反馈：今天没有反馈，不发群小结")
                 return
@@ -1094,6 +1107,7 @@ class Bridge:
         from .admin import serve as serve_admin
 
         threading.Thread(target=serve_admin, args=(self,), name="admin", daemon=True).start()
+        threading.Thread(target=self.scheduler.loop, name="schedule", daemon=True).start()
         log.info("开始监听全部会话（self=%s）", self.self_wxid[:6] + "…")
         next_cfg = 0.0
         while True:

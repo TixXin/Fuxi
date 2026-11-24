@@ -1,6 +1,7 @@
 import { LifeBuoy, Megaphone, MessageCircle, Pause, Play, Reply, Timer } from "lucide-react";
 import { useState } from "react";
 import { Button, Card, ErrorNote, Group, PageHead, Row, Skeleton, StatusPill, Dot } from "../components/ui";
+import { Rhythm } from "./Rhythm";
 import { api, type Overview as Data } from "../lib/api";
 import { clock, seconds, uptime } from "../lib/format";
 import "./Overview.css";
@@ -138,6 +139,7 @@ export function Overview({ data, error, reload, live, onMenu, onNavigate }: Prop
           ))}
         </Card>
       </Group>
+      <Rhythm />
       {error && <div className="overview__stale">刷新失败：{error}（显示的是上一次的数据）</div>}
     </div>
   );

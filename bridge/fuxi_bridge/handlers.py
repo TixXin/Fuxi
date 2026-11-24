@@ -454,3 +454,155 @@ def send(b: "Bridge", body: dict) -> dict:
     if not job.ok:
         raise HandlerError(f"没发出去：{job.error or '未知原因'}", 502)
     return {"name": name, "verified": job.verified, "error": job.error}
+
+
+# ---- 回复节奏统计（拟人化调参看的数据；只出汇总数字，不出聊天内容） ----
+_STATS: dict = {}
+
+
+def _pct(xs: list, p: float):
+    xs = sorted(xs)
+    return xs[min(len(xs) - 1, int(len(xs) * p))] if xs else None
+
+
+def _chat_stats(b: "Bridge", chat: str, since: float) -> dict:
+    from . import messages as M
+    ms = b.reader.history(chat, int(since))
+    names = b.self_names() if hasattr(b, "self_names") else []
+    incoming = [m for m in ms if not m.is_self]
+    lens, lat, runs, unprompted = [], [], [], 0
+    run, last_in, prev_self = 0, None, False
+    for m in ms:
+        if not m.is_self:
+            if run:
+                runs.append(run)
+                run = 0
+            last_in = m
+        elif m.type == "text":
+            lens.append(len(m.text))
+            if not prev_self and last_in is not None:
+                if m.create_time - last_in.create_time <= 600:
+                    lat.append(m.create_time - last_in.create_time)
+                if chat.endswith("@chatroom"):
+                    addressed = (b.self_wxid in M.at_users(last_in.source) or any(f"@{n}" in last_in.text for n in names)
+                                 or (last_in.quote or {}).get("sender") == b.self_wxid)
+                    unprompted += not addressed
+            run += 1
+        prev_self = m.is_self
+    if run:
+        runs.append(run)
+    days = {time.strftime("%m-%d", time.localtime(m.create_time)) for m in incoming}
+    return {"chat_id": chat, "name": b.name_of(chat), "group": chat.endswith("@chatroom"),
+            "incoming": len(incoming), "senders": len({m.sender for m in incoming}), "active_days": len(days),
+            "turns": len(runs), "bubbles": len(lens), "unprompted": unprompted if chat.endswith("@chatroom") else None,
+            "len_p50": _pct(lens, .5), "len_p90": _pct(lens, .9), "len_max": max(lens) if lens else None,
+            "latency_p50": _pct(lat, .5), "latency_p90": _pct(lat, .9),
+            "multi": sum(1 for r in runs if r > 1), "max_run": max(runs) if runs else 0}
+
+
+def reply_stats(b: "Bridge", days: int = 14) -> dict:
+    days = max(1, min(60, days))
+    hit = _STATS.get(days)
+    if hit and time.time() - hit["at"] < 600:
+        return hit
+    since = time.time() - days * 86400
+    chats = [c for c in b.allowlist.items if c not in ("*", "filehelper")]
+    rows = []
+    for c in chats:
+        try:
+            rows.append(_chat_stats(b, c, since))
+        except Exception as e:   # 单个会话读不出来不影响其他
+            log.warning("统计 %s 失败：%s", c, e)
+    out = {"days": days, "at": time.time(), "items": rows}
+    _STATS[days] = out
+    return out
+
+
+# ---- 定时发送、模板、异步任务（对外 API 和管理台共用） ----
+def parse_at(raw) -> float:
+    """时间：Unix 秒，或本地时间字符串「2026-11-25 09:00」「2026-11-25T09:00:30」。"""
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        return float(raw)
+    s = str(raw or "").strip().replace("T", " ")
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+        try:
+            return time.mktime(time.strptime(s, fmt))
+        except ValueError:
+            pass
+    raise HandlerError("时间格式不对：用 Unix 秒，或「2026-11-25 09:00」这样的本地时间")
+
+
+def _sched_call(fn, *a, **kw):
+    from .schedule import ScheduleError
+    try:
+        return fn(*a, **kw)
+    except ScheduleError as e:
+        raise HandlerError(str(e), e.code) from None
+
+
+def resolve_target(b: "Bridge", body: dict) -> str:
+    chat = str(body.get("chat_id") or "").strip()
+    if chat:
+        if not re.fullmatch(r"[A-Za-z0-9_@.-]{1,80}", chat):
+            raise HandlerError("chat_id 不对")
+        return chat
+    to = str(body.get("to") or "").strip()
+    if not to:
+        raise HandlerError("需要 to 或 chat_id")
+    hits = b.reader.find_chats(to)
+    if len(hits) != 1:
+        raise HandlerError(f"「{to}」匹配到 {len(hits)} 个会话，请改用 chat_id", 409,
+                           candidates=[h["username"] for h in hits[:10]])
+    return hits[0]["username"]
+
+
+def message_text(b: "Bridge", body: dict) -> str | None:
+    """请求里的文字：直接给 text，或给 template（+ vars）现场套出来。"""
+    from .schedule import render
+    if body.get("template"):
+        return _sched_call(lambda: render(b.templates.get(str(body["template"])), body.get("vars") or {}))
+    text = body.get("text")
+    return None if text is None else str(text)
+
+
+def schedule_list(b: "Bridge") -> dict:
+    return b.scheduler.list()
+
+
+def schedule_add(b: "Bridge", body: dict, source: str, image: bytes | None = None, ext: str = ".png") -> dict:
+    chat = resolve_target(b, body)
+    if body.get("in_minutes") is not None:
+        try:
+            at = time.time() + float(body["in_minutes"]) * 60
+        except (TypeError, ValueError):
+            raise HandlerError("in_minutes 要是数字") from None
+    else:
+        at = parse_at(body.get("at"))
+    tpl = str(body["template"]) if body.get("template") else None
+    text = None if tpl else (None if body.get("text") is None else str(body["text"]))
+    return _sched_call(b.scheduler.add, chat, at, text=text, template=tpl, vars=body.get("vars") or {},
+                       image=image, ext=ext, source=source)
+
+
+def schedule_cancel(b: "Bridge", sid: int) -> dict:
+    return _sched_call(b.scheduler.cancel, sid)
+
+
+def templates_list(b: "Bridge") -> list[dict]:
+    return b.templates.list()
+
+
+def template_put(b: "Bridge", name: str, text: str) -> list[dict]:
+    _sched_call(b.templates.put, name, text)
+    b.events.publish("templates", {"name": name})
+    return b.templates.list()
+
+
+def template_delete(b: "Bridge", name: str) -> list[dict]:
+    _sched_call(b.templates.delete, name)
+    b.events.publish("templates", {"name": name})
+    return b.templates.list()
+
+
+def job_get(b: "Bridge", jid: str) -> dict:
+    return _sched_call(b.jobs.get, jid)

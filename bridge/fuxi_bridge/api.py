@@ -17,6 +17,12 @@
   POST /send                         {"to": "群名或备注" | "chat_id": "xxx@chatroom",
                                        "text": "...", "image_base64": "...", "image_name": "a.png"}
        → {ok, chat_id, verified}     verified=发送后在数据库里看到了这条消息
+       text 可以换成 {"template": "模板名", "vars": {...}}；加 "async": true 立即返回 202 {job}，再查 GET /jobs/<id>
+  GET  /jobs/<id>                    异步发送的结果 {status: queued|running|done|failed, ok, verified, error}
+  POST /schedule                     定时发送 {to|chat_id, at: Unix 秒或「2026-11-25 09:00」| in_minutes,
+                                       text | template+vars, image_base64?} → {item}
+  GET  /schedule                     {pending, recent}；POST /schedule/<id>/cancel 取消
+  GET  /templates                    消息模板 [{name, text, vars}]（在管理台「发送」页维护）
 """
 
 from __future__ import annotations
@@ -26,6 +32,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import TYPE_CHECKING
@@ -107,6 +114,15 @@ def serve(bridge: "Bridge") -> None:
                 return self._json(200, {"ok": True, "brief": f.brief(), "version": f.version_brief(),
                                         "latest": f.latest(), "latest_beta": f.latest(prerelease=True),
                                         "events": f.recent_events(20)})
+            if u.path.startswith("/jobs/"):
+                try:
+                    return self._json(200, {"ok": True, "job": handlers.job_get(bridge, u.path[6:])})
+                except handlers.HandlerError as e:
+                    return self._json(e.code, {"ok": False, "error": str(e)})
+            if u.path == "/schedule":
+                return self._json(200, {"ok": True, **handlers.schedule_list(bridge)})
+            if u.path == "/templates":
+                return self._json(200, {"ok": True, "items": handlers.templates_list(bridge)})
             if u.path == "/chats":
                 q = (parse_qs(u.query).get("q") or [""])[0].strip()
                 if not q:
@@ -230,7 +246,14 @@ def serve(bridge: "Bridge") -> None:
                 return self._json(200, {"ok": True, "created": created, "item": bridge.announcer.public(it)})
             if urlparse(self.path).path == "/resume":
                 return self._json(200, {"ok": True, "was": handlers.resume(bridge)})
-            if urlparse(self.path).path != "/send":
+            path = urlparse(self.path).path
+            m = re.fullmatch(r"/schedule/(\d+)/cancel", path)
+            if m:
+                try:
+                    return self._json(200, {"ok": True, "item": handlers.schedule_cancel(bridge, int(m.group(1)))})
+                except handlers.HandlerError as e:
+                    return self._json(e.code, {"ok": False, "error": str(e)})
+            if path not in ("/send", "/schedule"):
                 return self._json(404, {"ok": False, "error": "not found"})
             n = int(self.headers.get("Content-Length") or 0)
             if n <= 0 or n > MAX_BODY:
@@ -239,43 +262,55 @@ def serve(bridge: "Bridge") -> None:
                 body = json.loads(self.rfile.read(n))
             except ValueError:
                 return self._json(400, {"ok": False, "error": "JSON 无效"})
+            if not isinstance(body, dict):
+                return self._json(400, {"ok": False, "error": "JSON 要是对象"})
 
-            chat = (body.get("chat_id") or "").strip()
-            if not chat:
-                to = (body.get("to") or "").strip()
-                if not to:
-                    return self._json(400, {"ok": False, "error": "需要 to 或 chat_id"})
-                hits = bridge.reader.find_chats(to)
-                if len(hits) != 1:
-                    return self._json(409, {"ok": False, "error": f"「{to}」匹配到 {len(hits)} 个会话，请改用 chat_id",
-                                            "candidates": [h["username"] for h in hits[:10]]})
-                chat = hits[0]["username"]
-
-            text = body.get("text")
-            img_path = None
+            image, ext = None, ".png"
             if body.get("image_base64"):
                 ext = ".jpg" if str(body.get("image_name", "")).lower().endswith((".jpg", ".jpeg")) else ".png"
-                img_path = os.path.join(outdir, uuid.uuid4().hex + ext)
                 try:
-                    with open(img_path, "wb") as f:
-                        f.write(base64.b64decode(body["image_base64"], validate=True))
+                    image = base64.b64decode(body["image_base64"], validate=True)
                 except ValueError:
                     return self._json(400, {"ok": False, "error": "image_base64 无效"})
-            if text is None and img_path is None:
-                return self._json(400, {"ok": False, "error": "需要 text 或 image_base64"})
+            try:
+                if path == "/schedule":
+                    return self._json(200, {"ok": True, "item": handlers.schedule_add(bridge, body, "api", image, ext)})
+                chat = handlers.resolve_target(bridge, body)
+                text = handlers.message_text(bridge, body)
+            except handlers.HandlerError as e:
+                return self._json(e.code, {"ok": False, "error": str(e), **e.extra})
+            if text is None and image is None:
+                return self._json(400, {"ok": False, "error": "需要 text、template 或 image_base64"})
+
+            img_path = None
+            if image is not None:
+                img_path = os.path.join(outdir, uuid.uuid4().hex + ext)
+                with open(img_path, "wb") as f:
+                    f.write(image)
 
             from .app import SendJob
 
-            try:
-                results = []
+            def make():
+                jobs = []
                 # 先图后文：分享图配一句说明的常见用法
                 if img_path:
-                    results.append(bridge.send(SendJob(chat=chat, image=img_path, source="api")))
+                    jobs.append(SendJob(chat=chat, image=img_path, source="api"))
                 if text:
-                    results.append(bridge.send(SendJob(chat=chat, text=str(text), source="api")))
-            finally:
+                    jobs.append(SendJob(chat=chat, text=text, source="api"))
+                return jobs
+
+            def cleanup():
                 if img_path and os.path.exists(img_path):
                     os.remove(img_path)
+
+            if body.get("async"):
+                job = bridge.jobs.submit(chat, make, "api", cleanup)
+                log.info("API 异步发送到 %s：任务 %s", chat, job["id"])
+                return self._json(202, {"ok": True, "chat_id": chat, "job": job})
+            try:
+                results = [bridge.send(j) for j in make()]
+            finally:
+                cleanup()
             err = "; ".join(j.error for j in results if j.error)
             ok = all(j.ok for j in results)
             verified = all(j.verified for j in results)

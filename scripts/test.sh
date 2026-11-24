@@ -7,6 +7,8 @@ docker run --rm --platform linux/amd64 -v "$root/bridge/tests:/app/tests:ro" -w 
   fuxi-bridge:dev python -m unittest discover -s tests -t . -v "$@"
 sh -n "$root/watchdog/watchdog.sh"
 bash -n "$root/scripts/deploy.sh"
+bash -n "$root/scripts/sync-upstream.sh"
+sh -n "$root/deploy/announce-gateway.sh"
 node --check "$root/kernel/docker-entrypoint.js" 2>/dev/null || true
 # 内核上的浮汐扩展（链接阅读等）
 (cd "$root/kernel/fuxi" && npm ci --silent --no-audit --no-fund)

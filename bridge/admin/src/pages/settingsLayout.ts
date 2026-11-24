@@ -26,6 +26,7 @@ export const TABS: SettingsTab[] = [
     groups: [
       { title: "主动", keys: ["care_on"] },
       { title: "限速", keys: ["rate_chat", "rate_global"] },
+      { title: "群里插话", keys: ["free_chat_pct", "free_chat_cooldown"] },
       { title: "和人共用微信", keys: ["human_quiet_s", "human_max_wait_s"] },
     ],
   },

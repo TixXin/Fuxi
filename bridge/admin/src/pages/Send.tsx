@@ -1,11 +1,12 @@
 import { CheckCircle2, Search, Send as SendIcon, TriangleAlert, X } from "lucide-react";
 import { useEffect, useState } from "react";
-import { Tag } from "../components/controls";
+import { Switch, Tag } from "../components/controls";
 import { Button, Card, ConfirmBar, ErrorNote, Group, PageHead, Row } from "../components/ui";
 import { api, type Chat } from "../lib/api";
 import { colorOf, initial } from "../lib/color";
 import { clock } from "../lib/format";
 import { useApi } from "../lib/useApi";
+import { ScheduleList, Templates, when } from "./SendExtras";
 import "./Send.css";
 
 interface Done {
@@ -18,6 +19,13 @@ interface Done {
 
 const MAX = 2000;
 
+function inAnHour(): string {
+  const d = new Date(Date.now() + 3600_000);
+  d.setMinutes(0, 0, 0);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
 export function Send({ onMenu }: { onMenu: () => void }) {
   const recent = useApi(api.recentChats);
   const [q, setQ] = useState("");
@@ -29,6 +37,8 @@ export function Send({ onMenu }: { onMenu: () => void }) {
   const [confirming, setConfirming] = useState(false);
   const [error, setError] = useState("");
   const [done, setDone] = useState<Done[]>([]);
+  const [later, setLater] = useState(false);
+  const [at, setAt] = useState(inAnHour);
 
   useEffect(() => {
     const needle = q.trim();
@@ -74,6 +84,23 @@ export function Send({ onMenu }: { onMenu: () => void }) {
       const msg = e instanceof Error ? e.message : String(e);
       setError(msg);
       setDone((d) => [{ at: Date.now() / 1000, name: chat.name, text, ok: false, note: msg }, ...d].slice(0, 20));
+      setConfirming(false);
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function runSchedule() {
+    if (!chat) return;
+    setBusy("send");
+    setError("");
+    try {
+      const r = await api.addSchedule(chat.chat_id, text, new Date(at).getTime() / 1000);
+      setDone((d) => [{ at: Date.now() / 1000, name: r.item.name, text, ok: true, note: `已定好 ${when(r.item.at)} 发（#${r.item.id}）` }, ...d].slice(0, 20));
+      setText("");
+      setConfirming(false);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
       setConfirming(false);
     } finally {
       setBusy("");
@@ -148,26 +175,36 @@ export function Send({ onMenu }: { onMenu: () => void }) {
             {error && <ErrorNote message={error} />}
             {!confirming && (
               <div className="send__actions">
+                <label className="send__later">
+                  <Switch label="定时发送" checked={later} onChange={setLater} />
+                  定时
+                </label>
+                {later && (
+                  <input className="field send__at" type="datetime-local" aria-label="发送时间" value={at} onChange={(e) => setAt(e.target.value)} />
+                )}
+                <span className="send__spacer" />
                 <Button disabled={!chat || !!busy} busy={busy === "probe"} onClick={runProbe}>
                   空跑
                 </Button>
-                <Button variant="primary" icon={<SendIcon />} disabled={!chat || !text.trim() || !!busy} onClick={() => setConfirming(true)}>
-                  发送
+                <Button variant="primary" icon={<SendIcon />} disabled={!chat || !text.trim() || !!busy || (later && !at)} onClick={() => setConfirming(true)}>
+                  {later ? "定时发送" : "发送"}
                 </Button>
               </div>
             )}
           </div>
           {confirming && chat && (
             <ConfirmBar
-              text={`马上以你的身份发给「${chat.name}」，发出后撤不回。`}
-              action="发送"
+              text={later ? `到 ${when(new Date(at).getTime() / 1000)} 以你的身份发给「${chat.name}」，到点前可以在下面取消。` : `马上以你的身份发给「${chat.name}」，发出后撤不回。`}
+              action={later ? "定好" : "发送"}
               busy={busy === "send"}
-              onConfirm={runSend}
+              onConfirm={later ? runSchedule : runSend}
               onCancel={() => setConfirming(false)}
             />
           )}
         </Card>
       </Group>
+      <ScheduleList />
+      <Templates draft={text} onInsert={(t) => (setText(t), setConfirming(false))} />
       {done.length > 0 && (
         <Group title="刚才发的" meta="只在这个页面里记着">
           <Card>

@@ -312,6 +312,27 @@ class AdminServerTest(unittest.TestCase):
         self.assertEqual((code, body["error"]), (502, "没发出去：发送已熔断：x"))
 
 
+    def test_schedule_and_templates(self):
+        from fuxi_bridge import schedule
+        d = tempfile.mkdtemp()
+        self.b.templates = schedule.Templates(os.path.join(d, "t.json"))
+        self.b.scheduler = schedule.Scheduler(self.b, d)
+        self.b.name_of.side_effect = lambda x: "阿青"
+        code, body, _ = self.req("POST", "/api/templates", {"name": "问候", "text": "{who}，{weekday}好"})
+        self.assertEqual((code, body["items"][0]["vars"]), (200, ["who"]))
+        _, body, _ = self.req("POST", "/api/templates/render", {"name": "问候", "vars": {"who": "阿青"}})
+        self.assertTrue(body["text"].startswith("阿青，周"))
+        self.assertEqual(self.req("POST", "/api/templates/render", {"name": "问候"})[0], 400)   # 缺变量
+        at = time.strftime("%Y-%m-%d %H:%M", time.localtime(time.time() + 3600))
+        self.assertEqual(self.req("POST", "/api/schedule", {"chat_id": "wxid_a", "text": "x", "at": at})[0], 400)  # 要确认
+        code, body, _ = self.req("POST", "/api/schedule", {"chat_id": "wxid_a", "text": "x", "at": at, "confirm": True})
+        self.assertEqual((code, body["item"]["status"]), (200, "pending"))
+        _, body, _ = self.req("GET", "/api/schedule")
+        sid = body["pending"][0]["id"]
+        code, body, _ = self.req("POST", f"/api/schedule/{sid}/cancel", {})
+        self.assertEqual(body["item"]["status"], "cancelled")
+        self.assertEqual(self.req("POST", "/api/templates/delete", {"name": "问候"})[1]["items"], [])
+
 class EventsTest(unittest.TestCase):
     def test_counts_reset_daily_and_slow_subscriber(self):
         e = events.Events(keep=3)
@@ -342,3 +363,42 @@ class HandlersTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StatsTest(unittest.TestCase):
+    def test_reply_stats(self):
+        from fuxi_bridge.messages import Message
+        b = fake_bridge()
+        b.self_wxid = "wxid_bot"
+        b.self_names.return_value = ["浮汐"]
+        b.name_of.side_effect = lambda x: x
+        b.allowlist.items = ["*", "filehelper", "g@chatroom"]
+        t = time.time() - 3600
+
+        def m(i, sender, text, dt, src=""):
+            return Message(chat="g@chatroom", local_id=i, sort_seq=i, type="text", sender=sender,
+                           is_self=sender == "wxid_bot", create_time=int(t + dt), text=text, source=src, shard="s")
+        b.reader.history.return_value = [
+            m(1, "wxid_a", "@浮汐 怎么贴图", 0), m(2, "wxid_bot", "按 F3", 8), m(3, "wxid_bot", "就贴上去了", 10),
+            m(4, "wxid_b", "今天好冷", 100), m(5, "wxid_bot", "是啊", 130),
+        ]
+        handlers._STATS.clear()
+        r = handlers.reply_stats(b, 7)
+        self.assertEqual(len(r["items"]), 1)                                 # 跳过 * 和文件传输助手
+        s = r["items"][0]
+        self.assertEqual((s["incoming"], s["senders"], s["turns"], s["bubbles"]), (2, 2, 2, 3))
+        self.assertEqual((s["unprompted"], s["multi"], s["max_run"]), (1, 1, 2))  # 「是啊」没被 @
+        self.assertEqual((s["latency_p50"], s["len_max"]), (30, 5))
+        b.reader.history.return_value = []
+        self.assertIs(handlers.reply_stats(b, 7), r)                          # 10 分钟内用缓存
+
+    def test_scaled_kernel_setting(self):
+        from fuxi_bridge.app import Bridge
+        b = object.__new__(Bridge)
+        b.kernel = mock.Mock()
+        b.kernel.config.return_value = {"group": {"freeChatChance": 0.06}}
+        self.assertEqual(b.get_setting("free_chat_pct"), 6)
+        self.assertEqual(b.set_setting("free_chat_pct", "3"), 3)
+        b.kernel.patch_config.assert_called_with(("group", "freeChatChance"), 0.03)
+        with self.assertRaises(ValueError):
+            b.set_setting("free_chat_pct", "50")

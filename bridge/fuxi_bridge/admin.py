@@ -167,6 +167,13 @@ def make_handler(bridge: "Bridge", token: str, static_dir: str, ping: float = PI
                 return self._json(200, {"ok": True, "text": handlers.feedback_preview(bridge, m.group(1))}) or True
             if path == "/api/persona":
                 return self._json(200, {"ok": True, **handlers.persona_get(bridge)}) or True
+            if path == "/api/schedule":
+                return self._json(200, {"ok": True, **handlers.schedule_list(bridge)}) or True
+            if path == "/api/templates":
+                return self._json(200, {"ok": True, "items": handlers.templates_list(bridge)}) or True
+            if path == "/api/stats":
+                days = (qs.get("days") or ["14"])[0]
+                return self._json(200, {"ok": True, **handlers.reply_stats(bridge, int(days) if days.isdigit() else 14)}) or True
             return None
 
         def _post_more(self, path: str, body: dict):
@@ -191,6 +198,21 @@ def make_handler(bridge: "Bridge", token: str, static_dir: str, ping: float = PI
                     bridge, str(body.get("id") or ""), body.get("confirm") is True)}) or True
             if path == "/api/send":
                 return self._json(200, {"ok": True, **handlers.send(bridge, body)}) or True
+            if path == "/api/schedule":
+                if body.get("confirm") is not True:
+                    raise handlers.HandlerError("定时发送需要确认")
+                return self._json(200, {"ok": True, "item": handlers.schedule_add(bridge, body, "管理台")}) or True
+            m = re.fullmatch(r"/api/schedule/(\d+)/cancel", path)
+            if m:
+                return self._json(200, {"ok": True, "item": handlers.schedule_cancel(bridge, int(m.group(1)))}) or True
+            if path == "/api/templates":
+                return self._json(200, {"ok": True, "items": handlers.template_put(
+                    bridge, str(body.get("name") or ""), str(body.get("text") or ""))}) or True
+            if path == "/api/templates/delete":
+                return self._json(200, {"ok": True, "items": handlers.template_delete(bridge, str(body.get("name") or ""))}) or True
+            if path == "/api/templates/render":
+                return self._json(200, {"ok": True, "text": handlers.message_text(
+                    bridge, {"template": str(body.get("name") or ""), "vars": body.get("vars") or {}})}) or True
             return None
 
         def do_POST(self):

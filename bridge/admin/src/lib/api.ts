@@ -34,7 +34,7 @@ export interface Overview {
 
 export interface BridgeEvent {
   id: number;
-  kind: "message" | "handoff" | "settings" | "status" | "knowledge" | "allow" | "announce" | "feedback" | "persona" | "sent";
+  kind: "message" | "handoff" | "settings" | "status" | "knowledge" | "allow" | "announce" | "feedback" | "persona" | "sent" | "schedule" | "templates";
   ts: number;
   [key: string]: unknown;
 }
@@ -224,6 +224,48 @@ export interface PersonaInfo {
   presets: { id: string; name: string; description: string | null; chars: number | null }[];
 }
 
+export interface ChatStats {
+  chat_id: string;
+  name: string;
+  group: boolean;
+  incoming: number;
+  senders: number;
+  active_days: number;
+  turns: number;
+  bubbles: number;
+  unprompted: number | null;
+  len_p50: number | null;
+  len_p90: number | null;
+  len_max: number | null;
+  latency_p50: number | null;
+  latency_p90: number | null;
+  multi: number;
+  max_run: number;
+}
+
+export interface Template {
+  name: string;
+  text: string;
+  vars: string[];
+}
+
+export interface Scheduled {
+  id: number;
+  chat_id: string;
+  name: string;
+  text: string | null;
+  template: string | null;
+  at: number;
+  created: number;
+  status: string;
+  status_zh: string;
+  error: string;
+  sent_at: number | null;
+  verified: boolean | null;
+  source: string;
+  has_image: boolean;
+}
+
 export const api = {
   overview: () => request<Overview>("GET", "/api/overview"),
   pause: () => request<{ paused: boolean }>("POST", "/api/pause"),
@@ -246,6 +288,15 @@ export const api = {
   feedbackIgnore: (id: number, on: boolean) => request<{ status: string }>("POST", `/api/feedback/${id}/${on ? "ignore" : "unignore"}`),
   feedbackClassify: () => request<{ started: boolean }>("POST", "/api/feedback/classify"),
   feedbackPreview: (kind: "digest" | "group") => request<{ text: string }>("GET", `/api/feedback/preview/${kind}`),
+  templates: () => request<{ items: Template[] }>("GET", "/api/templates"),
+  saveTemplate: (name: string, text: string) => request<{ items: Template[] }>("POST", "/api/templates", { name, text }),
+  deleteTemplate: (name: string) => request<{ items: Template[] }>("POST", "/api/templates/delete", { name }),
+  renderTemplate: (name: string, vars: Record<string, string>) => request<{ text: string }>("POST", "/api/templates/render", { name, vars }),
+  schedule: () => request<{ pending: Scheduled[]; recent: Scheduled[] }>("GET", "/api/schedule"),
+  addSchedule: (chat_id: string, text: string, at: number) =>
+    request<{ item: Scheduled }>("POST", "/api/schedule", { chat_id, text, at, confirm: true }),
+  cancelSchedule: (id: number) => request<{ item: Scheduled }>("POST", `/api/schedule/${id}/cancel`, {}),
+  stats: (days: number) => request<{ days: number; at: number; items: ChatStats[] }>("GET", `/api/stats?days=${days}`),
   persona: () => request<PersonaInfo>("GET", "/api/persona"),
   savePersona: (patch: Partial<Persona>) =>
     request<{ warnings: string[]; tokenCheck?: { tokens: number; limit: number } }>("POST", "/api/persona", { patch }),
@@ -259,7 +310,7 @@ export const api = {
 
 export function subscribe(onEvent: (e: BridgeEvent) => void, onState: (live: boolean) => void): () => void {
   const es = new EventSource("/api/events");
-  const kinds = ["message", "handoff", "settings", "status", "knowledge", "allow", "announce", "feedback", "persona", "sent"] as const;
+  const kinds = ["message", "handoff", "settings", "status", "knowledge", "allow", "announce", "feedback", "persona", "sent", "schedule", "templates"] as const;
   const handler = (ev: MessageEvent) => {
     try {
       onEvent(JSON.parse(ev.data));

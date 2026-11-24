@@ -24,6 +24,7 @@
   /营业              反馈群营业状态（冷场多久、今天说过没、待欢迎）；/营业 试写 生成一条冷场发言看看（不发）；
                      /营业 欢迎 看欢迎语；/营业 修复 v0.3.14 预览这个版本的修复通知（不发）
   /浮屿              浮屿版本、issue 统计和最近动态；/浮屿 123 查进度；/浮屿 搜 问题 找相关 issue；/浮屿 同步
+  /定时              等发的定时消息；/定时 取消 编号 取消一条（定时在管理台「发送」页或 API POST /schedule 设）
   /设置              查看全部设置；/设置 看图 看说明；/设置 看图 只看私聊 修改（立即生效）
 """
 
@@ -354,6 +355,29 @@ class Control:
             lines.append("最近动态：\n" + "\n".join("- " + render_event(e) for e in reversed(events)))
         return "\n".join(lines)
 
+    def scheduled(self, arg: str) -> str:
+        from .schedule import ScheduleError
+        parts = arg.split()
+        if parts[:1] == ["取消"]:
+            if len(parts) != 2 or not parts[1].lstrip("#").isdigit():
+                return "用法：/定时 取消 编号"
+            try:
+                it = self.b.scheduler.cancel(int(parts[1].lstrip("#")))
+            except ScheduleError as e:
+                return str(e)
+            return f"已取消定时消息 #{it['id']}（发给「{it['name']}」）。"
+        pending = self.b.scheduler.list()["pending"]
+        if not pending:
+            return "没有等发的定时消息。"
+        lines = [f"等发的定时消息 {len(pending)} 条："]
+        for it in pending[:20]:
+            what = (it["text"] or "") if not it["template"] else f"[模板 {it['template']}]"
+            what = (what[:20] + "…") if len(what) > 20 else what
+            lines.append(f"#{it['id']} {time.strftime('%m-%d %H:%M', time.localtime(it['at']))} → {it['name']}："
+                         f"{what}{' +图' if it['has_image'] else ''}")
+        lines.append("取消：/定时 取消 编号")
+        return "\n".join(lines)
+
     def announce_list(self, _arg: str) -> str:
         return self.b.announcer.listing()
 
@@ -425,4 +449,5 @@ COMMANDS = {
     "/修": "fix",
     "/开issue": "open_issue",
     "/营业": "outreach",
+    "/定时": "scheduled",
 }

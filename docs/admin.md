@@ -74,6 +74,9 @@
 | `GET /api/knowledge`、`POST /api/knowledge/sync`、`GET /api/knowledge/search?q=` | 资料库 | `Knowledge` |
 | `GET /api/fuyu` | 浮屿仓库同步状态 | `Fuyu` |
 | `POST /api/send` | 手动发送：`dry_run` 只打开核对；真发要 `confirm` | `SendJob(source="admin")` |
+| `GET /api/schedule`、`POST /api/schedule`（要 `confirm`）、`POST /api/schedule/{id}/cancel` | 定时发送 | `schedule.Scheduler` |
+| `GET /api/templates`、`POST /api/templates`、`…/delete`、`…/render` | 消息模板 | `schedule.Templates` |
+| `GET /api/stats?days=14` | 回复节奏：每个白名单会话的收到/回复次数、长度、用时、连发、没被 @ 就开口（只有汇总数字），缓存 10 分钟 | 聊天记录（只读） |
 | `GET /api/persona`、`POST /api/persona`、`POST /api/persona/preset` | 人设读写、套用预设（要 `confirm`）；只转发人设字段，不碰内核的密钥和模型配置 | 内核 `/api/persona*` |
 
 对外 API 和管理接口的处理逻辑放在同一组函数里，两个服务都调用，不复制粘贴。

@@ -38,6 +38,7 @@ class Item:
     kernel: tuple = ()       # 非空 = 内核管的配置路径，只转发
     min: int = 0
     max: int = 0
+    scale: int = 1           # 内核存小数、这里用整数显示时的倍数（如概率 0.03 显示成 3%）
 
 
 ITEMS: list[Item] = [
@@ -47,6 +48,10 @@ ITEMS: list[Item] = [
          {"all": "全部", "private": "只听私聊", "off": "关闭"}),
     Item("care_on", "主动搭话", "bool", True, "一阵子没人说话时主动找主人聊一句（时段/间隔/上限由内核定）",
          env="FUXI_CARE"),
+    Item("free_chat_pct", "插话概率", "int", 6, "没人 @ 她时，每条群消息有百分之几的概率接一句（要先在人设里打开「群里主动接话」）",
+         kernel=("group", "freeChatChance"), min=0, max=30, scale=100),
+    Item("free_chat_cooldown", "插话冷却", "int", 0, "她在群里说完话后多少秒内不主动插话（被 @ 照样回）",
+         kernel=("group", "cooldownSec"), min=0, max=7200),
     Item("stickers", "表情包", "bool", False, "回复后按情绪发表情包（图库用 /存表情 填）",
          kernel=("features", "stickers")),
     Item("owners", "主人", "list", [], "主人的 wxid：主动搭话只找主人，主人能用内核管理指令",

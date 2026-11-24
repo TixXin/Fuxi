@@ -121,10 +121,18 @@ class Sender:
         return w
 
     def _capture(self, w: str) -> "_Shot":
-        r = subprocess.run(["xwd", "-id", w, "-silent"], env=self.env, capture_output=True, timeout=15)
-        if r.returncode != 0:
-            raise SendError("xwd 截图失败")
-        return _Shot(r.stdout)
+        """截取窗口。xwd 偶发失败（窗口正被重绘/映射时 X 返回 BadMatch 等），重试两次。"""
+        err = ""
+        for attempt in range(3):
+            if attempt:
+                time.sleep(0.15)
+            r = subprocess.run(["xwd", "-id", w, "-silent"], env=self.env, capture_output=True, timeout=15)
+            if r.returncode == 0 and r.stdout:
+                if attempt:
+                    log.warning("xwd 第 %d 次重试成功（之前：%s）", attempt, err)
+                return _Shot(r.stdout)
+            err = r.stderr.decode(errors="replace").strip()[:200] or f"退出码 {r.returncode}"
+        raise SendError(f"xwd 截图失败：{err}")
 
     def _type_search(self, name: str) -> None:
         """Ctrl+F → 全选 → 粘贴关键词，一次 xdotool 调用完成。"""
@@ -183,10 +191,9 @@ class Sender:
                 res, _ = _ocr()(np.ascontiguousarray(crop), use_det=False, use_cls=False)
             except Exception as e:
                 raise SendError(f"OCR 失败：{e}") from e
-            text = _norm(str(res[0][0])) if res else ""
-            for name in self.SECTIONS_ALL:
-                if text.startswith(name):
-                    return name
+            name = section_name(str(res[0][0]) if res else "", self.SECTIONS_ALL)
+            if name:
+                return name
         return ""
 
     def _search(self, name: str) -> tuple[str, tuple[int, int] | None]:
@@ -283,20 +290,52 @@ class Sender:
         return "   ".join(b[1] for b in boxes).strip()
 
     # ---- 对外 ----
+    def _open_or_abort(self, chat: str) -> None:
+        """进入会话阶段（粘贴之前）出任何错都只放弃这一条：还没往任何会话输入内容，
+        下一条会重新搜索并核对标题，不需要熔断。"""
+        try:
+            self.open_chat(chat)
+        except SendError as e:
+            if "放弃发送" in str(e):
+                raise
+            raise SendError(f"进入会话时出错（未粘贴任何内容）：{e}，放弃发送") from e
+
+    def _focus_input(self) -> None:
+        """点一下聊天输入框（窗口底部、聊天区中间），保证焦点在输入框里。
+        标题已核对过，这里点的一定是目标会话的输入框。"""
+        w = self.window()
+        geo = self._run("xdotool", "getwindowgeometry", w)
+        try:
+            ww, hh = (int(v) for v in geo.rsplit("Geometry:", 1)[1].strip().split("x"))
+        except (IndexError, ValueError) as e:
+            raise SendError(f"读不到窗口大小：{geo!r}") from e
+        # 2 倍缩放实测：输入区约 y∈[h-280, h-80]（再往下是工具栏），聊天区 x∈[610, w]
+        x, y = (610 + ww) // 2, hh - 170
+        self._run("xdotool", "mousemove", "--window", w, str(x), str(y), "click", "1")
+
+    def _paste(self, clip) -> None:
+        """进会话后、回车前：点输入框 → 写剪贴板 → 全选（替换掉可能的草稿）→ 粘贴。
+        这一段出错时输入框里至多是没发出的草稿，不会发出任何东西，所以只放弃不熔断。"""
+        try:
+            self._focus_input()
+            clip()
+            self._run("xdotool", "key", "--clearmodifiers", "--delay", "40", "ctrl+a", "ctrl+v")
+        except SendError as e:
+            raise SendError(f"粘贴前出错（未发出）：{e}，放弃发送") from e
+
     def send_text(self, chat: str, text: str) -> None:
         with self._lock, self._fresh_on_error():
-            self.open_chat(chat)
-            self._clip_text(text)
-            self._key("ctrl+v")   # 粘贴是异步取剪贴板的，留一点时间再回车
+            self._open_or_abort(chat)
+            self._paste(lambda: self._clip_text(text))
+            time.sleep(self.delay)   # 粘贴是异步取剪贴板的，留一点时间再回车
             self._key("Return")
             log.info("已发送文本到 %s（%d 字）", chat, len(text))
 
     def send_image(self, chat: str, path: str) -> None:
         with self._lock, self._fresh_on_error():
-            self.open_chat(chat)
-            self._clip_image(path)
-            self._key("ctrl+v")
-            time.sleep(0.4)
+            self._open_or_abort(chat)
+            self._paste(lambda: self._clip_image(path))
+            time.sleep(0.7)
             self._key("Return")
             log.info("已发送图片到 %s：%s", chat, os.path.basename(path))
 
@@ -361,6 +400,15 @@ def title_crop(img, gap: int = 60, pad: int = 8):
     y0, y1 = int(rows[0]), int(rows[-1]) + 1
     h, w = img.shape[:2]
     return np.ascontiguousarray(img[max(0, y0 - pad):min(h, y1 + pad), max(0, x0 - pad):min(w, x1 + pad)])
+
+
+def section_name(ocr: str, names: tuple[str, ...]) -> str:
+    """OCR 出的分区标题 → 分区名。左侧图标常被识别成 1~2 个杂字（如「群聊」→「君群聊」），
+    所以允许分区名前后共有至多 3 个杂字；更长的文字是结果行（如网络联想「xx群聊」），不算。
+    取最长的匹配（「搜索网络结果」优先于「网络结果」）。"""
+    text = _norm(ocr)
+    hits = [n for n in names if n in text[: len(n) + 2] and len(text) <= len(n) + 3]
+    return max(hits, key=len) if hits else ""
 
 
 _NON_WORD = re.compile(r"[^0-9A-Za-z\u4e00-\u9fff]+")

@@ -63,7 +63,12 @@ def serve(bridge: "Bridge") -> None:
         def do_GET(self):
             if not self._auth():
                 return
-            u = urlparse(self.path)
+            # 请求行按 latin-1 解码；没做百分号编码的中文（curl 直接写 ?q=浮屿）要还原成 UTF-8
+            try:
+                raw = self.path.encode("latin-1").decode("utf-8")
+            except UnicodeError:
+                raw = self.path
+            u = urlparse(raw)
             if u.path == "/healthz":
                 probs = bridge.problems()
                 return self._json(200, {"ok": True, "healthy": not probs, "problems": probs,

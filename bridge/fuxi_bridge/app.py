@@ -47,6 +47,11 @@ def _h(text: str) -> str:
     return hashlib.sha1(text.strip().encode()).hexdigest()
 
 
+def _squash(text: str) -> str:
+    """核对用：去掉所有空白（微信存库时可能改动换行/空格），其余逐字比较。"""
+    return "".join(text.split())
+
+
 def _brief(text: str) -> str:
     """日志里不记消息正文，只记长度和指纹（排障时可与数据库比对）。
     FUXI_LOG_TEXT=1 时记录前 60 字，仅限调试。"""
@@ -187,49 +192,65 @@ class Bridge:
                 job.done.set()
                 continue
             try:
-                t0 = int(time.time()) - 2
-                job.t_start = time.monotonic()
-                self.sender.last_open = 0.0
-                name = self.name_of(job.chat)
-                if job.text is not None:
-                    self.sent_hashes.append(_h(job.text))
-                    self.sender.send_text(name, job.text)
-                if job.image:
-                    self.sender.send_image(name, job.image)
-                job.ok = True
-                job.t_sent = time.monotonic()
-                job.open_s = self.sender.last_open
-                if job.verify:
-                    job.verified = self._verify(job, t0)
-                    if not job.verified:
-                        self.sender.forget_chat()
-                        self.halted = f"{time.strftime('%H:%M:%S')} 发往「{name}」后核对失败，可能发错会话"
-                        log.critical("已熔断，停止一切发送：%s。确认无误后 POST /resume 恢复", self.halted)
-                self.last_send_ok = job.verified is not False
-            except (SendError, OSError) as e:
-                job.error = str(e)
-                # 发送中途出错时界面状态未知（可能已点开了别的会话），保守起见同样熔断
-                if "放弃发送" not in str(e):
-                    self.halted = f"{time.strftime('%H:%M:%S')} 发往「{job.chat}」时出错：{e}"
-                    log.critical("已熔断：%s", self.halted)
-                else:
-                    self.last_abort = (time.time(), str(e))
-                self.last_send_ok = False
-                log.error("发送到 %s 失败：%s", job.chat, e)
+                self._attempt(job)
+                for retry in range(self.RETRIES):
+                    if not (job.error and "放弃发送" in job.error) or self.halted:
+                        break
+                    log.warning("发送到 %s 被放弃，%.1f 秒后重试（%d/%d）：%s", self.name_of(job.chat),
+                                self.RETRY_DELAY, retry + 1, self.RETRIES, job.error)
+                    time.sleep(self.RETRY_DELAY)
+                    job.error = ""
+                    self._attempt(job)
             finally:
                 job.t_done = time.monotonic()
                 job.done.set()
                 time.sleep(0.6)  # 气泡间隔
 
+    RETRIES = 1          # 「放弃发送」（还没输入任何内容）后重试次数
+    RETRY_DELAY = 1.5
+
+    def _attempt(self, job: SendJob) -> None:
+        """发送一次。放弃（未发出）只记 job.error；粘贴之后出错或核对失败才熔断。"""
+        try:
+            t0 = int(time.time()) - 2
+            job.t_start = time.monotonic()
+            self.sender.last_open = 0.0
+            name = self.name_of(job.chat)
+            if job.text is not None:
+                self.sent_hashes.append(_h(job.text))
+                self.sender.send_text(name, job.text)
+            if job.image:
+                self.sender.send_image(name, job.image)
+            job.ok = True
+            job.t_sent = time.monotonic()
+            job.open_s = self.sender.last_open
+            if job.verify:
+                job.verified = self._verify(job, t0)
+                if not job.verified:
+                    self.sender.forget_chat()
+                    self.halted = f"{time.strftime('%H:%M:%S')} 发往「{name}」后核对失败，可能发错会话"
+                    log.critical("已熔断，停止一切发送：%s。确认无误后 POST /resume 恢复", self.halted)
+            self.last_send_ok = job.verified is not False
+        except (SendError, OSError) as e:
+            job.error = str(e)
+            # 回车之后出错时界面状态未知，保守起见熔断；回车之前的错误都带「放弃发送」
+            if "放弃发送" not in str(e):
+                self.halted = f"{time.strftime('%H:%M:%S')} 发往「{job.chat}」时出错：{e}"
+                log.critical("已熔断：%s", self.halted)
+            else:
+                self.last_abort = (time.time(), str(e))
+            self.last_send_ok = False
+            log.error("发送到 %s 失败：%s", job.chat, e)
+
     def _verify(self, job: SendJob, t0: int, wait: float = 8) -> bool:
-        want = (job.text or "").strip()
+        want = _squash(job.text or "")
         deadline = time.monotonic() + wait
         while time.monotonic() < deadline:
             try:
                 for mtype, text in self.reader.self_sent_since(job.chat, t0):
                     if job.image and mtype == "image":
                         return True
-                    if job.text is not None and text.strip() == want:
+                    if job.text is not None and _squash(text) == want:
                         return True
             except Exception:
                 log.debug("核对读取失败", exc_info=True)

@@ -12,7 +12,7 @@ from fuxi_bridge import control, messages, timing
 from fuxi_bridge.allow import AllowList
 from fuxi_bridge.app import Bridge
 from fuxi_bridge.messages import Message, parse_appmsg
-from fuxi_bridge.sender import Sender, title_crop
+from fuxi_bridge.sender import Sender, section_name, title_crop
 
 SELF = "wxid_self"
 
@@ -152,6 +152,15 @@ class ControlTest(unittest.TestCase):
 
 
 class SpeedTest(unittest.TestCase):
+    def test_section_name_tolerates_icon_noise(self):
+        names = Sender.SECTIONS_ALL
+        self.assertEqual(section_name("君群聊", names), "群聊")            # 线上实测的误识别
+        self.assertEqual(section_name("聊天记录", names), "聊天记录")
+        self.assertEqual(section_name("六搜索网络结果膚", names), "搜索网络结果")
+        self.assertEqual(section_name("功能", names), "功能")
+        self.assertEqual(section_name("浮屿用户交流群", names), "")        # 结果行不是分区标题
+        self.assertEqual(section_name("某某群聊天群", names), "")          # 分区名不在开头附近
+
     def test_title_crop_drops_right_icons(self):
         img = np.full((70, 790, 3), 245, np.uint8)
         img[20:45, 25:190] = 30      # 标题文字
@@ -196,10 +205,59 @@ class SpeedTest(unittest.TestCase):
         s = self._sender_with_frames([((1079, (1,)), [self.ROW_A])] * 50, section="")
         self.assertIsNone(self._run_wait(s))          # 认不出分区 → 不点
 
+    def test_open_errors_abort_instead_of_halt(self):
+        from fuxi_bridge.sender import SendError
+        s = object.__new__(Sender)
+        s.open_chat = mock.Mock(side_effect=SendError("xwd 截图失败：BadMatch"))
+        with self.assertRaises(SendError) as cm:
+            s._open_or_abort("某群")
+        self.assertIn("放弃发送", str(cm.exception))   # 桥接据此只放弃这一条，不熔断
+
     def test_open_stats(self):
         s = object.__new__(Sender)
         s.open_times = collections.deque([(0, 1.0, "搜索"), (0, 2.0, "搜索"), (0, 0.1, "已在会话")])
         self.assertEqual(s.open_stats(), {"n": 2, "p50": 2.0, "max": 2.0, "last": 0.1})
+
+
+class SendRetryTest(unittest.TestCase):
+    def _bridge(self, send_effects, verified=True):
+        from fuxi_bridge.app import SendJob
+        b = object.__new__(Bridge)
+        b.halted, b.last_abort, b.last_send_ok = "", None, True
+        b.sent_hashes = collections.deque(maxlen=10)
+        b.names_cache = {"g@chatroom": "测试群"}
+        b.sender = mock.Mock(last_open=0.0)
+        b.sender.send_text.side_effect = send_effects
+        b._verify = lambda job, t0: verified
+        b.RETRY_DELAY = 0
+        return b, SendJob(chat="g@chatroom", text="你好")
+
+    def _run(self, b, job):
+        # 队列取完这一条后抛 StopIteration 结束 worker 的死循环
+        b.sendq = mock.Mock()
+        b.sendq.get.side_effect = [job, StopIteration]
+        with mock.patch("fuxi_bridge.app.time.sleep", lambda x: None):
+            with self.assertRaises(StopIteration):
+                b._send_worker()
+
+    def test_abort_is_retried_once_without_halt(self):
+        from fuxi_bridge.sender import SendError
+        b, job = self._bridge([SendError("xwd 截图失败，放弃发送"), None])
+        self._run(b, job)
+        self.assertTrue(job.ok and job.verified)
+        self.assertEqual((job.error, b.halted), ("", ""))
+        self.assertEqual(b.sender.send_text.call_count, 2)
+
+    def test_error_after_enter_halts_and_is_not_retried(self):
+        from fuxi_bridge.sender import SendError
+        b, job = self._bridge([SendError("xdotool 失败"), None])
+        self._run(b, job)
+        self.assertTrue(b.halted)
+        self.assertEqual(b.sender.send_text.call_count, 1)
+
+    def test_verify_ignores_whitespace(self):
+        from fuxi_bridge.app import _squash
+        self.assertEqual(_squash("你好 \n 世界\u2005"), _squash("你好世界"))
 
 
 class TimingTest(unittest.TestCase):

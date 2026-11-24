@@ -23,6 +23,9 @@
 
 ## 同步上游
 
+用 `scripts/sync-upstream.sh --check` 先看上游新了什么、下面这些对接文件有没有变；没问题再去掉 `--check` 同步（会跑测试，不自动提交）。
+脚本做的就是下面这几步：
+
 ```bash
 git clone --depth 1 https://github.com/Banan1cee/whale_girl /tmp/wg
 rsync -a --delete /tmp/wg/src kernel/ && rsync -a /tmp/wg/server.js /tmp/wg/package.json /tmp/wg/config kernel/

@@ -132,6 +132,67 @@ class FlowTest(unittest.TestCase):
         self.assertIn("403", fl.handle("3 确认", fix=True))
         self.assertEqual(len(calls), 1)
 
+    def test_uploads_feedback_images_to_orphan_branch_and_opt_out(self):
+        f, gh, fl = flow(item())
+        fname = f.save_media("87ad5c171f14d6cb", b"\xff\xd8\xff\xe0FAKEJPG")
+        f.items[0]["images"] = [fname]
+        self.assertIn("附图 1 张", f.detail(3))
+
+        # 模拟 feedback-assets 分支尚不存在（GET ref 404 → 创建 orphan 分支 + PUT 上传图片）
+        calls = []
+
+        def fake_http(method, url, body=None):
+            path = url.split("/repos/")[1]
+            calls.append((method, path, body))
+            if method == "GET" and path.endswith("/git/ref/heads/feedback-assets"):
+                raise isu.IssueError("GitHub 返回 404：Not Found")
+            if method == "POST" and path.endswith("/git/blobs"):
+                return 201, {"sha": "blob1"}
+            if method == "POST" and path.endswith("/git/trees"):
+                return 201, {"sha": "tree1"}
+            if method == "POST" and path.endswith("/git/commits"):
+                return 201, {"sha": "commit1"}
+            if method == "POST" and path.endswith("/git/refs"):
+                return 201, {"ref": "refs/heads/feedback-assets"}
+            if method == "PUT" and "/contents/issues/" in path:
+                return 201, {"content": {"path": "issues/fb-3-87ad5c171f14d6cb.jpg"}}
+            if method == "POST" and path.endswith("/issues"):
+                return 201, {"number": 1305, "html_url": "https://github.com/TixXin/Fuyu/issues/1305"}
+            return 200, {}
+
+        fl.gh.http = fake_http
+        prev = fl.handle("3", fix=False)
+        self.assertIn("含 1 张群友截图", prev)
+        out = fl.handle("3 确认", fix=False)
+        self.assertIn("附 1 张截图", out)
+        # 检查 orphan commit parents=[] 与 Markdown 截图链接
+        commit_call = [b for m, p, b in calls if m == "POST" and p.endswith("/git/commits")][0]
+        self.assertEqual(commit_call["parents"], [])
+        issue_body = [b["body"] for m, p, b in calls if m == "POST" and p.endswith("/issues")][0]
+        self.assertIn("![截图 1](https://raw.githubusercontent.com/TixXin/Fuyu/feedback-assets/issues/fb-3-87ad5c171f14d6cb.jpg)", issue_body)
+
+        # 不带图选项跳过上传
+        f2, gh2, fl2 = flow(item())
+        f2.save_media("aabbcc", b"\xff\xd8\xff\xe0JPG2")
+        f2.items[0]["images"] = ["aabbcc.jpg"]
+        prev2 = fl2.handle("3 不带图 只要文字", fix=False)
+        self.assertIn("已跳过 1 张群友截图", prev2)
+        fl2.handle("3 确认", fix=False)
+        self.assertEqual([p for _, p, _ in gh2.calls], ["TixXin/Fuyu/issues"])
+        self.assertNotIn("群友截图", gh2.calls[0][2]["body"])
+
+    def test_feedback_annotate_media_merges_into_item(self):
+        d = tempfile.mkdtemp()
+        f = fb.Feedback(d, complete=lambda s, t: '{"items":[{"ref":null,"category":"bug","title":"有阴影","detail":"任务栏有阴影","platform":"Windows","messages":[1,2],"answered":false}]}')
+        t = time.time() - 120
+        f.add("m1", t, "g@chatroom", "u1", "Lucifer", "任务栏有阴影")
+        f.add("m2", t + 1, "g@chatroom", "u1", "Lucifer", "[图片]")
+        fname = f.save_media("deadbeef", b"\xff\xd8\xff\xe0JPG")
+        f.annotate_media("m2", fname)
+        f.classify()
+        self.assertEqual(f.get(1).get("images"), ["deadbeef.jpg"])
+        self.assertEqual(len(f.image_paths(f.get(1))), 1)
+
 
 class PrOpenedTest(unittest.TestCase):
     def test_event(self):

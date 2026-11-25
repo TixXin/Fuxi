@@ -45,6 +45,22 @@ class GroupWorkMixin:
                 self.feedback.add(m.msg_id, float(m.create_time), m.chat, m.sender, name, self._render(m), role)
             except OSError as e:
                 log.warning("反馈收集写入失败：%s", e)
+            if m.type == "image" and m.media and not m.is_self and hasattr(self, "images"):
+                threading.Thread(target=self._capture_feedback_image, args=(m,), name="fb-img", daemon=True).start()
+
+    def _capture_feedback_image(self, m: Message) -> None:
+        """后台把群友反馈的图片解密缓存到 /state/feedback/media/，供后续开 issue 时上传嵌入。"""
+        for attempt in range(2):
+            try:
+                jpg, _ = self.images.load(m.chat, m.media, wait=3.5)
+                fname = self.feedback.save_media(m.media, jpg)
+                self.feedback.annotate_media(m.msg_id, fname)
+                return
+            except Exception as e:
+                if attempt == 0:
+                    time.sleep(3)
+                else:
+                    log.debug("反馈图片 %s 缓存失败：%s", str(m.media)[:8], e)
 
     def _feedback_loop(self) -> None:
         """每分钟看一次：整点前后整理（每小时）、到点发摘要和群小结。"""

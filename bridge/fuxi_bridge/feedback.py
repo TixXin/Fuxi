@@ -119,12 +119,48 @@ class Feedback:
         self._write("meta.json", self.meta)
 
     # ---- 收集 ----
-    def add(self, mid: str, ts: float, chat: str, sender: str, name: str, text: str, role: str = "") -> None:
+    def _media_dir(self) -> str:
+        d = os.path.join(self.root, "media")
+        os.makedirs(d, mode=0o700, exist_ok=True)
+        return d
+
+    def save_media(self, key: str, data: bytes) -> str:
+        """把解密后的反馈图片存到 /state/feedback/media/<safe>.jpg，返回文件名。"""
+        safe = re.sub(r"[^a-zA-Z0-9_-]", "", str(key or ""))[:48] or f"img_{int(time.time() * 1000)}"
+        fname = f"{safe}.jpg"
+        p = os.path.join(self._media_dir(), fname)
+        if not os.path.exists(p):
+            tmp = p + ".tmp"
+            with open(tmp, "wb") as f:
+                f.write(data)
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, p)
+        return fname
+
+    def media_path(self, fname: str) -> str | None:
+        if not fname or "/" in fname or "\\" in fname or fname in (".", ".."):
+            return None
+        p = os.path.join(self.root, "media", fname)
+        return p if os.path.isfile(p) else None
+
+    def image_paths(self, it: dict) -> list[tuple[str, str]]:
+        """返回条目已保存的本地图片 [(filename, abs_path), ...]。"""
+        out: list[tuple[str, str]] = []
+        for fname in it.get("images") or []:
+            p = self.media_path(fname)
+            if p:
+                out.append((fname, p))
+        return out
+
+    def add(self, mid: str, ts: float, chat: str, sender: str, name: str, text: str, role: str = "",
+            media: str = "") -> None:
         """role：owner（主人）/ bot / 空（群友）。"""
         text = (text or "").strip()
         if not text:
             return
         rec = {"mid": mid, "ts": ts, "chat": chat, "sender": sender, "name": name, "text": text[:1500], "role": role}
+        if media:
+            rec["media"] = media
         with self._lock, open(self._path("inbox.jsonl"), "a", encoding="utf-8") as f:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
@@ -133,9 +169,17 @@ class Feedback:
         with self._lock, open(self._path("inbox.jsonl"), "a", encoding="utf-8") as f:
             f.write(json.dumps({"mid": mid, "update": text[:1500]}, ensure_ascii=False) + "\n")
 
+    def annotate_media(self, mid: str, media: str) -> None:
+        """图片解密落盘后，把文件名补挂到原消息记录上。"""
+        if not media:
+            return
+        with self._lock, open(self._path("inbox.jsonl"), "a", encoding="utf-8") as f:
+            f.write(json.dumps({"mid": mid, "media_update": media}, ensure_ascii=False) + "\n")
+
     def _inbox(self, since: float) -> list[dict]:
         recs: dict[str, dict] = {}
         updates: dict[str, str] = {}
+        media_updates: dict[str, str] = {}
         try:
             with open(self._path("inbox.jsonl"), encoding="utf-8") as f:
                 for line in f:
@@ -145,6 +189,8 @@ class Feedback:
                         continue
                     if "update" in r:
                         updates[r["mid"]] = r["update"]
+                    elif "media_update" in r:
+                        media_updates[r["mid"]] = r["media_update"]
                     elif r.get("ts", 0) > since:
                         recs[r["mid"]] = r
         except OSError:
@@ -152,6 +198,9 @@ class Feedback:
         for mid, t in updates.items():
             if mid in recs:
                 recs[mid]["text"] = t
+        for mid, m in media_updates.items():
+            if mid in recs:
+                recs[mid]["media"] = m
         return sorted(recs.values(), key=lambda r: r["ts"])
 
     def _trim_inbox(self, keep_after: float) -> None:
@@ -256,6 +305,12 @@ class Feedback:
         for m in msgs:
             if m["chat"] not in cur["chats"]:
                 cur["chats"].append(m["chat"])
+            med = m.get("media")
+            if med:
+                imgs = cur.setdefault("images", [])
+                if med not in imgs:
+                    imgs.append(med)
+                cur["images"] = imgs[-6:]
         if cur["category"] == "question" and it.get("answered") and cur["status"] == "new":
             cur["status"] = "answered"
         return new, cur
@@ -405,9 +460,11 @@ class Feedback:
         if not it:
             return f"没有 #{iid}"
         who = "、".join(r["name"] or r["wxid"] for r in it["reporters"]) or "（只有主人或 bot 提到）"
+        img_cnt = len(self.image_paths(it))
         lines = [f"#{it['id']} [{CATEGORIES[it['category']]}] {it['title']}",
                  it.get("detail") or "",
-                 f"平台：{it.get('platform') or '未知'}；提到 {it['count']} 次；反馈人：{who}",
+                 f"平台：{it.get('platform') or '未知'}；提到 {it['count']} 次；反馈人：{who}"
+                 + (f"；附图 {img_cnt} 张" if img_cnt else ""),
                  f"首次 {time.strftime('%m-%d %H:%M', time.localtime(it['first_seen']))}，"
                  f"最近 {time.strftime('%m-%d %H:%M', time.localtime(it['last_seen']))}",
                  "进度：" + self.progress(it),

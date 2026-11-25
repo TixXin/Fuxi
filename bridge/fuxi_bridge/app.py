@@ -26,7 +26,7 @@ import threading
 import time
 
 from . import messages, store
-from . import announce, assist, care, control, events, feedback, fuyu, images, issues, knowledge, outreach, owner_agent, schedule, settings, timing, voice
+from . import announce, assist, care, community, control, events, feedback, fuyu, images, issues, knowledge, outreach, owner_agent, remote_agent, schedule, settings, timing, voice
 from . import allow
 from .allow import AllowList
 from .assist import AssistMixin
@@ -124,6 +124,8 @@ class Bridge(SendingMixin, ReplyMixin, AssistMixin, GroupWorkMixin):
                                           complete=lambda system, text: self.kernel.complete(system, text, 2500),
                                           fuyu=self.fuyu)
         self.outreach = outreach.Outreach(self, os.path.join(state, "outreach"))
+        self.community = community.CommunityWatcher(self, os.path.join(state, "community"))
+        self.remote = remote_agent.RemoteAgent(self, os.path.join(state, "remote"))
         self.fixflow = issues.FixFlow(self.feedback, issues.Issues(lambda: self.cfg.get("knowledge_repo") or self.fuyu.repo))
         self.handoffs: collections.deque[tuple[float, str]] = collections.deque(maxlen=50)
         self._fuyu_proactive_at: dict[str, float] = {}
@@ -608,7 +610,7 @@ class Bridge(SendingMixin, ReplyMixin, AssistMixin, GroupWorkMixin):
                 return
             agent = getattr(self, "owner_agent", None)
             if agent is not None and not boot_catchup:
-                agent_reply = agent.maybe_handle(chat, payload)
+                agent_reply = agent.maybe_handle(chat, payload, batch=batch)
                 if agent_reply is not None:
                     ch = getattr(self, "_control_hashes", None)
                     if ch is not None:

@@ -74,6 +74,7 @@ def _item(i: dict) -> dict:
     out["body"] = (i.get("body") or "")[:BODY_MAX]
     if "pull_request" in i:
         out["merged_at"] = (i.get("pull_request") or {}).get("merged_at")
+        out["draft"] = bool(i.get("draft"))
     return out
 
 
@@ -240,10 +241,12 @@ class Fuyu:
         base = {"number": it["number"], "title": it["title"], "url": it["html_url"]}
         if is_pr:
             refs = sorted({int(n) for n in _CLOSE.findall(f"{it.get('title') or ''}\n{it.get('body') or ''}")})
+            pr_extra = {"refs": refs, "user": it.get("user", ""), "draft": bool(it.get("draft")),
+                        "body": (it.get("body") or "")[:600]}
             if it.get("merged_at") and not (prev or {}).get("merged_at"):
-                return [{"type": "pr_merged", **base, "refs": refs, "at": it["merged_at"]}]
-            if prev is None and it["state"] == "open":   # 新开的 PR（含 draft）；refs = 正文里关闭关键字指向的 issue
-                return [{"type": "pr_opened", **base, "refs": refs, "user": it.get("user", ""), "at": it["created_at"]}]
+                return [{"type": "pr_merged", **base, **pr_extra, "at": it["merged_at"]}]
+            if (prev is None and it["state"] == "open") or (prev is not None and prev.get("draft") and not it.get("draft") and it["state"] == "open"):
+                return [{"type": "pr_opened", **base, **pr_extra, "at": it["created_at"]}]
             return []
         if prev is None:
             out = [{"type": "issue_opened", **base, "at": it["created_at"]}]

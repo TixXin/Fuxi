@@ -123,6 +123,17 @@ def serve(bridge: "Bridge") -> None:
                 return self._json(200, {"ok": True, **handlers.schedule_list(bridge)})
             if u.path == "/templates":
                 return self._json(200, {"ok": True, "items": handlers.templates_list(bridge)})
+            if u.path == "/remote/poll":
+                qs = parse_qs(u.query)
+                target = (qs.get("target") or ["mac"])[0].strip().lower()
+                wait = float((qs.get("wait") or ["25"])[0])
+                host = (qs.get("host") or [""])[0].strip()
+                cmds = bridge.remote.poll(target, wait=wait, host=host) if hasattr(bridge, "remote") else []
+                return self._json(200, {"ok": True, "commands": cmds})
+            if u.path == "/remote/nodes":
+                snap = bridge.remote.nodes_snapshot() if hasattr(bridge, "remote") else {}
+                active = dict(bridge.remote.active) if hasattr(bridge, "remote") and bridge.remote.active else None
+                return self._json(200, {"ok": True, "nodes": snap, "active": active})
             if u.path == "/chats":
                 q = (parse_qs(u.query).get("q") or [""])[0].strip()
                 if not q:
@@ -246,6 +257,28 @@ def serve(bridge: "Bridge") -> None:
                 return self._json(200, {"ok": True, "created": created, "item": bridge.announcer.public(it)})
             if urlparse(self.path).path == "/resume":
                 return self._json(200, {"ok": True, "was": handlers.resume(bridge)})
+            if urlparse(self.path).path == "/remote/heartbeat":
+                body = self._body()
+                if body is None:
+                    return
+                res = bridge.remote.heartbeat(str(body.get("target") or "mac"), str(body.get("host") or ""))
+                return self._json(200, res)
+            if urlparse(self.path).path == "/remote/reply":
+                body = self._body()
+                if body is None:
+                    return
+                res = bridge.remote.deliver_reply(
+                    sid=str(body.get("sid") or ""),
+                    seq=int(body.get("seq") or 0),
+                    ok=bool(body.get("ok", True)),
+                    text=str(body.get("text") or ""),
+                    claude_session_id=str(body.get("claude_session_id") or ""),
+                    duration_s=float(body.get("duration_s") or 0),
+                    cost_usd=float(body.get("cost_usd") or 0),
+                    error=str(body.get("error") or ""),
+                    log_path=str(body.get("log_path") or ""),
+                )
+                return self._json(200, res)
             path = urlparse(self.path).path
             m = re.fullmatch(r"/schedule/(\d+)/cancel", path)
             if m:

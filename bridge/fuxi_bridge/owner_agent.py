@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -36,10 +37,10 @@ CANCEL_RE = re.compile(r"^(?:算了|取消|不用了|别发|别开|别改|先不
 INTENT_HINT_RE = re.compile(
     r"反馈|issue|工单|任务|建任务|开单|create|修[复理改]?|派修|补图|补上|截图|附图|图片|"
     r"记住|以后别|别老|不要老|别总|别再|人设|规则|准则|撤销|回退|"
-    r"问答|faq|资料|文档|知识库|同步|进度|仓库|"
+    r"问答|faq|资料|文档|知识库|同步|进度|仓库|插件|市场|pr|pull|"
     r"设置|配置|概率|冷却|静默|静音|暂停|恢复|状态|白名单|允许|禁止|拉黑|"
     r"定时|提醒我|群发|公告|发版|忽略|归类|整理|汇总|列表|查一下|查下|看看.*反馈|"
-    r"mac|win|windows|ghostty|前台|后台|\bfb-?\d+|#\d+",
+    r"mac|win|windows|ghostty|前台|后台|agent|终端|审[查核]?|看下.*pr|私发|\bfb-?\d+|#\d+",
     re.I,
 )
 
@@ -72,8 +73,11 @@ ROUTER_SYSTEM = """你是「浮汐」（Fuxi，一个微信 AI 助手）的【�
 - kb_faq_list: {} — 列出当前自定义常见问答
 - kb_sync: {} — 立刻同步浮屿文档知识库
 - fuyu_sync: {} — 立刻同步浮屿 GitHub 仓库（版本/issue/PR）
+- community_sync: {} — 立刻同步插件市场仓库（TixXin/fuyu-plugins）检查新 PR 和上架合并
 - fuyu_status: {"number":1244} — 查询指定编号的 GitHub issue/PR 进度
-- system_status: {} — 查看浮汐运行状态（微信、内核、白名单、问题）
+- remote_start: {"target":"mac","repo":"TixXin/Fuyu","prompt":"给电脑端 Claude Code 的清晰任务指令","readonly":true} — 启动电脑端 Claude Code 实时多轮遥控会话（会弹 Ghostty 窗，结果统一私发主人并支持后续私聊多轮继续直到「退出 agent」）。target 默认 mac（提到 win/windows 时用 win）；repo 默认 TixXin/Fuyu，提到插件/插件市场用 TixXin/fuyu-plugins，提到浮汐/Fuxi 用 TixXin/Fuxi；审 PR / 看代码 / 分析排查时 readonly=true（只读安全模式），明确要求直接改代码时 readonly=false
+- remote_close: {} — 退出当前电脑端远程 Agent 会话并关闭终端窗口
+- system_status: {} — 查看浮汐运行状态（微信、内核、白名单、问题、插件市场与远程节点）
 - setting_get: {"key":""} — 查看设置项（key 可留空看常用项，或写中文名/英文键）
 - setting_set: {"key":"设置名","value":"新值"} — 修改设置项（如 群里插话概率/静默时段/反馈兜底概率/重启补回分钟 等）
 - pause_bot: {"paused":true} — 暂停或恢复浮汐自动回复
@@ -85,6 +89,8 @@ ROUTER_SYSTEM = """你是「浮汐」（Fuxi，一个微信 AI 助手）的【�
 - 主人说「把刚才那个日历需求开个 issue 让 mac 前台修」→ {"mode":"act","calls":[{"tool":"feedback_sync","args":{}},{"tool":"issue_fix","args":{"fb_id":0,"query":"日历","target":"mac","mode":"fg"}}]}
 - 主人说「把刚才那个日历需求开个 issue 让 mac 前台修 修完自动测试自动提 PR」→ {"mode":"act","calls":[{"tool":"feedback_sync","args":{}},{"tool":"issue_fix","args":{"fb_id":0,"query":"日历","target":"mac","mode":"fg","note":"修完自动测试并提 PR"}}]}
 - 主人说「建任务了没 没有的话就 create」→ {"mode":"act","calls":[{"tool":"issue_open","args":{"fb_id":0}}]}
+- 主人说「把最新的 PR 看下，然后把看法私发我」→ {"mode":"act","calls":[{"tool":"remote_start","args":{"target":"mac","repo":"TixXin/Fuyu","prompt":"查看当前仓库最新的 PR（用 gh pr list / gh pr view / gh pr diff），分析改动内容、代码质量、潜在风险以及是否建议合并，用中文把清晰简洁的评审看法发给我。","readonly":true}}]}
+- 主人说「让 mac 审一下插件市场最新的 PR」→ {"mode":"act","calls":[{"tool":"remote_start","args":{"target":"mac","repo":"TixXin/fuyu-plugins","prompt":"查看插件市场仓库最新的 PR（用 gh pr list / gh pr view / gh pr diff），检查插件配置规范性、安全性与功能简介，用中文把审核结论发给我。","readonly":true}}]}
 - 主人说「你分析下这个问题什么原因导致的 怎么解决」→ {"mode":"chat"}
 - 主人说「群里插话概率调成 3」→ {"mode":"act","calls":[{"tool":"setting_set","args":{"key":"free_chat_pct","value":"3"}}]}
 """
@@ -156,11 +162,34 @@ class OwnerAgent:
             return None
         return p
 
-    def maybe_handle(self, chat: str, payload: dict) -> str | None:
-        """若消息命中主人操作意图，执行真实动作并返回回复文本；否则返回 None 交回普通聊天。"""
+    def _batch_images_b64(self, chat: str, batch) -> list[dict]:
+        """把主人在私聊里随消息发的图片解密转成 base64 列表，供电脑端 Claude 查看。"""
+        out: list[dict] = []
+        if not batch or not hasattr(self.b, "images"):
+            return out
+        for m in batch:
+            if getattr(m, "type", "") == "image" and getattr(m, "media", ""):
+                try:
+                    jpg, _ = self.b.images.load(chat, m.media, wait=2.5)
+                    out.append({"name": f"{m.media[:12]}.jpg", "b64": base64.b64encode(jpg).decode("ascii")})
+                except Exception as e:
+                    log.debug("远程会话附带图片解密失败：%s", e)
+        return out[:3]
+
+    def maybe_handle(self, chat: str, payload: dict, batch=None) -> str | None:
+        """若消息命中主人操作意图或处于活跃远程会话直通模式，执行真实动作并返回回复；否则返回 None。"""
         if not self._is_authorized(chat, payload):
             return None
         clean = self._clean_text(payload)
+        remote = getattr(self.b, "remote", None)
+
+        # 0) 私聊直通模式：当前有活跃远程 Agent 会话时，主人私聊自动转发给电脑上的 Claude
+        if remote is not None and payload.get("chat_type") == "private" and remote.has_active():
+            imgs = self._batch_images_b64(chat, batch)
+            res = remote.handle_private_message(clean, images=imgs)
+            if res is not None:
+                return res
+
         if not clean:
             return None
 
@@ -504,9 +533,41 @@ class OwnerAgent:
         if tool == "fuyu_sync":
             return b.control.fuyu("sync")
 
+        if tool == "community_sync":
+            comm = getattr(b, "community", None)
+            if not comm:
+                return "插件市场监控未初始化。"
+            try:
+                return comm.sync_plugins()
+            except Exception as e:
+                return f"插件市场同步失败：{e}"
+
         if tool == "fuyu_status":
             num = str(args.get("number") or "").lstrip("#")
             return b.fuyu.status(int(num)) if num.isdigit() else "请指定有效的 issue/PR 编号。"
+
+        if tool == "remote_start":
+            remote = getattr(b, "remote", None)
+            if not remote:
+                return "远程 Agent 模块未初始化。"
+            target = str(args.get("target") or "mac").lower()
+            if target not in ("mac", "win"):
+                target = "mac"
+            repo = str(args.get("repo") or "").strip() or (b.cfg.get("knowledge_repo") or "TixXin/Fuyu")
+            prompt = str(args.get("prompt") or "").strip()
+            if not prompt:
+                return "需要明确告诉电脑端 Agent 要做什么任务。"
+            readonly = bool(args.get("readonly", True))
+            sess, dm = remote.start_session(target=target, repo=repo, prompt=prompt, readonly=readonly)
+            # 在群里发起时，私聊同步通知主人，群里只给一句简短确认（不在群里刷后续多轮输出）
+            if chat.endswith("@chatroom"):
+                remote._send_owner([dm])
+                return f"已交给 {target.upper()} 处理（会话 #{sess['id']}，仓库 {repo}），结果会私发给你，后续在私聊里直接接着指挥即可。"
+            return dm
+
+        if tool == "remote_close":
+            remote = getattr(b, "remote", None)
+            return remote.close_active() if remote else "当前没有开启中的远程会话。"
 
         # ---- Group D: 系统状态 / 设置 / 暂停 / 定时发送 ----
         if tool == "system_status":

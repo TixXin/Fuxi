@@ -94,6 +94,12 @@ ITEMS: list[Item] = [
          "用来查进度、反馈查重"),
     Item("fuyu_notify", "浮屿动态", "choice", "release", "同步发现变化时私聊主人（发到文件传输助手）",
          {"release": "只通知发版", "all": "发版+PR合并+issue开关", "off": "关闭"}),
+    Item("plugins_repo", "插件市场仓库", "text", "TixXin/fuyu-plugins",
+         "浮屿插件市场索引仓库（owner/name），每 10 分钟检查新 PR 与上架合并；空 = 不监控"),
+    Item("community_notify", "社区PR播报", "bool", True,
+         "外部贡献者在插件市场或主仓库提新 PR 时立刻私聊主人，PR 合并后在营业时段自动发群上新/致谢（自动排除仓库作者本人和 bot）"),
+    Item("community_ignore_users", "PR播报忽略账号", "list", [],
+         "这些 GitHub 用户名不触发社区 PR 播报（仓库作者本人和常见 bot 已自动排除）"),
     Item("agent_token_expires", "代理凭据到期", "text", "", "浮屿仓库 secret CLAUDE_CODE_OAUTH_TOKEN 的到期日（如 2027-11-24），"
          "到期前 14 天每天提醒；空 = 不提醒（开 issue 的 token 到期日自动从 GitHub 读）"),
     Item("announce_to", "发版群", "text", "", "发版公告（POST /announce）默认发到哪个群：群名或 chat_id；空 = 调用方必须指定"),

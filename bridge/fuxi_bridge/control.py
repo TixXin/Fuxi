@@ -23,6 +23,7 @@
   /outreach /营业          群营业状态；/outreach idle 试写；/outreach welcome；/outreach fix v0.3.14
   /fuyu /浮屿              浮屿版本与动态；/fuyu 1244 查进度；/fuyu search 问题；/fuyu sync
   /cron /定时              等发的定时消息；/cron cancel 编号 取消
+  /agent                   查看远程电脑节点（mac/win）与活跃会话；/agent stop 打断当前轮；/agent exit 结束并关窗
   /set /设置               查看/修改设置（/set 项名 值）
 """
 
@@ -143,6 +144,10 @@ class Control:
             lines.append(f"群反馈：{b.feedback.brief()}")
         if b.cfg.get("fuyu_sync"):
             lines.append(f"浮屿仓库：{b.fuyu.brief()}")
+        if getattr(b, "community", None) and b.cfg.get("plugins_repo"):
+            lines.append(f"插件市场：{b.community.brief()}")
+        if getattr(b, "remote", None):
+            lines.append(f"远程节点：{b.remote.brief()}")
         if b.fixflow.gh.ready or b.cfg.get("agent_token_expires"):
             wait = len(b.feedback.agent_waiting())
             exp = "；".join(f"{n}到 {d}" for n, d in b.token_expiry()) or "到期日未知"
@@ -458,6 +463,17 @@ class Control:
             return f"#{it['code']} 已发到「{it['to']}」。"
         return f"#{it['code']} 发送失败：{it.get('error')}（不会自动重试，避免重复发）"
 
+    def remote_agent(self, arg: str) -> str:
+        r = getattr(self.b, "remote", None)
+        if not r:
+            return "远程 Agent 未启用。"
+        cmd = arg.strip().lower()
+        if cmd in ("stop", "cancel", "打断", "停"):
+            return r.interrupt_active()
+        if cmd in ("exit", "close", "quit", "退出", "关闭"):
+            return r.close_active()
+        return f"远程 Agent：{r.brief()}\n用法：/agent（看状态）· /agent stop（打断当前轮）· /agent exit（退出并关窗）"
+
     def announce_cancel(self, arg: str) -> str:
         from .announce import AnnounceError
         try:
@@ -516,4 +532,5 @@ COMMANDS = {
     "/开issue": "open_issue", "/issue": "open_issue",
     "/营业": "outreach", "/outreach": "outreach",
     "/定时": "scheduled", "/cron": "scheduled", "/sched": "scheduled",
+    "/agent": "remote_agent",
 }

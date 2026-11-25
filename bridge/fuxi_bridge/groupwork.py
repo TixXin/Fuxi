@@ -89,6 +89,18 @@ class GroupWorkMixin:
             self._agent_watch(now)
         except Exception:
             log.exception("云端代理检查出错")
+        comm = getattr(self, "community", None)
+        if comm is not None:
+            try:
+                comm.tick(now)
+            except Exception:
+                log.exception("社区 PR 检查出错")
+        rem = getattr(self, "remote", None)
+        if rem is not None:
+            try:
+                rem.tick(now)
+            except Exception:
+                log.exception("远程 Agent 巡检出错")
         digest_due = fb.due("digest", self.cfg.get("digest_time"), now)
         group_due = fb.due("group", self.cfg.get("group_summary_time"), now)
         if digest_due or group_due or now - float(fb.meta.get("classified_at") or 0) >= feedback.CLASSIFY_EVERY:
@@ -192,6 +204,12 @@ class GroupWorkMixin:
         for e in events:
             if e.get("type") == "new_release" and not e.get("prerelease") and self.cfg.get("outreach"):
                 threading.Thread(target=self.outreach.on_release, args=(e["tag"],), name="fix-notify", daemon=True).start()
+        comm = getattr(self, "community", None)
+        if comm is not None:
+            try:
+                comm.on_main_events(events, self.cfg.get("knowledge_repo") or self.fuyu.repo)
+            except Exception:
+                log.exception("主仓库外部 PR 通知出错")
         texts = []
         fb = getattr(self, "feedback", None)
         for e in events:   # /fix 派给代理的 issue 有结果了：不管「浮屿动态」怎么设都告诉主人

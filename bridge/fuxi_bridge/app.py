@@ -26,7 +26,7 @@ import threading
 import time
 
 from . import messages, store
-from . import announce, assist, care, control, events, feedback, fuyu, images, issues, knowledge, outreach, schedule, settings, timing, voice
+from . import announce, assist, care, control, events, feedback, fuyu, images, issues, knowledge, outreach, owner_agent, schedule, settings, timing, voice
 from . import allow
 from .allow import AllowList
 from .assist import AssistMixin
@@ -130,6 +130,7 @@ class Bridge(SendingMixin, ReplyMixin, AssistMixin, GroupWorkMixin):
         self._group_silenced_until: dict[str, float] = {}
         self._chat_msg_seq: dict[str, int] = {}
         self.control = control.Control(self)
+        self.owner_agent = owner_agent.OwnerAgent(self, state)
         self.apply_settings()
 
     # ---------- 设置 ----------
@@ -605,6 +606,15 @@ class Bridge(SendingMixin, ReplyMixin, AssistMixin, GroupWorkMixin):
                 log.info("%s 问源码，回仓库地址", self.name_of(chat))
                 self._deliver(chat, batch, {"action": "reply", "reply": f"我是开源的：{url}\n（AGPL-3.0，对话内核来自 whale_girl）"}, tr, k0)
                 return
+            agent = getattr(self, "owner_agent", None)
+            if agent is not None and not boot_catchup:
+                agent_reply = agent.maybe_handle(chat, payload)
+                if agent_reply is not None:
+                    ch = getattr(self, "_control_hashes", None)
+                    if ch is not None:
+                        ch.append(_h(agent_reply))
+                    self._deliver(chat, batch, {"action": "reply", "reply": agent_reply}, tr, k0)
+                    return
             if seq_before is not None:
                 payload["_chat_seq"] = seq_before
             payload["_msg_ts"] = batch[-1].create_time

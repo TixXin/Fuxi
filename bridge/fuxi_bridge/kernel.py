@@ -150,6 +150,16 @@ class Kernel:
     def config(self) -> dict:
         return self._req("GET", "/api/config", timeout=10).get("config") or {}
 
+    def persona(self) -> dict:
+        r = self._req("GET", "/api/persona", timeout=10)
+        return r.get("persona") if isinstance(r.get("persona"), dict) else r
+
+    def set_persona(self, data: dict) -> dict:
+        r = self._req("POST", "/api/persona", data, timeout=15)
+        if not r.get("ok"):
+            raise KernelError(f"内核拒绝人设更新：{r.get('error')}")
+        return r.get("persona") or data
+
     def care_due(self, last_ms: int, sent_today: int, active: list[str]) -> dict:
         q = urllib.parse.urlencode({"last": last_ms, "sentToday": sent_today, "active": ",".join(active)})
         return self._req("GET", "/api/care/due?" + q, timeout=10)

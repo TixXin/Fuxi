@@ -17,6 +17,7 @@ log = logging.getLogger("fuxi")
 
 VERSION_Q = re.compile(r"版本|新版|更新|升级|发版|最新|release|v\d+\.\d+", re.I)
 BUG_Q = re.compile(r"修(了|好|复)|bug|问题|没反应|不行|不了|不能|看不到|打不开|闪退|崩|卡|报错|失败|异常|不显示|没效果", re.I)
+EXPLAIN_Q = re.compile(r"解释|说明|干啥|什么意思|原因|弹窗|权限|钥匙串|keychain|报错|异常|凭据|credential|源码", re.I)
 SOURCE_Q = re.compile(r"源码|源代码|开源|source ?code|代码在哪", re.I)
 # 未 @ 时判定「明显在聊浮屿」的词；纯通用词（如「更新」「截图」）不放这里，避免把日常聊天误当成浮屿话题
 FUYU_TOPIC_RE = re.compile(
@@ -209,20 +210,20 @@ class AssistMixin:
         except Exception as e:   # 检索出错不能挡住回复
             log.warning("资料检索出错：%s", e)
             hits = []
-        if hits and knowledge.is_question(q):
+        if hits and (knowledge.is_question(q) or EXPLAIN_Q.search(q)):
             hits = self._judge(q, hits)
         notes, sure = self._fuyu_notes(q)
         hits_header, hits_body, tail = "", "", ""
         if hits:
-            hits_header = ("\n\n（以下是浮屿的说明资料，回答浮屿用法问题时以它为准；资料里没写的不要编，"
-                           "就说不确定、已经转给主人了）\n")
+            hits_header = ("\n\n（以下是浮屿的说明资料，回答问题时以它为准；如果资料主题和对方问的弹窗、报错或具体代码对不上，"
+                           "严禁硬套或编造，直接说不确定、需要查源码或已经转给主人了）\n")
             hits_body = knowledge.render(hits)
             log.info("产品助手 %s：附上 %d 段资料（%s）", self.name_of(chat), len(hits), "、".join(h.title[:20] for h in hits))
         if notes:
             tail += "\n\n（浮屿仓库的最新情况，回答版本、修没修时参考；开发记录未必就是对方说的问题，对不上就别提）\n" + "\n".join(notes)
             log.info("产品助手 %s：附上仓库信息 %d 条", self.name_of(chat), len(notes))
-        if not hits and not sure and knowledge.is_question(q):
-            tail += "\n\n（浮屿资料里没找到这个问题的答案。不确定就直说，告诉对方已经转给主人了，不要编）"
+        if not hits and not sure and (knowledge.is_question(q) or EXPLAIN_Q.search(q)):
+            tail += "\n\n（浮屿资料里没找到这个问题的答案。不确定就直说不知道或需要核实源码，严禁猜测编造原因，告诉对方已经转给主人了）"
             self._handoff(chat, payload, q)
         if hits_body or tail:
             payload["text"] = _fit_append(payload["text"], hits_header, hits_body, tail)
@@ -425,8 +426,8 @@ class AssistMixin:
                                        boot_catchup=boot_catchup, msg_ts=msg_ts):
             return
 
-        # ③ 普通聊浮屿（非提问、非反馈）：温和概率 + 冷却
-        if not (fuyu_mentioned or hits):
+        # ③ 普通聊浮屿（非提问、非反馈）：必须真的提到浮屿相关词，且不主动对看不清的截图硬插话
+        if not fuyu_mentioned or ("[图片]" in payload.get("text", "") and "（图片内容：" not in payload.get("text", "")):
             return
         chat_pct = self.cfg.get("fuyu_chat_pct")
         cooldown = self.cfg.get("fuyu_chat_cooldown")

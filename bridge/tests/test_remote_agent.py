@@ -196,6 +196,29 @@ class RemoteAgentTest(unittest.TestCase):
         self.assertIn("已退出 MAC 远程会话 #R1", out_exit)
         self.assertFalse(b.remote.has_active())
 
+    def test_owner_continuous_group_command_without_at_and_deliver_to_group(self):
+        b = make_bridge()
+        b.remote.heartbeat("mac", "MacBookPro")
+        # 刚在群里对话过（3 分钟内）→ 下一句不带 @ 也能触发 OwnerAgent
+        b.agent.note_owner_reply("g@chatroom")
+        b.kernel.complete.return_value = (
+            '{"mode":"act","calls":[{"tool":"remote_start","args":'
+            '{"target":"mac","repo":"TixXin/Fuyu","prompt":"查源码解释钥匙串弹窗","readonly":true,"deliver_to":"group"}}]}'
+        )
+        grp_reply = b.agent.maybe_handle("g@chatroom", {
+            "chat_type": "group", "sender_id": "wxid_owner", "user_id": "wxid_owner",
+            "text": "在mac 启动 claude 查下这个是什么原因 然后结果发群里", "at_me": False, "reply_to_bot": False,
+            "self_names": ["浮汐"],
+        })
+        self.assertIn("查完结果会直接发到本群", grp_reply)
+        c1 = b.remote.poll("mac", wait=0.1)
+        b.remote.deliver_reply("R1", c1[0]["seq"], True, "源码核实结论：这是浮屿读取 Claude Code 凭据用于展示用量，点拒绝不影响主功能。")
+        sent = wait_sent(b, 3)  # 启动私聊 + 群发结论 + 私聊回执
+        group_msgs = [t for chat, t in sent if chat == "g@chatroom"]
+        self.assertEqual(len(group_msgs), 1)
+        self.assertIn("源码核实结论", group_msgs[0])
+        self.assertNotIn("退出 agent", group_msgs[0])  # 群发不带主人控制尾注
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -118,8 +118,7 @@ class RemoteAgent:
         mins = max(1, int((now - float(info["last_seen"])) // 60))
         return f"\n⚠️ {target} 当前离线/休眠（上次在线约 {mins} 分钟前），任务已暂存，醒来会自动继续，或回「退出 agent」取消。"
 
-    def _send_owner(self, texts: list[str]) -> None:
-        to = self.b.owner_chat() if hasattr(self.b, "owner_chat") else "filehelper"
+    def _send_chat(self, to: str, texts: list[str]) -> None:
         ch = getattr(self.b, "_control_hashes", None)
 
         def go():
@@ -131,11 +130,15 @@ class RemoteAgent:
                 job = self.b.send(SendJob(chat=to, text=t, source="control"))
                 if not job.ok:
                     log.warning("远程 Agent 回复发送失败（%s）：%s", to, job.error)
-        threading.Thread(target=go, name="remote-dm", daemon=True).start()
+        threading.Thread(target=go, name="remote-send", daemon=True).start()
+
+    def _send_owner(self, texts: list[str]) -> None:
+        to = self.b.owner_chat() if hasattr(self.b, "owner_chat") else "filehelper"
+        self._send_chat(to, texts)
 
     # ---- 主人侧：启动 / 续接 / 打断 / 退出 ----
     def start_session(self, target: str, repo: str, prompt: str, readonly: bool = False,
-                      images: list[dict] | None = None) -> tuple[dict, str]:
+                      images: list[dict] | None = None, reply_chat: str = "") -> tuple[dict, str]:
         target = target.lower() if target in ("mac", "win") else "mac"
         repo = (repo or self.b.cfg.get("knowledge_repo") or "TixXin/Fuyu").strip()
         now = time.time()
@@ -154,6 +157,7 @@ class RemoteAgent:
                 "target": target,
                 "repo": repo,
                 "readonly": bool(readonly),
+                "reply_chat": reply_chat or "",
                 "status": "active",
                 "claude_session_id": "",
                 "turns": 0,
@@ -292,11 +296,15 @@ class RemoteAgent:
         now = time.time()
         next_cmd = None
         target = "mac"
+        reply_chat = ""
         with self._cond:
             s = self.active
             if not s or s.get("id") != sid:
                 return {"ok": True, "ignored": True}
             target = s["target"]
+            reply_chat = s.get("reply_chat") or ""
+            if reply_chat:
+                s["reply_chat"] = ""   # 只把本轮明确要求的结论发到群里，后续私聊多轮不刷群
             if claude_session_id:
                 s["claude_session_id"] = claude_session_id
             s["turns"] = int(s.get("turns") or 0) + 1
@@ -331,6 +339,11 @@ class RemoteAgent:
         if not ok and log_path:
             body += f"\n本地日志：{log_path}"
         chunks = split_chunks(body)
+        if reply_chat and ok and chunks:
+            # 发给群的结论不带主人控制尾注
+            self._send_chat(reply_chat, chunks)
+            self._send_owner([f"已把 {target.upper()} #{sid} 的核实结果发到「{self.b.name_of(reply_chat)}」。{footer.strip()}"])
+            return {"ok": True, "queued_next": bool(next_cmd), "delivered_group": True}
         if chunks:
             chunks[-1] = chunks[-1] + footer
         else:

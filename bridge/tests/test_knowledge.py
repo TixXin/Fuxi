@@ -428,6 +428,23 @@ class AssistTest(unittest.TestCase):
             b._assist("g@chatroom", p_cap)
         self.assertFalse(p_cap["at_me"])
 
+    def test_explain_request_filters_irrelevant_docs_and_unseen_image_never_proactive_chats(self):
+        b = assist_bridge()
+        b._handoff = mock.Mock()
+        # 不带问号的解释请求（如「截图弹窗好好解释下」）也会走 _judge 筛掉无关文档
+        b.kernel.complete.side_effect = None
+        b.kernel.complete.return_value = "0"
+        p = payload("@浮汐 截图里这个钥匙串弹窗好好解释下")
+        b._assist("g@chatroom", p)
+        self.assertNotIn("【截图 › 贴图】", p["text"])
+        self.assertIn("严禁猜测编造", p["text"])
+
+        # 未提浮屿且带未看清 [图片] 的「这是干啥的」绝不触发浮屿闲聊主动插话
+        p_img = payload("这是干啥的\n[图片]", at=False)
+        with mock.patch("fuxi_bridge.assist.random.random", return_value=0.0):
+            b._assist("g@chatroom", p_img)
+        self.assertFalse(p_img["at_me"])
+
     def test_private_chat_attaches_fuyu_context(self):
         b = assist_bridge()
         b.names_cache["wxid_owner"] = "煜哥"

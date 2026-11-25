@@ -52,10 +52,46 @@ class ReplyMixin:
         if did:
             tr.add("vision", time.monotonic() - t0)
 
+    @staticmethod
+    def _ocr_jpeg(jpeg: bytes) -> str:
+        """视觉模型未配置或失败时，用本机 RapidOCR 兜底提取截图里的文字（报错/弹窗/设置页等）。"""
+        try:
+            import cv2
+            import numpy as np
+            from .sender import _ocr
+
+            arr = np.frombuffer(jpeg, dtype=np.uint8)
+            img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            if img is None:
+                return ""
+            res, _ = _ocr()(img, use_cls=False)
+            if not res:
+                return ""
+            # 按从上到下、从左到右排列文字
+            boxes = sorted(res, key=lambda r: (int(r[0][0][1]) // 16, int(r[0][0][0])))
+            lines = [str(b[1]).strip() for b in boxes if str(b[1]).strip() and float(b[2]) >= 0.55]
+            text = " / ".join(lines).strip()
+            return text[:400]
+        except Exception as e:
+            log.debug("本地 OCR 兜底跳过：%s", e)
+            return ""
+
     def _recognize(self, chat: str, kind: str, media: str) -> str:
         if kind == "image":
             jpeg, src = self.images.load(chat, media)
-            text = self.kernel.vision(base64.b64encode(jpeg).decode())
+            try:
+                text = self.kernel.vision(base64.b64encode(jpeg).decode())
+            except KernelError as e:
+                ocr = self._ocr_jpeg(jpeg)
+                if ocr:
+                    log.info("看图降级本地 OCR %s：%s（%d 字，原错：%s）", self.name_of(chat), src, len(ocr), e)
+                    return f"截图文字(OCR)：{ocr}"
+                raise
+            if not text:
+                ocr = self._ocr_jpeg(jpeg)
+                if ocr:
+                    log.info("看图返回空，降级本地 OCR %s：%s（%d 字）", self.name_of(chat), src, len(ocr))
+                    return f"截图文字(OCR)：{ocr}"
             log.info("看图 %s：%s（%d 字）", self.name_of(chat), src, len(text))
             return text
         wav = self.voices.load(chat, int(media))

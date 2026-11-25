@@ -613,6 +613,8 @@ class Bridge(SendingMixin, ReplyMixin, AssistMixin, GroupWorkMixin):
                     return
                 if not followup_img:
                     payload["text"] += "\n（提示：未能看清/听清这段媒体的具体内容，不要凭空猜测，自然说明看不到或听不清即可）"
+            if not followup_img and "[图片]" in payload["text"] and "（图片内容：" not in payload["text"]:
+                payload["text"] += "\n（注意：图里内容未能看清，严禁猜测或编造图片里是什么界面、弹窗或报错，直说没看清图请对方补文字或转开发者）"
             if self._source_asked(payload):
                 url = self.cfg.get("source_url")
                 log.info("%s 问源码，回仓库地址", self.name_of(chat))
@@ -652,8 +654,11 @@ class Bridge(SendingMixin, ReplyMixin, AssistMixin, GroupWorkMixin):
             delivered = False
             try:
                 delivered = self._deliver(chat, batch, resp, tr, k0)
-                if delivered and payload.get("chat_type") == "group" and hasattr(self, "_note_group_reply"):
-                    self._note_group_reply(chat, payload, resp, was_followup=was_followup)
+                if delivered and payload.get("chat_type") == "group":
+                    if hasattr(self, "_note_group_reply"):
+                        self._note_group_reply(chat, payload, resp, was_followup=was_followup)
+                    if agent is not None and (payload.get("sender_id") or "") in (getattr(self, "masters", None) or []):
+                        agent.note_owner_reply(chat)
             finally:
                 if sticker:
                     self._send_sticker(chat, sticker, delivered)

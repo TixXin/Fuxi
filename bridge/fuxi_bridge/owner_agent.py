@@ -40,11 +40,12 @@ INTENT_HINT_RE = re.compile(
     r"问答|faq|资料|文档|知识库|同步|进度|仓库|插件|市场|pr|pull|"
     r"设置|配置|概率|冷却|静默|静音|暂停|恢复|状态|白名单|允许|禁止|拉黑|"
     r"定时|提醒我|群发|公告|发版|忽略|归类|整理|汇总|列表|查一下|查下|看看.*反馈|"
-    r"mac|win|windows|ghostty|前台|后台|agent|终端|审[查核]?|看下.*pr|私发|\bfb-?\d+|#\d+",
+    r"mac|win|windows|ghostty|前台|后台|agent|claude|终端|源码|代码|审[查核]?|看下.*pr|私发|发群里|发到群|\bfb-?\d+|#\d+",
     re.I,
 )
 
-PENDING_TTL = 300  # 待确认动作有效期 5 分钟
+PENDING_TTL = 300        # 待确认动作有效期 5 分钟
+OWNER_ENGAGED_SEC = 180  # 群里主人刚和浮汐对话过 3 分钟内，下一句没再 @ 也能识别明确操控指令
 
 ROUTER_SYSTEM = """你是「浮汐」（Fuxi，一个微信 AI 助手）的【主人指令路由器】。
 你的唯一任务是判断：主人发来的这句话是【普通聊天/讨论】，还是【明确要求操控浮汐自身执行动作】。
@@ -75,7 +76,7 @@ ROUTER_SYSTEM = """你是「浮汐」（Fuxi，一个微信 AI 助手）的【�
 - fuyu_sync: {} — 立刻同步浮屿 GitHub 仓库（版本/issue/PR）
 - community_sync: {} — 立刻同步插件市场仓库（TixXin/fuyu-plugins）检查新 PR 和上架合并
 - fuyu_status: {"number":1244} — 查询指定编号的 GitHub issue/PR 进度
-- remote_start: {"target":"mac","repo":"TixXin/Fuyu","prompt":"给电脑端 Claude Code 的清晰任务指令","readonly":true} — 启动电脑端 Claude Code 实时多轮遥控会话（会弹 Ghostty 窗，结果统一私发主人并支持后续私聊多轮继续直到「退出 agent」）。target 默认 mac（提到 win/windows 时用 win）；repo 默认 TixXin/Fuyu，提到插件/插件市场用 TixXin/fuyu-plugins，提到浮汐/Fuxi 用 TixXin/Fuxi；审 PR / 看代码 / 分析排查时 readonly=true（只读安全模式），明确要求直接改代码时 readonly=false
+- remote_start: {"target":"mac","repo":"TixXin/Fuyu","prompt":"给电脑端 Claude Code 的清晰任务指令","readonly":true,"deliver_to":"private"} — 启动电脑端 Claude Code 实时多轮遥控会话（会弹 Ghostty 窗，支持审 PR、查仓库源码解释原因、排查修 bug）。target 默认 mac（提到 win/windows 时用 win）；repo 默认 TixXin/Fuyu，提到插件/插件市场用 TixXin/fuyu-plugins，提到浮汐/Fuxi 用 TixXin/Fuxi；审 PR / 看源码 / 查原因时 readonly=true，明确要求改代码时 readonly=false；deliver_to 默认 "private"（私发主人），仅当主人明确要求「结果发群里 / 发到群里」时填 "group"
 - remote_close: {} — 退出当前电脑端远程 Agent 会话并关闭终端窗口
 - system_status: {} — 查看浮汐运行状态（微信、内核、白名单、问题、插件市场与远程节点）
 - setting_get: {"key":""} — 查看设置项（key 可留空看常用项，或写中文名/英文键）
@@ -90,7 +91,9 @@ ROUTER_SYSTEM = """你是「浮汐」（Fuxi，一个微信 AI 助手）的【�
 - 主人说「把刚才那个日历需求开个 issue 让 mac 前台修 修完自动测试自动提 PR」→ {"mode":"act","calls":[{"tool":"feedback_sync","args":{}},{"tool":"issue_fix","args":{"fb_id":0,"query":"日历","target":"mac","mode":"fg","note":"修完自动测试并提 PR"}}]}
 - 主人说「建任务了没 没有的话就 create」→ {"mode":"act","calls":[{"tool":"issue_open","args":{"fb_id":0}}]}
 - 主人说「把最新的 PR 看下，然后把看法私发我」→ {"mode":"act","calls":[{"tool":"remote_start","args":{"target":"mac","repo":"TixXin/Fuyu","prompt":"查看当前仓库最新的 PR（用 gh pr list / gh pr view / gh pr diff），分析改动内容、代码质量、潜在风险以及是否建议合并，用中文把清晰简洁的评审看法发给我。","readonly":true}}]}
-- 主人说「让 mac 审一下插件市场最新的 PR」→ {"mode":"act","calls":[{"tool":"remote_start","args":{"target":"mac","repo":"TixXin/fuyu-plugins","prompt":"查看插件市场仓库最新的 PR（用 gh pr list / gh pr view / gh pr diff），检查插件配置规范性、安全性与功能简介，用中文把审核结论发给我。","readonly":true}}]}
+- 主人说「让 mac 审一下插件市场最新的 PR」→ {"mode":"act","calls":[{"tool":"remote_start","args":{"target":"mac","repo":"TixXin/fuyu-plugins","prompt":"查看插件市场仓库最新的 PR（用 gh pr list / gh pr view / gh pr diff），检查插件配置规范性、安全性与功能简介，用中文把审核结论发给我。","readonly":true,"deliver_to":"private"}}]}
+- 主人说「在 mac 启动 claude 查下为什么读取 Claude Code-credentials 然后结果发群里」→ {"mode":"act","calls":[{"tool":"remote_start","args":{"target":"mac","repo":"TixXin/Fuyu","prompt":"在仓库源码里搜索 Claude Code-credentials / keychain 相关代码，查清楚浮屿为什么会申请读取 macOS 钥匙串中的 Claude Code-credentials、拒绝会有什么影响，用简洁准确的中文向用户群解释清楚。","readonly":true,"deliver_to":"group"}}]}
+- 主人说「去仓库看下源码再好好解释」→ {"mode":"act","calls":[{"tool":"remote_start","args":{"target":"mac","repo":"TixXin/Fuyu","prompt":"结合上文讨论的问题在仓库源码里核实真实实现逻辑，用简洁准确的中文解释清楚，不要猜测。","readonly":true,"deliver_to":"group"}}]}
 - 主人说「你分析下这个问题什么原因导致的 怎么解决」→ {"mode":"chat"}
 - 主人说「群里插话概率调成 3」→ {"mode":"act","calls":[{"tool":"setting_set","args":{"key":"free_chat_pct","value":"3"}}]}
 """
@@ -132,7 +135,12 @@ class OwnerAgent:
     def __init__(self, bridge: "Bridge", state_dir: str):
         self.b = bridge
         self.undo_path = os.path.join(state_dir, "persona_undo.json")
-        self.pending: dict[str, dict] = {}   # chat_id -> {at, desc, fn}
+        self.pending: dict[str, dict] = {}       # chat_id -> {at, desc, fn}
+        self.owner_engaged: dict[str, float] = {}  # 群聊里主人刚与浮汐对话过的时间戳（monotonic）
+
+    def note_owner_reply(self, chat: str) -> None:
+        if chat.endswith("@chatroom"):
+            self.owner_engaged[chat] = time.monotonic()
 
     def _is_authorized(self, chat: str, payload: dict) -> bool:
         masters = set(getattr(self.b, "masters", None) or [])
@@ -142,7 +150,14 @@ class OwnerAgent:
         if payload.get("chat_type") == "group":
             if sender not in masters:
                 return False
-            return bool(payload.get("at_me") or payload.get("reply_to_bot"))
+            if payload.get("at_me") or payload.get("reply_to_bot"):
+                return True
+            # 群里主人刚和浮汐对话过（3 分钟内），且这句没 @ 别人、没引用别人 → 放行连续自然语言指挥
+            if not payload.get("at_other") and not (payload.get("reply_to_user_id") and not payload.get("reply_to_bot")):
+                last = self.owner_engaged.get(chat, 0.0)
+                if last and time.monotonic() - last <= OWNER_ENGAGED_SEC:
+                    return True
+            return False
         return (sender in masters) or (chat in masters)
 
     @staticmethod
@@ -238,6 +253,7 @@ class OwnerAgent:
                 outputs.append(res)
         if not outputs:
             return None
+        self.note_owner_reply(chat)
         return "\n\n".join(outputs)
 
     def _build_context(self, chat: str, clean: str) -> str:
@@ -558,11 +574,15 @@ class OwnerAgent:
             if not prompt:
                 return "需要明确告诉电脑端 Agent 要做什么任务。"
             readonly = bool(args.get("readonly", True))
-            sess, dm = remote.start_session(target=target, repo=repo, prompt=prompt, readonly=readonly)
-            # 在群里发起时，私聊同步通知主人，群里只给一句简短确认（不在群里刷后续多轮输出）
+            deliver_to = str(args.get("deliver_to") or "private").strip().lower()
+            reply_chat = chat if (deliver_to == "group" and chat.endswith("@chatroom")) else ""
+            sess, dm = remote.start_session(
+                target=target, repo=repo, prompt=prompt, readonly=readonly, reply_chat=reply_chat,
+            )
             if chat.endswith("@chatroom"):
                 remote._send_owner([dm])
-                return f"已交给 {target.upper()} 处理（会话 #{sess['id']}，仓库 {repo}），结果会私发给你，后续在私聊里直接接着指挥即可。"
+                where = "查完结果会直接发到本群" if reply_chat else "结果会私发给你，后续在私聊里直接接着指挥即可"
+                return f"已交给 {target.upper()} 处理（会话 #{sess['id']}，仓库 {repo}），{where}。"
             return dm
 
         if tool == "remote_close":

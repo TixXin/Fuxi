@@ -55,6 +55,8 @@ ITEMS: list[Item] = [
          kernel=("group", "freeChatChance"), min=0, max=30, scale=100),
     Item("free_chat_cooldown", "插话冷却", "int", 0, "她在群里说完话后多少秒内不主动插话（被 @ 照样回）",
          kernel=("group", "cooldownSec"), min=0, max=7200),
+    Item("group_max_chars", "群聊单条字数", "int", 240, "群里单条回复的最大字数（防止技术解释被半句截断）",
+         kernel=("chat", "groupMaxChars"), min=60, max=600),
     Item("stickers", "表情包", "bool", False, "回复后按情绪发表情包（图库用 /存表情 填）",
          kernel=("features", "stickers")),
     Item("owners", "主人", "list", [], "主人的 wxid：主动搭话只找主人，主人能用内核管理指令",

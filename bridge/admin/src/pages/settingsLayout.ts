@@ -28,7 +28,7 @@ export const TABS: SettingsTab[] = [
       { title: "主动", keys: ["care_on"] },
       { title: "限速", keys: ["rate_chat", "rate_global"] },
       { title: "群里插话", keys: ["master_always_reply", "free_chat_pct", "free_chat_cooldown", "group_max_chars"] },
-      { title: "和人共用微信", keys: ["human_quiet_s", "human_max_wait_s"] },
+      { title: "和人共用微信", keys: ["human_quiet_s", "human_max_wait_s", "auto_relogin"] },
     ],
   },
   {

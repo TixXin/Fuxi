@@ -119,5 +119,100 @@ class TitleTest(unittest.TestCase):
                 self.assertEqual(title_matches(target, ocr), want)
 
 
+class AutoReloginTest(unittest.TestCase):
+    def test_dismisses_modal_then_clicks_login_and_respects_waiting_phone(self):
+        from unittest import mock
+        from fuxi_bridge.sender import Sender
+
+        s = Sender()
+        clicks = []
+        s._click_in = lambda w, cx, cy: clicks.append((w, cx, cy))
+        # 模拟真实场景：弹窗 16779689 盖在登录窗 16779687 上，点完「我知道了」后只剩登录窗，再点「登录」
+        win_seq = iter([
+            [("16779687", 560, 760), ("16779689", 564, 348)],
+            [("16779687", 560, 760)],
+        ])
+        s._windows = lambda: next(win_seq)
+        ocr_map = {
+            "16779689": [
+                (282, 91, "提示", 1.0),
+                (272, 151, "为了你的账号安全，请重新登录。", 1.0),
+                (280, 250, "我知道了", 1.0),
+            ],
+            "16779687": [
+                (54, 41, "微信", 1.0),
+                (279, 590, "登录", 1.0),
+                (176, 689, "切换账号", 1.0),
+            ],
+        }
+        calls = {"16779687": 0}
+
+        def fake_ocr(w):
+            if w == "16779687":
+                calls[w] += 1
+                if calls[w] >= 2:
+                    return [(280, 420, "请在手机上确认登录", 1.0), (280, 620, "取消登录", 1.0)]
+            return ocr_map[w]
+
+        s._ocr_boxes = fake_ocr
+        with mock.patch("fuxi_bridge.sender.time.sleep"):
+            status, detail = s.auto_relogin()
+        self.assertEqual(status, "clicked_login")
+        self.assertIn("手机上确认", detail)
+        self.assertEqual(clicks, [("16779689", 280, 250), ("16779687", 279, 590)])
+
+        # 已在等待手机确认时，再次检查绝不再点（防止误点取消登录）
+        clicks.clear()
+        s._windows = lambda: [("16779687", 560, 760)]
+        with mock.patch("fuxi_bridge.sender.time.sleep"):
+            st2, _ = s.auto_relogin()
+        self.assertEqual(st2, "waiting_phone")
+        self.assertEqual(clicks, [])
+
+    def test_need_qr_does_not_click(self):
+        from unittest import mock
+        from fuxi_bridge.sender import Sender
+
+        s = Sender()
+        clicks = []
+        s._click_in = lambda w, cx, cy: clicks.append((w, cx, cy))
+        s._windows = lambda: [("16779687", 560, 760)]
+        s._ocr_boxes = lambda w: [(280, 500, "使用微信扫一扫登录", 1.0)]
+        with mock.patch("fuxi_bridge.sender.time.sleep"):
+            st, _ = s.auto_relogin()
+        self.assertEqual(st, "need_qr")
+        self.assertEqual(clicks, [])
+
+    def test_relogin_tick_cooldown_and_rescan_on_recovery(self):
+        import os, tempfile
+        from unittest import mock
+        from fuxi_bridge import settings
+        from fuxi_bridge.app import Bridge
+
+        b = object.__new__(Bridge)
+        b.paused = False
+        b.cfg = settings.Settings(os.path.join(tempfile.mkdtemp(), "s.json"), {})
+        b.sender = mock.Mock()
+        b.sender.window_state.return_value = "login"
+        b.sender.human_idle.return_value = None
+        b.sender.auto_relogin.return_value = ("clicked_login", "请在手机上确认")
+        b.keyring = mock.Mock()
+
+        st, _ = b._relogin_tick()
+        self.assertEqual(st, "clicked_login")
+        self.assertEqual(b.sender.auto_relogin.call_count, 1)
+
+        # 冷却期内不重复触发
+        st2, _ = b._relogin_tick()
+        self.assertEqual(st2, "clicked_login")
+        self.assertEqual(b.sender.auto_relogin.call_count, 1)
+
+        # 登录恢复（login -> ok）自动重扫数据库密钥
+        b.sender.window_state.return_value = "ok"
+        st3, _ = b._relogin_tick()
+        self.assertEqual(st3, "ok")
+        b.keyring.rescan.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -131,6 +131,8 @@ ITEMS: list[Item] = [
     Item("boot_catchup_min", "重启补回分钟", "int", 60,
          "重启后回看多少分钟内还没回复的消息（私聊末段、群里被 @ 或浮屿提问/反馈，主人或她已回过的跳过）；0 = 不补回",
          min=0, max=360),
+    Item("auto_relogin", "自动重登", "bool", True,
+         "微信掉线卡在「重新登录 / 我知道了」弹窗时，自动点击「我知道了」并点「登录」推送手机确认（每 3 分钟最多重试 1 次）"),
 ]
 BY_KEY = {i.key: i for i in ITEMS}
 BY_LABEL = {i.label.replace(" ", "").lower(): i for i in ITEMS}

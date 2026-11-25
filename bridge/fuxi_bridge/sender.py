@@ -142,6 +142,97 @@ class Sender:
             return "login"
         return "tray" if widths else "missing"
 
+    def _ocr_boxes(self, w: str) -> list[tuple[int, int, str, float]]:
+        """对指定窗口截图并做 RapidOCR，返回 [(cx, cy, text, score), ...]。"""
+        shot = self._capture(w)
+        try:
+            res, _ = _ocr()(shot.bgr, use_cls=False)
+        except Exception as e:
+            raise SendError(f"OCR 失败：{e}") from e
+        out: list[tuple[int, int, str, float]] = []
+        for box, txt, score in (res or []):
+            s = str(txt or "").strip()
+            if not s or float(score) < 0.7:
+                continue
+            cx = int(sum(p[0] for p in box) / 4)
+            cy = int(sum(p[1] for p in box) / 4)
+            out.append((cx, cy, s, float(score)))
+        return out
+
+    def _click_in(self, w: str, cx: int, cy: int) -> None:
+        self._run("xdotool", "windowactivate", "--sync", w)
+        time.sleep(0.1)
+        self._run("xdotool", "mousemove", "--window", w, str(cx), str(cy), "click", "1")
+
+    def auto_relogin(self) -> tuple[str, str]:
+        """处理微信掉线弹窗（「为了你的账号安全，请重新登录」→ 点「我知道了」→ 点「登录」推送手机确认）。
+
+        返回 (status, detail):
+          ok / missing / waiting_phone / need_qr / clicked_login / dismissed_modal / unknown
+        """
+        modal_hints = ("提示", "账号安全", "重新登录", "已退出", "下线", "登录已过期", "登录状态", "异常")
+        modal_btns = {"我知道了", "确定", "好的"}
+        wait_hints = ("手机上确认", "请在手机", "等待确认", "取消登录", "已发送登录请求")
+        qr_hints = ("扫一扫", "扫码登录", "二维码")
+        login_btns = {"登录", "进入微信"}
+
+        with self._lock:
+            wins = self._windows()
+            if any(x[1] >= 1000 for x in wins):
+                return "ok", ""
+            dialogs = [x for x in wins if x[1] >= 300]
+            if not dialogs:
+                return "missing", ""
+
+            # 1) 优先检查并关闭盖在登录窗上面的提示弹窗（面积小的窗口优先）
+            dismissed = False
+            for w, ww, hh in sorted(dialogs, key=lambda x: x[1] * x[2]):
+                try:
+                    boxes = self._ocr_boxes(w)
+                except SendError as e:
+                    log.debug("自动重登 OCR 窗口 %s 失败：%s", w, e)
+                    continue
+                all_txt = " ".join(t for _, _, t, _ in boxes)
+                if any(h in all_txt for h in modal_hints):
+                    btn = next(((cx, cy, t) for cx, cy, t, _ in boxes if t.replace(" ", "") in modal_btns), None)
+                    if btn:
+                        cx, cy, t = btn
+                        self._click_in(w, cx, cy)
+                        log.warning("微信掉线弹窗（%dx%d）：识别到「%s」，已自动点击「%s」(%d,%d)",
+                                    ww, hh, all_txt[:80], t, cx, cy)
+                        dismissed = True
+                        time.sleep(1.2)
+                        break
+
+            # 2) 重新枚举窗口，定位登录窗并判断是否可安全点击「登录」
+            wins = self._windows()
+            if any(x[1] >= 1000 for x in wins):
+                return "ok", ""
+            dialogs = [x for x in wins if x[1] >= 300]
+            if not dialogs:
+                return "missing", ""
+            login_w, lww, lhh = max(dialogs, key=lambda x: x[1] * x[2])
+            boxes = self._ocr_boxes(login_w)
+            all_txt = " ".join(t for _, _, t, _ in boxes)
+            if any(h in all_txt for h in wait_hints):
+                return "waiting_phone", all_txt[:120]
+            btn = next(((cx, cy, t) for cx, cy, t, _ in boxes if t.replace(" ", "") in login_btns), None)
+            if btn:
+                cx, cy, t = btn
+                self._click_in(login_w, cx, cy)
+                log.warning("微信待登录（%dx%d）：已自动点击「%s」(%d,%d) 推送手机确认", lww, lhh, t, cx, cy)
+                time.sleep(1.5)
+                try:
+                    after = " ".join(x[2] for x in self._ocr_boxes(login_w))
+                except SendError:
+                    after = ""
+                if any(h in after for h in qr_hints) and not any(h in after for h in wait_hints):
+                    return "need_qr", after[:120]
+                return "clicked_login", (after or all_txt)[:120]
+            if any(h in all_txt for h in qr_hints):
+                return "need_qr", all_txt[:120]
+            return ("dismissed_modal" if dismissed else "unknown"), all_txt[:120]
+
     def _activate(self) -> str:
         w = self.window()
         try:

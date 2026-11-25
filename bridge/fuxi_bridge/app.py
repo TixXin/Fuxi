@@ -672,7 +672,12 @@ class Bridge(SendingMixin, ReplyMixin, AssistMixin, GroupWorkMixin):
             out.append(f"已熔断：{self.halted}")
         state = self.sender.window_state()
         if state != "ok":
-            out.append({"login": "微信待登录（需在手机上确认）", "missing": "找不到微信窗口",
+            login_msg = {
+                "clicked_login": "微信待登录（已自动点登录，请在手机上确认）",
+                "waiting_phone": "微信待登录（请在手机上确认登录）",
+                "need_qr": "微信待登录（需要打开网页端扫码登录）",
+            }.get(getattr(self, "_relogin_status", ""), "微信待登录（需在手机上确认）")
+            out.append({"login": login_msg, "missing": "找不到微信窗口",
                         "tray": "微信主窗口被隐藏到托盘"}.get(state, state))
         for rel in ("session/session.db", "message/message_0.db"):
             if rel not in self.keyring.keys:
@@ -684,6 +689,49 @@ class Bridge(SendingMixin, ReplyMixin, AssistMixin, GroupWorkMixin):
         if self.last_abort and now - self.last_abort[0] < 600:
             out.append(f"10 分钟内有发送被拦截：{self.last_abort[1]}")
         return out
+
+    def _relogin_tick(self, force: bool = False) -> tuple[str, str]:
+        """巡检微信登录状态：掉线卡在「我知道了/登录」时自动点击推送手机确认；恢复登录后自动重扫数据库密钥。"""
+        state = self.sender.window_state()
+        prev = getattr(self, "_last_wx_state", "ok")
+        self._last_wx_state = state
+        if state == "ok":
+            if prev == "login":
+                log.warning("检测到微信已重新登录恢复，重新扫描数据库密钥…")
+                try:
+                    self.keyring.rescan()
+                except Exception as e:
+                    log.warning("重登后重扫密钥出错：%s", e)
+            self._relogin_status = ""
+            self._relogin_tries = []
+            return "ok", ""
+        if state != "login":
+            return state, ""
+        if not force:
+            if self.paused or not self.cfg.get("auto_relogin"):
+                return "disabled", ""
+            idle = self.sender.human_idle()
+            if idle is not None and idle < 15:
+                return "human_active", ""
+            now = time.monotonic()
+            tries = [t for t in getattr(self, "_relogin_tries", []) if now - t < 3600]
+            self._relogin_tries = tries
+            if tries and now - tries[-1] < 180:
+                return getattr(self, "_relogin_status", "cooldown"), ""
+            if len(tries) >= 5:
+                return getattr(self, "_relogin_status", "rate_limited"), ""
+        try:
+            status, detail = self.sender.auto_relogin()
+        except Exception as e:
+            log.warning("自动重登检查出错：%s", e)
+            return "error", str(e)
+        self._relogin_status = status
+        if status in ("clicked_login", "dismissed_modal", "need_qr", "unknown"):
+            tries = getattr(self, "_relogin_tries", [])
+            tries.append(time.monotonic())
+            self._relogin_tries = tries
+            log.info("自动重登巡检结果：%s（%s）", status, detail[:80])
+        return status, detail
 
     # ---------- 提醒 / 心跳 / 联系人 ----------
     def _reminder_loop(self) -> None:
@@ -751,7 +799,11 @@ class Bridge(SendingMixin, ReplyMixin, AssistMixin, GroupWorkMixin):
             log.warning("同步白名单到内核失败：%s", e)
         if self.masters:
             self._sync_master()
-        self.pending_boot = self._changed_chats()  # 记下各会话进度；过期窗口内有动静的稍后补处理
+        try:
+            self.pending_boot = self._changed_chats()  # 记下各会话进度；过期窗口内有动静的稍后补处理
+        except Exception as e:
+            log.warning("启动时暂无法读取微信库（微信可能正处于待登录态）：%s", e)
+            self.pending_boot = []
         threading.Thread(target=self._send_worker, name="send", daemon=True).start()
         threading.Thread(target=self._reminder_loop, name="reminders", daemon=True).start()
         if self.vision_mode != "off":
@@ -777,17 +829,29 @@ class Bridge(SendingMixin, ReplyMixin, AssistMixin, GroupWorkMixin):
 
         threading.Thread(target=serve_admin, args=(self,), name="admin", daemon=True).start()
         threading.Thread(target=self.scheduler.loop, name="schedule", daemon=True).start()
-        n_catchup = self._boot_catchup()
+        try:
+            n_catchup = self._boot_catchup()
+        except Exception as e:
+            log.warning("启动时跳过停机补偿（微信可能待登录）：%s", e)
+            n_catchup = 0
         if n_catchup:
             log.info("重启补回：已提交 %d 批未回复消息", n_catchup)
         log.info("开始监听全部会话（self=%s）", self.self_wxid[:6] + "…")
         next_cfg = 0.0
+        next_relogin = 0.0
         while True:
             try:
-                if time.monotonic() >= next_cfg:   # settings.json 被外部改了就重新读
-                    next_cfg = time.monotonic() + 2
+                now_m = time.monotonic()
+                if now_m >= next_cfg:   # settings.json 被外部改了就重新读
+                    next_cfg = now_m + 2
                     if self.cfg.reload():
                         log.info("设置已更新：%s", "、".join(self.apply_settings()) or "无变化")
+                if now_m >= next_relogin:
+                    next_relogin = now_m + 20
+                    self._relogin_tick()
+                if getattr(self, "_last_wx_state", "ok") == "login" and "session/session.db" not in self.keyring.keys:
+                    time.sleep(2)
+                    continue
                 self.poll_once()
                 self.last_poll_ok_at = time.time()
             except Exception:

@@ -296,6 +296,9 @@ def serve(bridge: "Bridge") -> None:
                 return self._json(200, {"ok": True, "created": created, "item": bridge.announcer.public(it)})
             if urlparse(self.path).path == "/resume":
                 return self._json(200, {"ok": True, "was": handlers.resume(bridge)})
+            if urlparse(self.path).path == "/relogin":
+                status, detail = bridge._relogin_tick(force=True)
+                return self._json(200, {"ok": True, "status": status, "detail": detail})
             if urlparse(self.path).path == "/remote/heartbeat":
                 body = self._body()
                 if body is None:

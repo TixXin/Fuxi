@@ -132,7 +132,12 @@ class DbCache:
             try:
                 if cur[1]:
                     shutil.copyfile(wal, wal_copy)
-                    sqlcipher.merge_wal(tmp, wal_copy, key)
+                    try:
+                        sqlcipher.merge_wal(tmp, wal_copy, key)
+                    except sqlcipher.DecryptError:
+                        self.keyring.invalidate(rel)
+                        self._state.pop(rel, None)
+                        raise
             finally:
                 if os.path.exists(wal_copy):
                     os.remove(wal_copy)

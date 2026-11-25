@@ -246,7 +246,10 @@ class Fuyu:
                 return [{"type": "pr_opened", **base, "refs": refs, "user": it.get("user", ""), "at": it["created_at"]}]
             return []
         if prev is None:
-            return [{"type": "issue_opened", **base, "at": it["created_at"]}]
+            out = [{"type": "issue_opened", **base, "at": it["created_at"]}]
+            if "claude-stuck" in (it.get("labels") or []):
+                out.append({"type": "agent_stuck", **base, "at": it.get("updated_at")})
+            return out
         if "claude-stuck" in (it.get("labels") or []) and "claude-stuck" not in (prev.get("labels") or []):
             return [{"type": "agent_stuck", **base, "at": it.get("updated_at")}]
         if prev.get("state") == "open" and it["state"] == "closed":

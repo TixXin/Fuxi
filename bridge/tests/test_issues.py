@@ -63,14 +63,16 @@ class DraftTest(unittest.TestCase):
 class FlowTest(unittest.TestCase):
     def test_preview_then_confirm_creates(self):
         f, gh, fl = flow(item())
-        self.assertIn("先用 /修 3 预览", fl.handle("3 确认", fix=True))
-        out = fl.handle("3 补一句", fix=True)
+        self.assertIn("先用 /fix 3 预览", fl.handle("3 确认", fix=True))
+        out = fl.handle("FB-3 补一句", fix=True)
         self.assertTrue(out.startswith("【预览】将在 TixXin/Fuyu 开 issue，并交给云端代理"))
+        self.assertIn("浮汐反馈 `FB-3`", out)
+        self.assertNotIn("浮汐反馈编号 #3", out)
         self.assertEqual(gh.calls, [], "预览不调用 GitHub")
-        self.assertIn("/开issue 3 预览", fl.handle("3 确认", fix=False), "/修 的预览不能用 /开issue 确认")
+        self.assertIn("/issue 3 预览", fl.handle("3 y", fix=False), "/fix 的预览不能用 /issue 确认")
         fl.handle("3 补一句", fix=True)
-        out = fl.handle("3 确认", fix=True)
-        self.assertIn("#3 → issue #1300", out)
+        out = fl.handle("3 y", fix=True)
+        self.assertIn("FB-3 → issue #1300", out)
         method, path, body = gh.calls[0]
         self.assertEqual((method, path), ("POST", "TixXin/Fuyu/issues"))
         self.assertIn("claude-fix", body["labels"])
@@ -100,24 +102,38 @@ class FlowTest(unittest.TestCase):
         fl.handle("3", fix=True)
         self.assertIn("已经关闭", fl.handle("3 确认", fix=True))
 
-    def test_local(self):
+    def test_mac_win_and_fg_targets(self):
+        # Mac 前台（Ghostty 弹窗）
         f, gh, fl = flow(item())
-        self.assertIn("交给Mac 上的本机修复", fl.handle("3 本地 只在 Mac 上", fix=True))
-        out = fl.handle("3 确认", fix=True)
-        self.assertIn("本机修复", out)
+        self.assertIn("Mac 前台修复（弹出 Ghostty", fl.handle("FB-3 mac fg 只在 Mac 上", fix=True))
+        out = fl.handle("3 y", fix=True)
+        self.assertIn("Mac 前台修复", out)
         body = gh.calls[0][2]
-        self.assertIn("fix-local", body["labels"])
+        self.assertIn("fix-mac", body["labels"])
+        self.assertIn("fix-fg", body["labels"])
         self.assertNotIn("claude-fix", body["labels"])
         self.assertIn("只在 Mac 上", body["body"])
-        self.assertEqual(f.get(3)["agent_where"], "local")
-        self.assertIn("本机修复：", f.detail(3))
+        self.assertEqual((f.get(3)["agent_where"], f.get(3)["agent_mode"]), ("mac", "fg"))
+        self.assertIn("Mac 前台修复：", f.detail(3))
+
+        # Windows 后台 + 兼容中文「本地」
+        f2, gh2, fl2 = flow(item())
+        fl2.handle("3 win 仅 Windows", fix=True)
+        fl2.handle("3 ok", fix=True)
+        self.assertEqual(gh2.calls[0][2]["labels"], ["from-wechat", "bug", "fix-win"])
+        self.assertEqual((f2.get(3)["agent_where"], f2.get(3)["agent_mode"]), ("win", "bg"))
+
+        f3, gh3, fl3 = flow(item())
+        fl3.handle("3 本地", fix=True)
+        fl3.handle("3 确认", fix=True)
+        self.assertEqual(gh3.calls[0][2]["labels"], ["from-wechat", "bug", "fix-mac"])
 
     def test_errors(self):
         f, gh, fl = flow(item(), token="")
         self.assertIn("还没配置", fl.handle("3", fix=True))
         self.assertIn("没开成：没有配置", fl.handle("3 确认", fix=True))
         self.assertIsNone(f.get(3)["issue"])
-        self.assertIn("没有反馈 #9", fl.handle("9", fix=True))
+        self.assertIn("没有反馈 FB-9", fl.handle("9", fix=True))
         self.assertIn("用法", fl.handle("abc", fix=True))
 
     def test_github_refusal_not_retried(self):
@@ -218,7 +234,7 @@ class PrOpenedTest(unittest.TestCase):
                             {"type": "pr_opened", "number": 1302, "title": "other", "url": "u", "refs": [7]}])
             th.call_args.kwargs["target"]()
         text = b.send.call_args.args[0].text
-        self.assertIn("【代理出 PR 了】反馈 #3", text)
+        self.assertIn("【代理出 PR 了】反馈 FB-3", text)
         self.assertIn("https://x/1301", text)
         self.assertNotIn("other", text)
         self.assertNotIn("浮屿动态", text)
@@ -229,6 +245,7 @@ class FakeFuyu:
 
     def __init__(self):
         self.prs = []
+        self.issues = {}
 
     def fixes_for(self, n):
         return self.prs
@@ -253,20 +270,31 @@ def bridge_stub(**cfg):
 
 class AgentWatchTest(unittest.TestCase):
     def test_stuck_event_and_notify(self):
-        prev = {"number": 1300, "title": "t", "html_url": "u", "state": "open", "labels": ["claude-fix"]}
+        prev = {"number": 1300, "title": "t", "html_url": "u", "state": "open", "labels": ["claude-fix"], "created_at": "c"}
         cur = {**prev, "labels": ["claude-stuck"], "updated_at": "x"}
         ev = fuyu.Fuyu._diff(prev, cur, False)
         self.assertEqual(ev[0]["type"], "agent_stuck")
+        # 同一轮同步里新建并已打 claude-stuck 的 issue 也能产出 agent_stuck 事件
+        ev_new = fuyu.Fuyu._diff(None, cur, False)
+        self.assertEqual([e["type"] for e in ev_new], ["issue_opened", "agent_stuck"])
         self.assertEqual(fuyu.Fuyu._diff(cur, cur, False), [])
         b = bridge_stub(fuyu_notify="关闭")
         b.feedback.items = [item(issue=1300, status="known", agent_at=T)]
         with mock.patch("threading.Thread") as th:
             b._fuyu_events([{**ev[0], "url": "https://x/1300"}])
             th.call_args.kwargs["target"]()
-        self.assertIn("【代理没修成】反馈 #3", b.send.call_args.args[0].text)
+        self.assertIn("【代理没修成】反馈 FB-3", b.send.call_args.args[0].text)
         self.assertTrue(b.feedback.get(3)["agent_stuck"])
         self.assertIn("没修成", b.feedback.detail(3))
         self.assertEqual(b.feedback.agent_waiting(), [])
+
+    def test_agent_watch_detects_stuck_from_cache(self):
+        b = bridge_stub()
+        b.feedback.items = [item(issue=1300, status="known", agent_at=T)]
+        b.fuyu.issues["1300"] = {"number": 1300, "labels": ["claude-stuck"], "html_url": "https://x/1300"}
+        b._agent_watch(T + 300)
+        self.assertTrue(b.feedback.get(3)["agent_stuck"])
+        self.assertIn("【代理没修成】反馈 FB-3", b.send.call_args.args[0].text)
 
     def test_late_once_and_pr_from_cache(self):
         b = bridge_stub()
@@ -274,7 +302,7 @@ class AgentWatchTest(unittest.TestCase):
         b._agent_watch(T + 3600)
         b.send.assert_not_called()
         b._agent_watch(T + 3 * 3600)
-        self.assertIn("【代理还没结果】反馈 #3", b.send.call_args.args[0].text)
+        self.assertIn("【代理还没结果】反馈 FB-3", b.send.call_args.args[0].text)
         b._agent_watch(T + 4 * 3600)
         self.assertEqual(b.send.call_count, 1, "只提醒一次")
         self.assertIn("已提醒过", b.feedback.detail(3))

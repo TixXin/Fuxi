@@ -134,7 +134,7 @@ class ReportTest(unittest.TestCase):
     def test_digest_for_owner(self):
         d = self.f.digest(since=DAY)
         self.assertIn("共 3 条", d)
-        self.assertIn("#1 [问题] 设置页闪退（2 人） → issue #1234", d)
+        self.assertIn("FB-1 [问题] 设置页闪退（2 人） → issue #1234", d)
         self.assertIn("包含在 v0.3.13", d)
         self.assertNotIn("旧问题", d)
         self.assertIn("没有新的反馈", self.f.digest(since=DAY + 86400))
@@ -155,8 +155,8 @@ class ReportTest(unittest.TestCase):
         d = self.f.detail(1)
         self.assertIn("反馈人：小明、小红", d)
         self.assertIn("09:01 小明：闪退", d)
-        self.assertEqual(self.f.detail(99), "没有 #99")
-        self.assertIn("#2 [建议] 希望支持农历 → 新", self.f.listing(days=10_000))
+        self.assertEqual(self.f.detail(99), "没有 FB-99")
+        self.assertIn("FB-2 [建议] 希望支持农历 → 新", self.f.listing(days=10_000))
 
     def test_due_once_per_day_within_window(self):
         noon = DAY + 12 * 3600
@@ -214,7 +214,7 @@ class WiringTest(unittest.TestCase):
         b._feedback_tick(now=DAY + 12 * 3600 + 30)            # 中午：整理 + 摘要私聊主人
         job = b.send.call_args.args[0]
         self.assertEqual(job.chat, "wxid_me")
-        self.assertIn("#1 [问题] 设置页闪退", job.text)
+        self.assertIn("FB-1 [问题] 设置页闪退", job.text)
         b._feedback_tick(now=DAY + 12 * 3600 + 90)
         self.assertEqual(b.send.call_count, 1, "一天只发一次")
         b._feedback_tick(now=DAY + 20 * 3600 + 30)            # 晚上：群小结发到反馈群
@@ -230,12 +230,12 @@ class WiringTest(unittest.TestCase):
 
     def test_commands(self):
         self.b._collect([self.msg(1, "设置页一点就闪退")])
-        self.assertIn("新反馈 1 条", self.c.feedback("整理"))
-        self.assertIn("#1 [问题] 设置页闪退", self.c.feedback(""))
-        self.assertIn("反馈人：小明", self.c.feedback("1"))
-        self.assertIn("【今日反馈小结】", self.c.feedback("小结")) if time.strftime("%Y-%m-%d") == "2026-11-24" else None
-        self.assertIn("已忽略", self.c.ignore("#1"))
-        self.assertEqual(self.c.ignore("x"), "用法：/忽略 3")
+        self.assertIn("新反馈 1 条", self.c.feedback("sync"))
+        self.assertIn("FB-1 [问题] 设置页闪退", self.c.feedback(""))
+        self.assertIn("反馈人：小明", self.c.feedback("FB-1"))
+        self.assertIn("【今日反馈小结】", self.c.feedback("summary")) if time.strftime("%Y-%m-%d") == "2026-11-24" else None
+        self.assertIn("已忽略", self.c.ignore("FB-1"))
+        self.assertEqual(self.c.ignore("x"), "用法：/ignore 3（或 FB-3）")
 
 
 if __name__ == "__main__":

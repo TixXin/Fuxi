@@ -271,11 +271,12 @@ class ControlTest(unittest.TestCase):
     def test_owner_commands_in_private_and_group(self):
         owners = ["wxid_owner"]
         names = ["浮汐", "fuxi"]
-        # 主人在私聊发指令 / 在群里发指令（含 @浮汐 /反馈）
+        # 主人在私聊发指令 / 在群里发指令（含英文指令 & 大小写不敏感 & @浮汐 前缀）
         self.assertTrue(control.is_command(msg(chat="wxid_owner", sender="wxid_owner", is_self=False, text="/反馈"), SELF, owners, names))
-        self.assertTrue(control.is_command(msg(chat="g@chatroom", sender="wxid_owner", is_self=False, text="/反馈 1"), SELF, owners, names))
-        self.assertTrue(control.is_command(msg(chat="g@chatroom", sender="wxid_owner", is_self=False, text="@浮汐 /反馈"), SELF, owners, names))
-        self.assertEqual(control.extract_command("@浮汐\u2005/开issue 1", names), "/开issue 1")
+        self.assertTrue(control.is_command(msg(chat="g@chatroom", sender="wxid_owner", is_self=False, text="/fb FB-1"), SELF, owners, names))
+        self.assertTrue(control.is_command(msg(chat="g@chatroom", sender="wxid_owner", is_self=False, text="/FIX 1 mac fg"), SELF, owners, names))
+        self.assertTrue(control.is_command(msg(chat="g@chatroom", sender="wxid_owner", is_self=False, text="@浮汐 /issue 1"), SELF, owners, names))
+        self.assertEqual(control.extract_command("@浮汐\u2005/issue 1", names), "/issue 1")
         # 非主人群友 / 非主人私聊发指令无效
         self.assertFalse(control.is_command(msg(chat="g@chatroom", sender="wxid_u1", is_self=False, text="/反馈"), SELF, owners, names))
         self.assertFalse(control.is_command(msg(chat="wxid_u1", sender="wxid_u1", is_self=False, text="/状态"), SELF, owners, names))

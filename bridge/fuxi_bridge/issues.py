@@ -30,10 +30,23 @@ log = logging.getLogger("fuxi.issues")
 
 LABEL_FROM = "from-wechat"
 LABEL_FIX = "claude-fix"
-LABEL_LOCAL = "fix-local"     # 交给 Mac 上的 scripts/fix-local.sh（要在 macOS 上构建/测试的问题）
+LABEL_MAC = "fix-mac"         # 交给 Mac 上的 scripts/fix-local.sh
+LABEL_WIN = "fix-win"         # 交给 Windows 上的本机修复脚本
+LABEL_FG = "fix-fg"           # 前台弹窗终端（如 Mac 上弹 Ghostty 交互会话）
+LABEL_LOCAL = "fix-local"     # 兼容旧标签名（脚本同时监听 fix-mac 和 fix-local）
 LABEL_STUCK = "claude-stuck"   # 浮屿工作流：代理没修成时打上，并把查到的写成 issue 评论
 ASSETS_BRANCH = "feedback-assets"  # 独立 orphan 分支，专门存放经确认的反馈截图，不污染 main
 API = "https://api.github.com/repos/{repo}"
+
+_CONFIRM_WORDS = {"确认", "y", "yes", "ok", "confirm"}
+
+
+def fix_labels(target: str = "cloud", mode: str = "bg") -> list[str]:
+    if target == "mac":
+        return [LABEL_MAC] + ([LABEL_FG] if mode == "fg" else [])
+    if target == "win":
+        return [LABEL_WIN] + ([LABEL_FG] if mode == "fg" else [])
+    return [LABEL_FIX]
 
 _PHONE = re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")
 _EMAIL = re.compile(r"[\w.+-]+@[\w-]+(\.[\w-]+)+")
@@ -62,7 +75,7 @@ def quote_line(q: str) -> str:
 
 
 def draft(it: dict, note: str = "", fix: bool = True, local: bool = False,
-          image_urls: list[str] | None = None) -> tuple[str, str, list[str]]:
+          image_urls: list[str] | None = None, target: str = "", mode: str = "bg") -> tuple[str, str, list[str]]:
     """群反馈条目 → (标题, 正文, 标签)。"""
     kind = {"bug": "bug", "suggestion": "enhancement", "question": "question"}[it["category"]]
     title = f"[群反馈] {scrub(it['title'])}"
@@ -85,8 +98,9 @@ def draft(it: dict, note: str = "", fix: bool = True, local: bool = False,
         lines += ["", "## 群友截图", *[f"![截图 {i}]({u})" for i, u in enumerate(image_urls, 1)]]
     if note.strip():
         lines += ["", "## 维护者补充", scrub(note.strip())]
-    lines += ["", f"<sub>浮汐反馈编号 #{it['id']}</sub>"]
-    labels = [LABEL_FROM, kind] + ([LABEL_LOCAL if local else LABEL_FIX] if fix else [])
+    lines += ["", f"<sub>浮汐反馈 `{fb.fb_code(it['id'])}` · {last}</sub>"]
+    t = target or ("mac" if local else "cloud")
+    labels = [LABEL_FROM, kind] + (fix_labels(t, mode) if fix else [])
     return title[:120], "\n".join(lines), labels
 
 
@@ -218,44 +232,63 @@ class Issues:
 
 
 class FixFlow:
-    """/修、/开issue 的两步确认：第一次预览，带「确认」才执行。"""
+    """/fix、/issue（及中文 /修、/开issue）的两步确认：第一次预览，带 y/ok/确认 才执行。"""
 
     def __init__(self, feedback: "fb.Feedback", issues: Issues):
         self.fb = feedback
         self.gh = issues
-        self.pending: dict[int, dict] = {}   # 反馈编号 → {note, fix, local, images, at}
+        self.pending: dict[int, dict] = {}   # 反馈编号 → {note, fix, target, mode, images, at}
 
     def handle(self, arg: str, fix: bool) -> str:
-        cmd = "/修" if fix else "/开issue"
-        m = re.match(r"^#?(\d+)\s*(.*)$", arg.strip(), re.S)
-        if not m:
-            return f"用法：{cmd} 3 [本地] [不带图] [补充说明]（先预览），{cmd} 3 确认（真的开）"
-        iid, rest = int(m.group(1)), m.group(2).strip()
+        cmd = "/fix" if fix else "/issue"
+        parts = arg.strip().split(maxsplit=1)
+        iid = fb.parse_fb_id(parts[0]) if parts else None
+        if iid is None:
+            if fix:
+                return "用法：/fix <编号> [cloud|mac|win] [fg|bg] [noimg] [补充说明]（先预览），/fix <编号> y（确认执行）"
+            return "用法：/issue <编号> [noimg] [补充说明]（先预览），/issue <编号> y（确认开单）"
+        rest = parts[1].strip() if len(parts) > 1 else ""
         it = self.fb.get(iid)
         if not it:
-            return f"没有反馈 #{iid}（/反馈 看列表）"
+            return f"没有反馈 {fb.fb_code(iid)}（/fb 看列表）"
         if it["status"] == "ignored":
-            return f"#{iid} 已忽略。"
-        if rest == "确认":
+            return f"{fb.fb_code(iid)} 已忽略。"
+        if rest.lower() in _CONFIRM_WORDS:
             p = self.pending.pop(iid, None)
             if not p or p["fix"] != fix or time.time() - p["at"] > 3600:
                 return f"先用 {cmd} {iid} 预览一下（预览 1 小时内有效）。"
-            return self._do(it, p["note"], fix, p.get("local", False), p.get("images", True))
-        local = False
+            return self._do(it, p["note"], fix, p.get("target", "cloud"), p.get("mode", "bg"), p.get("images", True))
+        target = "cloud"
+        mode = "bg"
         include_images = True
         tokens = rest.split()
         while tokens:
-            if fix and tokens[0] == "本地" and not local:
-                local = True
+            t = tokens[0].lower()
+            if fix and t in ("mac", "本地"):
+                target = "mac"
                 tokens.pop(0)
-            elif tokens[0] == "不带图" and include_images:
+            elif fix and t in ("win", "windows"):
+                target = "win"
+                tokens.pop(0)
+            elif fix and t in ("cloud", "云端"):
+                target = "cloud"
+                tokens.pop(0)
+            elif fix and t in ("fg", "前台"):
+                mode = "fg"
+                tokens.pop(0)
+            elif fix and t in ("bg", "后台"):
+                mode = "bg"
+                tokens.pop(0)
+            elif t in ("noimg", "no-img", "不带图"):
                 include_images = False
                 tokens.pop(0)
             else:
                 break
+        if target == "cloud":
+            mode = "bg"
         note = " ".join(tokens).strip()
-        self.pending[iid] = {"note": note, "fix": fix, "local": local, "images": include_images, "at": time.time()}
-        return self._preview(it, note, fix, local, include_images)
+        self.pending[iid] = {"note": note, "fix": fix, "target": target, "mode": mode, "images": include_images, "at": time.time()}
+        return self._preview(it, note, fix, target, mode, include_images)
 
     def _existing(self, it: dict) -> int | None:
         return it.get("issue") or None
@@ -281,36 +314,47 @@ class FixFlow:
                 urls.append(url)
                 changed = True
             except (OSError, IssueError) as e:
-                log.warning("反馈 #%s 截图 %s 上传失败：%s", it["id"], fname, e)
+                log.warning("反馈 %s 截图 %s 上传失败：%s", fb.fb_code(it["id"]), fname, e)
                 errs.append(str(e))
         if changed:
             self.fb.set_fields(it, image_urls=cached)
         warn = f"（有 {len(errs)} 张截图上传失败：{errs[0]}）" if errs else ""
         return urls, warn
 
-    def _preview(self, it: dict, note: str, fix: bool, local: bool = False, include_images: bool = True) -> str:
-        cmd = "/修" if fix else "/开issue"
-        label = LABEL_LOCAL if local else LABEL_FIX
-        who = "Mac 上的本机修复（scripts/fix-local.sh，Mac 要开着）" if local else "云端代理"
+    @staticmethod
+    def _who(target: str, mode: str) -> str:
+        if target == "mac":
+            return "Mac 前台修复（弹出 Ghostty 终端交互）" if mode == "fg" else "Mac 后台修复（scripts/fix-local.sh）"
+        if target == "win":
+            return "Windows 前台修复（弹出终端交互）" if mode == "fg" else "Windows 后台修复（scripts/fix-win.ps1）"
+        return "云端代理（GitHub Actions）"
+
+    def _preview(self, it: dict, note: str, fix: bool, target: str = "cloud", mode: str = "bg",
+                 include_images: bool = True) -> str:
+        cmd = "/fix" if fix else "/issue"
+        add_labels = fix_labels(target, mode)
+        who = self._who(target, mode)
         warn = "" if self.gh.ready else "\n⚠️ 还没配置 FUXI_GITHUB_ISSUE_TOKEN，确认后会失败。"
         img_cnt = len(self.fb.image_paths(it))
         img_note = ""
         if img_cnt:
-            img_note = (f"\n📎 含 {img_cnt} 张群友截图，确认后将上传至 {ASSETS_BRANCH} 分支并附进 issue（不想附请加「不带图」）"
-                        if include_images else f"\n📎 已跳过 {img_cnt} 张群友截图（不带图）")
+            img_note = (f"\n📎 含 {img_cnt} 张群友截图，确认后将上传至 {ASSETS_BRANCH} 分支并附进 issue（不想附请加 noimg）"
+                        if include_images else f"\n📎 已跳过 {img_cnt} 张群友截图（noimg）")
         num = self._existing(it)
         if num:
-            what = (f"给已有的 issue #{num} 打 {label} 标签交给{who}，并补一条评论：" if fix
+            what = (f"给已有的 issue #{num} 打 {'、'.join(add_labels)} 标签交给{who}，并补一条评论：" if fix
                     else f"反馈已对应 issue #{num}，只补一条评论：")
-            return (f"【预览】{what}\n\n{followup(it, note)}{img_note}\n\n确认无误回 {cmd} {it['id']} 确认{warn}")
-        title, body, labels = draft(it, note, fix, local)
-        agent = f"，并交给{who}修（出 draft PR）" if fix else "（不派代理）"
+            return (f"【预览】{what}\n\n{followup(it, note)}{img_note}\n\n确认无误回 {cmd} {it['id']} y（或 确认）{warn}")
+        title, body, labels = draft(it, note, fix, target=target, mode=mode)
+        agent = f"，并交给{who}" if fix else "（不派代理）"
         return (f"【预览】将在 {self.gh.repo_of()} 开 issue{agent}\n标签：{'、'.join(labels)}\n\n{title}\n\n{body}{img_note}\n\n"
-                f"确认无误回 {cmd} {it['id']} 确认；要补充说明就 {cmd} {it['id']} 补充的话（重新预览）{warn}")
+                f"确认无误回 {cmd} {it['id']} y；要调整参数或补充说明就重发 {cmd} {it['id']} ...{warn}")
 
-    def _do(self, it: dict, note: str, fix: bool, local: bool = False, include_images: bool = True) -> str:
+    def _do(self, it: dict, note: str, fix: bool, target: str = "cloud", mode: str = "bg",
+            include_images: bool = True) -> str:
         num = self._existing(it)
         urls, img_warn = self._upload_images(it) if include_images else ([], "")
+        add_labels = fix_labels(target, mode)
         try:
             if num:
                 cur = self.gh.get(num)
@@ -318,16 +362,23 @@ class FixFlow:
                     return f"issue #{num} 已经关闭（{self.fb.progress(it)}）。要重新修就先在 GitHub 上重开。"
                 self.gh.comment(num, followup(it, note, image_urls=urls))
                 if fix:
-                    self.gh.add_labels(num, [LABEL_LOCAL if local else LABEL_FIX])
+                    self.gh.add_labels(num, add_labels)
                 url = cur.get("html_url") or f"https://github.com/{self.gh.repo_of()}/issues/{num}"
             else:
-                title, body, labels = draft(it, note, fix, local, image_urls=urls)
+                title, body, labels = draft(it, note, fix, target=target, mode=mode, image_urls=urls)
                 data = self.gh.create(title, body, labels)
                 num, url = data["number"], data.get("html_url", "")
         except IssueError as e:
             return f"没开成：{e}"
-        self.fb.mark_issue(it, num, agent=fix, local=local)
+        self.fb.mark_issue(it, num, agent=fix, target=target, mode=mode)
         img_ok = f"，附 {len(urls)} 张截图" if urls else ""
-        tail = (f"，已交给{'本机修复（Mac 每 10 分钟领一次）' if local else '云端代理'}，出了 draft PR 会通知你" if fix else "")
-        log.info("反馈 #%s → issue #%s（%s%s）", it["id"], num, "派代理" if fix else "只开 issue", img_ok)
-        return f"#{it['id']} → issue #{num}{img_ok}{tail}{img_warn}\n{url}"
+        if not fix:
+            tail = ""
+        elif target == "mac":
+            tail = "，已派给 Mac 前台修复（10 分钟内弹出 Ghostty 窗口）" if mode == "fg" else "，已派给 Mac 后台修复（每 10 分钟领一次）"
+        elif target == "win":
+            tail = "，已派给 Windows 前台修复（将弹出终端窗口）" if mode == "fg" else "，已派给 Windows 后台修复"
+        else:
+            tail = "，已交给云端代理，出了 draft PR 会通知你"
+        log.info("反馈 %s → issue #%s（%s%s）", fb.fb_code(it["id"]), num, f"{target}/{mode}" if fix else "只开 issue", img_ok)
+        return f"{fb.fb_code(it['id'])} → issue #{num}{img_ok}{tail}{img_warn}\n{url}"

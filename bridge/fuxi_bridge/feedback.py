@@ -74,6 +74,18 @@ def _hm(ts: float) -> str:
     return time.strftime("%H:%M", time.localtime(ts))
 
 
+def fb_code(iid: int) -> str:
+    """反馈展示编号：用 FB-1 避免在 GitHub Issue 里被自动链接到 #1 号老 Issue。"""
+    return f"FB-{iid}"
+
+
+def parse_fb_id(raw: str) -> int | None:
+    """解析 1 / #1 / FB-1 / fb1 → 整数编号。"""
+    s = (raw or "").strip()
+    m = re.fullmatch(r"(?:fb-?|#)?(\d+)", s, re.I)
+    return int(m.group(1)) if m else None
+
+
 def _parse_time(s: str) -> tuple[int, int] | None:
     m = re.fullmatch(r"([01]?\d|2[0-3]):([0-5]\d)", (s or "").strip())
     return (int(m.group(1)), int(m.group(2))) if m else None
@@ -369,10 +381,10 @@ class Feedback:
         with self._lock:
             it = self.get(iid)
             if not it:
-                return f"没有 #{iid}"
+                return f"没有 {fb_code(iid)}"
             it["status"] = "ignored"
             self._save()
-            return f"#{iid}「{it['title']}」已忽略，不再出现在摘要和群小结里"
+            return f"{fb_code(iid)}「{it['title']}」已忽略，不再出现在摘要和群小结里"
 
     def fixed_in(self, tag: str) -> list[dict]:
         """对应 issue 已包含在正式版 tag 里、还没通知过的条目（修复通知用）。"""
@@ -394,15 +406,18 @@ class Feedback:
                 it["fixed_in"], it["status"] = tag, "fixed"
             self._save()
 
-    def mark_issue(self, it: dict, number: int, agent: bool = False, local: bool = False) -> None:
-        """/修、/开issue 开出（或对上）issue 后记下；agent=True 表示已打 claude-fix 交给云端代理。"""
+    def mark_issue(self, it: dict, number: int, agent: bool = False, local: bool = False,
+                   target: str = "", mode: str = "bg") -> None:
+        """/fix、/issue 开出（或对上）issue 后记下；agent=True 表示已派给修复代理。"""
         with self._lock:
             it["issue"], it["issue_score"] = number, 1
             if it["status"] in ("new", "answered"):
                 it["status"] = "known"
-            if agent:   # 重新派（比如补充线索后再 /修）：清掉上一次的结果
+            if agent:   # 重新派（比如补充线索后再 /fix）：清掉上一次的结果
+                where = target or ("mac" if local else "cloud")
                 it["agent_at"] = time.time()
-                it["agent_where"] = "local" if local else "cloud"
+                it["agent_where"] = where
+                it["agent_mode"] = mode if where in ("mac", "win", "local") else "bg"
                 for k in ("agent_pr", "agent_stuck", "agent_late"):
                     it.pop(k, None)
             self._save()
@@ -458,10 +473,10 @@ class Feedback:
     def detail(self, iid: int) -> str:
         it = self.get(iid)
         if not it:
-            return f"没有 #{iid}"
+            return f"没有 {fb_code(iid)}"
         who = "、".join(r["name"] or r["wxid"] for r in it["reporters"]) or "（只有主人或 bot 提到）"
         img_cnt = len(self.image_paths(it))
-        lines = [f"#{it['id']} [{CATEGORIES[it['category']]}] {it['title']}",
+        lines = [f"{fb_code(it['id'])} [{CATEGORIES[it['category']]}] {it['title']}",
                  it.get("detail") or "",
                  f"平台：{it.get('platform') or '未知'}；提到 {it['count']} 次；反馈人：{who}"
                  + (f"；附图 {img_cnt} 张" if img_cnt else ""),
@@ -476,7 +491,14 @@ class Feedback:
     def _agent_line(self, it: dict) -> str:
         if not it.get("agent_at"):
             return ""
-        where = "本机修复" if it.get("agent_where") == "local" else "云端代理"
+        w = it.get("agent_where") or "cloud"
+        fg = it.get("agent_mode") == "fg"
+        where = {
+            "mac": "Mac 前台修复" if fg else "Mac 本机修复",
+            "local": "Mac 前台修复" if fg else "Mac 本机修复",
+            "win": "Win 前台修复" if fg else "Win 本机修复",
+            "cloud": "云端代理",
+        }.get(w, "云端代理")
         head = f"{where}：{time.strftime('%m-%d %H:%M', time.localtime(it['agent_at']))} 派出，"
         if it.get("agent_pr"):
             pr = it["agent_pr"]
@@ -494,13 +516,13 @@ class Feedback:
         if not items:
             return f"最近 {days} 天没有整理出反馈。"
         items.sort(key=lambda i: -i["last_seen"])
-        return f"最近 {days} 天的反馈（/反馈 编号 看详情，/忽略 编号）：\n" + "\n".join(self._line(i) for i in items[:30])
+        return f"最近 {days} 天的反馈（/fb 编号 看详情，/fix 编号 [mac|win] [fg] 修复，/ignore 编号）：\n" + "\n".join(self._line(i) for i in items[:30])
 
     def _line(self, it: dict) -> str:
         n = len(it["reporters"])
         heat = f"（{n} 人）" if n > 1 else ""
         tag = f" → issue #{it['issue']}" if it.get("issue") else (" → 群里已解答" if it["status"] == "answered" else " → 新")
-        return f"#{it['id']} [{CATEGORIES[it['category']]}] {it['title']}{heat}{tag}"
+        return f"{fb_code(it['id'])} [{CATEGORIES[it['category']]}] {it['title']}{heat}{tag}"
 
     # ---- 摘要与小结 ----
     def digest(self, since: float) -> str:
@@ -509,7 +531,7 @@ class Feedback:
         head = f"【浮屿群反馈摘要】{time.strftime('%m-%d %H:%M', time.localtime(since))} 以来"
         if not items:
             return head + "没有新的反馈。"
-        out = [head + f"共 {len(items)} 条（/反馈 编号 看原话，/忽略 编号 不再提醒）："]
+        out = [head + f"共 {len(items)} 条（/fb 编号 看原话，/ignore 编号 不再提醒）："]
         for cat, zh in CATEGORIES.items():
             group = sorted((i for i in items if i["category"] == cat), key=lambda i: -len(i["reporters"]))
             if not group:

@@ -128,15 +128,28 @@ class GroupWorkMixin:
         开 issue 的 token、代理凭据到期前 14 天每天提醒一次。"""
         texts = []
         for it in self.feedback.agent_waiting():
-            prs = [p for p in self.fuyu.fixes_for(it["issue"]) if fuyu._ts(p.get("created_at")) >= it["agent_at"] - 60]
+            issue_num = it["issue"]
+            prs = [p for p in self.fuyu.fixes_for(issue_num) if fuyu._ts(p.get("created_at")) >= it["agent_at"] - 60]
+            cached_issue = (getattr(self.fuyu, "issues", None) or {}).get(str(issue_num)) or {}
             if prs:
                 self.feedback.set_fields(it, agent_pr=prs[-1]["number"])
+            elif "claude-stuck" in (cached_issue.get("labels") or []):
+                self.feedback.set_fields(it, agent_stuck=True)
+                url = cached_issue.get("html_url") or f"https://github.com/{self.cfg.get('knowledge_repo') or self.fuyu.repo}/issues/{issue_num}"
+                code = feedback.fb_code(it["id"])
+                texts.append(f"【代理没修成】反馈 {code}「{it['title']}」→ issue #{issue_num}\n"
+                             f"查到的情况在 issue 评论里：{url}\n可以补充线索后再 /fix {it['id']} [mac|win] [fg]，或者自己修。")
             elif now - it["agent_at"] > self.AGENT_LATE and not it.get("agent_late"):
                 self.feedback.set_fields(it, agent_late=True)
                 repo = self.cfg.get("knowledge_repo") or self.fuyu.repo
-                look = ("Mac 开着吗？日志在 ~/.fuxi-fix/logs/" if it.get("agent_where") == "local"
-                        else f"看看运行记录：https://github.com/{repo}/actions/workflows/claude-fix.yml")
-                texts.append(f"【代理还没结果】反馈 #{it['id']}「{it['title']}」→ issue #{it['issue']}，派出已超过 2 小时。\n{look}")
+                where = it.get("agent_where") or "cloud"
+                if where in ("mac", "local"):
+                    look = "Mac 开着吗？日志在 ~/.fuxi-fix/logs/"
+                elif where == "win":
+                    look = "Windows 开着吗？请检查本机修复脚本日志"
+                else:
+                    look = f"看看运行记录：https://github.com/{repo}/actions/workflows/claude-fix.yml"
+                texts.append(f"【代理还没结果】反馈 {feedback.fb_code(it['id'])}「{it['title']}」→ issue #{issue_num}，派出已超过 2 小时。\n{look}")
         gh = self.fixflow.gh
         if gh.ready and now - gh.checked_at > 86400:
             try:
@@ -178,15 +191,15 @@ class GroupWorkMixin:
                     if it.get("agent_pr"):
                         continue
                     self.feedback.set_fields(it, agent_pr=e["number"])
-                    texts.append(f"【代理出 PR 了】反馈 #{it['id']}「{it['title']}」→ issue #{it['issue']}\n"
+                    texts.append(f"【代理出 PR 了】反馈 {feedback.fb_code(it['id'])}「{it['title']}」→ issue #{it['issue']}\n"
                                  f"PR #{e['number']}：{e['title']}\n{e['url']}\n看过没问题就在 GitHub 上转正式并合并。")
             elif e.get("type") == "agent_stuck":
                 for it in self.feedback.agent_items([e["number"]]):
                     if it.get("agent_stuck") or it.get("agent_pr"):
                         continue
                     self.feedback.set_fields(it, agent_stuck=True)
-                    texts.append(f"【代理没修成】反馈 #{it['id']}「{it['title']}」→ issue #{it['issue']}\n"
-                                 f"它查到的情况写在 issue 评论里：{e['url']}\n可以补充线索后再 /修 {it['id']}，或者自己修。")
+                    texts.append(f"【代理没修成】反馈 {feedback.fb_code(it['id'])}「{it['title']}」→ issue #{it['issue']}\n"
+                                 f"它查到的情况写在 issue 评论里：{e['url']}\n可以补充线索后再 /fix {it['id']} [mac|win] [fg]，或者自己修。")
         mode = self.cfg.get("fuyu_notify")
         if mode == "release":
             events = [e for e in events if e.get("type") == "new_release"]

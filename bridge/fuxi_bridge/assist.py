@@ -429,7 +429,8 @@ class AssistMixin:
                     latest = max(items, key=lambda it: it.get("last_seen", 0))
                     if time.time() - latest.get("last_seen", 0) <= 7200:
                         iid = latest["id"]
-                        hint = f"已归类为反馈 #{iid}「{latest['title']}」\n回复 /反馈 {iid} 看详情，/开issue {iid} 开 issue，/修 {iid} 派代理修"
+                        hint = (f"已归类为反馈 FB-{iid}「{latest['title']}」\n"
+                                f"回复 /fb {iid} 看详情，/issue {iid} 开 issue，/fix {iid} [mac|win] [fg] 派修")
             text = f"【浮屿群反馈】{sender} 在「{chat_name}」反馈：\n{q[:300]}\n\n{hint}"
             job = self.send(SendJob(chat=to, text=text, source="control"))
             if not job.ok:

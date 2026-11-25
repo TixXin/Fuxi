@@ -116,8 +116,11 @@ ITEMS: list[Item] = [
          min=0, max=120),
     Item("human_max_wait_s", "最多等人", "int", 120, "等人停手最多等多少秒，超过就这条不发（记为没发出去）",
          min=10, max=900),
-    Item("stale_sec", "过期秒数", "int", 120, "超过这么多秒的旧消息不再回复（含停机补回复）",
+    Item("stale_sec", "过期秒数", "int", 120, "超过这么多秒的旧消息不再回复（正常轮询）",
          env="FUXI_STALE_SEC", min=10, max=3600),
+    Item("boot_catchup_min", "重启补回分钟", "int", 60,
+         "重启后回看多少分钟内还没回复的消息（私聊末段、群里被 @ 或浮屿提问/反馈，主人或她已回过的跳过）；0 = 不补回",
+         min=0, max=360),
 ]
 BY_KEY = {i.key: i for i in ITEMS}
 BY_LABEL = {i.label.replace(" ", "").lower(): i for i in ITEMS}

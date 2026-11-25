@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import collections
 import concurrent.futures as cf
+import json
 import logging
 import os
 import queue
@@ -25,7 +26,7 @@ import threading
 import time
 
 from . import messages, store
-from . import announce, care, control, events, feedback, fuyu, images, issues, knowledge, outreach, schedule, settings, timing, voice
+from . import announce, assist, care, control, events, feedback, fuyu, images, issues, knowledge, outreach, schedule, settings, timing, voice
 from . import allow
 from .allow import AllowList
 from .assist import AssistMixin
@@ -68,7 +69,8 @@ class Bridge(SendingMixin, ReplyMixin, AssistMixin, GroupWorkMixin):
         self.kernel = Kernel(env.get("FUXI_KERNEL_URL", "http://127.0.0.1:8787"), env.get("FUXI_KERNEL_TOKEN", ""))
         # 行为设置：/state/settings.json（见 settings.py），apply_settings 把它们抄到下面这些属性上
         self.cfg = settings.Settings(os.path.join(state, "settings.json"), dict(env))
-        self.settle, self.group_settle, self.stale, self.reply_self = 1.5, 3.5, 120, False
+        self.settle, self.group_settle, self.stale, self.boot_catchup_min, self.reply_self = 1.5, 3.5, 120, 60, False
+        self.catchup_path = os.path.join(state, "boot_catchup.json")
         self.rate_chat, self.rate_global, self.quiet = 6, 20, ""
         self.extra_names: list[str] = []
         self.masters: list[str] = []
@@ -135,7 +137,8 @@ class Bridge(SendingMixin, ReplyMixin, AssistMixin, GroupWorkMixin):
         c = self.cfg
         new = {
             "settle": c.get("settle_ms") / 1000, "group_settle": c.get("group_settle_ms") / 1000,
-            "stale": c.get("stale_sec"), "reply_self": c.get("reply_self"),
+            "stale": c.get("stale_sec"), "boot_catchup_min": c.get("boot_catchup_min"),
+            "reply_self": c.get("reply_self"),
             "rate_chat": c.get("rate_chat"), "rate_global": c.get("rate_global"), "quiet": c.get("quiet"),
             "extra_names": c.get("self_names"), "masters": c.get("owners"),
             "care_on": c.get("care_on"), "vision_mode": c.get("vision"), "voice_mode": c.get("voice"),
@@ -402,7 +405,144 @@ class Bridge(SendingMixin, ReplyMixin, AssistMixin, GroupWorkMixin):
             "chat_title": self.name_of(chat) if last.is_group else "",
         }
 
-    def _dispatch(self, chat: str, batch: list[Message], seen: float | None = None, seq_before: int | None = None) -> None:
+    def _load_catchup(self) -> dict[str, dict]:
+        path = getattr(self, "catchup_path", "")
+        if not path or not os.path.exists(path):
+            return {}
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _save_catchup(self, data: dict[str, dict]) -> None:
+        path = getattr(self, "catchup_path", "")
+        if not path:
+            return
+        try:
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
+            os.replace(tmp, path)
+        except Exception as e:
+            log.warning("保存重启补回进度失败：%s", e)
+
+    def _needs_group_catchup(self, chat: str, chunk: list[Message]) -> bool:
+        """群里重启补回只挑确实需要回复的消息（被 @ / 回复她 / 产品助手群里的提问或反馈），避免对旧闲聊刷屏。"""
+        p = self._payload(chat, chunk)
+        if self._is_blind_media(chunk) and not p["at_me"] and not p["reply_to_bot"]:
+            return False
+        if p["at_me"] or p["reply_to_bot"]:
+            return True
+        if not self.is_assistant_group(chat):
+            return False
+        masters = set(getattr(self, "masters", None) or [])
+        sender = p.get("sender_id") or p.get("user_id") or ""
+        if sender and sender in masters:
+            return False
+        if p.get("reply_to_user_id") and not p.get("reply_to_bot"):
+            return False
+        if p.get("at_other") and not p.get("at_owner_only"):
+            return False
+        q = p["text"]
+        for n in p.get("self_names") or []:
+            q = q.replace(f"@{n}", " ")
+        q = q.strip()
+        if len(q) < 2:
+            return False
+        if assist.FEEDBACK_RE.search(q) and len(q) >= 6:
+            return True
+        if p.get("at_owner_only"):
+            return False
+        return bool(knowledge.is_question(q) or assist.ISSUE_NUM_RE.search(q))
+
+    def _boot_catchup(self) -> int:
+        """重启后回看最近 boot_catchup_min 分钟内仍未回复的消息并补处理。
+        - 私聊：bot 最后一条消息之后的对方发言；
+        - 群聊：bot 与主人最后一条消息之后、且被 @ 或属于产品助手群提问/反馈的发言；
+        - 按 (sort_seq, FUXI_BUILD) 去重，防止同版本反复重启对同一条已跳过消息重复打扰。
+        """
+        mins = int(getattr(self, "boot_catchup_min", 0) or 0)
+        if mins <= 0 or self.paused or self.in_quiet_hours():
+            return 0
+        now = time.time()
+        since = int(now - mins * 60)
+        cur_build = os.environ.get("FUXI_BUILD", "dev")
+        masters = set(getattr(self, "masters", None) or [])
+        state = self._load_catchup()
+        boot_list = list(getattr(self, "pending_boot", []))
+        dispatched = 0
+        state_dirty = False
+        for s in self.reader.sessions(300):
+            chat = s["username"]
+            ts = s["last_timestamp"] or 0
+            if ts < since or chat == "filehelper":
+                continue
+            if chat.startswith("gh_") or chat.endswith("@openim") or not self._allowed_chat(chat):
+                continue
+            try:
+                hist = self.reader.history(chat, since)
+            except Exception:
+                log.exception("重启补回：读取 %s 历史失败", chat)
+                continue
+            if not hist:
+                continue
+            # 推进水位并从 pending_boot 移出，避免后续 poll_once 重复处理
+            old_wm = self.reader.watermarks.get(chat, 0)
+            if self.is_feedback_group(chat):
+                unseen = [m for m in hist if m.sort_seq > old_wm]
+                if unseen:
+                    self._collect(unseen)
+            if hist[-1].sort_seq > old_wm:
+                self.reader.watermarks[chat] = hist[-1].sort_seq
+                self.reader._save()
+            if chat in boot_list:
+                boot_list.remove(chat)
+            gone = self._revoked(hist)
+            is_group = chat.endswith("@chatroom")
+            last_reply_seq = 0
+            for m in hist:
+                if m.msg_id in gone:
+                    continue
+                if m.is_self or (is_group and m.sender in masters):
+                    last_reply_seq = max(last_reply_seq, m.sort_seq)
+            trailing = [
+                m for m in hist
+                if m.sort_seq > last_reply_seq
+                and m.msg_id not in gone
+                and not m.is_self
+                and not control.is_command(m, self.self_wxid)
+                and m.type in ACCEPT_TYPES
+                and m.text.strip()
+            ]
+            if not trailing:
+                continue
+            last_seq = trailing[-1].sort_seq
+            prev = state.get(chat) or {}
+            if prev.get("seq", 0) >= last_seq and prev.get("build") == cur_build:
+                continue
+            batches = [c for c in self._split_by_sender(trailing) if self._needs_group_catchup(chat, c)] if is_group else [trailing]
+            state[chat] = {"seq": last_seq, "build": cur_build, "at": now}
+            state_dirty = True
+            if not batches:
+                continue
+            self._chat_msg_seq[chat] = self._chat_msg_seq.get(chat, 0) + len(trailing)
+            cur_seq = self._chat_msg_seq[chat]
+            for idx, batch in enumerate(batches):
+                seq_for_chunk = cur_seq - 1 if idx < len(batches) - 1 else cur_seq
+                log.info("重启补回 %s：补处理 %d 条未回复消息（距今 %d 分钟）",
+                         self.name_of(chat), len(batch), max(0, int((now - batch[-1].create_time) // 60)))
+                self.pool.submit(self._dispatch, chat, batch, now, seq_for_chunk, True)
+                dispatched += 1
+        self.pending_boot = boot_list
+        if state_dirty:
+            self._save_catchup(state)
+        return dispatched
+
+    def _dispatch(self, chat: str, batch: list[Message], seen: float | None = None, seq_before: int | None = None,
+                  boot_catchup: bool = False) -> None:
         if self.paused:
             log.info("已暂停，不处理 %s 的 %d 条消息", self.name_of(chat), len(batch))
             self._publish_batch(chat, batch, None, "已暂停")
@@ -410,7 +550,7 @@ class Bridge(SendingMixin, ReplyMixin, AssistMixin, GroupWorkMixin):
         tr = timing.Trace(batch[-1].create_time, seen or time.time())
         tr.add("settle", time.time() - tr.seen)
         try:
-            self._dispatch_traced(chat, batch, tr, seq_before=seq_before)
+            self._dispatch_traced(chat, batch, tr, seq_before=seq_before, boot_catchup=boot_catchup)
         finally:
             if tr.bubbles:
                 self.latency.add(tr.result())
@@ -430,7 +570,8 @@ class Bridge(SendingMixin, ReplyMixin, AssistMixin, GroupWorkMixin):
         except Exception:
             log.exception("发布对话流事件失败")
 
-    def _dispatch_traced(self, chat: str, batch: list[Message], tr: "timing.Trace", seq_before: int | None = None) -> None:
+    def _dispatch_traced(self, chat: str, batch: list[Message], tr: "timing.Trace", seq_before: int | None = None,
+                         boot_catchup: bool = False) -> None:
         with self.chat_locks[chat]:
             gone = self._revoked(batch)
             if gone:
@@ -442,6 +583,8 @@ class Bridge(SendingMixin, ReplyMixin, AssistMixin, GroupWorkMixin):
             self._understand(chat, batch, tr)
             k0 = time.monotonic()
             payload = self._payload(chat, batch)
+            if boot_catchup:
+                payload["msg_id"] = payload["msg_id"] + ":catchup"
             if self._is_blind_media(batch):
                 if payload["chat_type"] == "group" and not payload["at_me"] and not payload["reply_to_bot"]:
                     log.info("跳过群里纯媒体（未看图/未听语音且未 @）：%s [%s]",
@@ -456,8 +599,13 @@ class Bridge(SendingMixin, ReplyMixin, AssistMixin, GroupWorkMixin):
                 return
             if seq_before is not None:
                 payload["_chat_seq"] = seq_before
+            payload["_msg_ts"] = batch[-1].create_time
+            if boot_catchup:
+                payload["_boot_catchup"] = True
             self._assist(chat, payload)
             payload.pop("_chat_seq", None)
+            payload.pop("_msg_ts", None)
+            payload.pop("_boot_catchup", None)
             log.info("→ 内核 %s [%s] %s", payload["chat_title"] or self.name_of(chat), payload["senderName"],
                      _brief(payload["text"]))
             try:
@@ -588,6 +736,9 @@ class Bridge(SendingMixin, ReplyMixin, AssistMixin, GroupWorkMixin):
 
         threading.Thread(target=serve_admin, args=(self,), name="admin", daemon=True).start()
         threading.Thread(target=self.scheduler.loop, name="schedule", daemon=True).start()
+        n_catchup = self._boot_catchup()
+        if n_catchup:
+            log.info("重启补回：已提交 %d 批未回复消息", n_catchup)
         log.info("开始监听全部会话（self=%s）", self.self_wxid[:6] + "…")
         next_cfg = 0.0
         while True:

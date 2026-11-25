@@ -4,6 +4,7 @@ import collections
 import json
 import os
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -459,6 +460,104 @@ class AssistTest(unittest.TestCase):
 
     def test_clean_question_words(self):
         self.assertNotIn("么用", kn.tokens(kn.clean("截图怎么用")))
+
+
+class BootCatchupTest(unittest.TestCase):
+    def _bridge(self, tmp):
+        from fuxi_bridge.allow import AllowList
+        from fuxi_bridge.messages import Message
+
+        b = assist_bridge()
+        b.self_wxid = "wxid_bot"
+        b.extra_names = ["浮汐"]
+        b.masters = ["wxid_owner"]
+        b.paused = False
+        b.quiet = ""
+        b.boot_catchup_min = 60
+        b.catchup_path = os.path.join(tmp, "boot_catchup.json")
+        b.pending_boot = ["g@chatroom", "wxid_p1"]
+        b._chat_msg_seq = {}
+        b.names_cache.update({"wxid_p1": "小王", "wxid_owner": "煜哥", "wxid_u1": "Lucifer", "wxid_u2": "路人"})
+        b.allowlist = AllowList(os.path.join(tmp, "allow.txt"), "g@chatroom, wxid_p1, wxid_p2")
+        b.reader = mock.Mock()
+        b.reader.watermarks = {}
+        b.reader.self_names.return_value = ["浮汐"]
+        b._revoked = lambda ms: set()
+        b.is_feedback_group = lambda c: False
+        b.pool = mock.Mock()
+        self.Message = Message
+        return b
+
+    def _msg(self, chat, seq, text, sender="wxid_u1", is_self=False, mtype="text", source="", age=1200):
+        return self.Message(
+            chat=chat, local_id=seq, sort_seq=seq, type=mtype,
+            sender=sender, is_self=is_self, create_time=int(time.time() - age),
+            text=text, source=source, shard="message_0.db",
+        )
+
+    def test_group_feedback_and_private_catchup_and_dedup(self):
+        tmp = tempfile.mkdtemp()
+        b = self._bridge(tmp)
+        now = int(time.time())
+        b.reader.sessions.return_value = [
+            {"username": "g@chatroom", "last_timestamp": now - 600},
+            {"username": "wxid_p1", "last_timestamp": now - 300},
+            {"username": "wxid_p2", "last_timestamp": now - 300},
+            {"username": "filehelper", "last_timestamp": now - 60},
+        ]
+        # 群里：Lucifer 报 bug + @主人（无人回复），路人发了句闲聊「哈哈哈」
+        g_hist = [
+            self._msg("g@chatroom", 10, "早上的公告", sender="wxid_bot", is_self=True, age=3000),
+            self._msg("g@chatroom", 11, "哈哈哈", sender="wxid_u2", age=1500),
+            self._msg("g@chatroom", 12, "目前还有一个小问题，放到任务栏旁边色块会压暗", sender="wxid_u1", age=1200),
+            self._msg("g@chatroom", 13, "@tixxin", sender="wxid_u1",
+                      source="<atuserlist>wxid_owner</atuserlist>", age=1190),
+            self._msg("g@chatroom", 14, "而且移动到任务栏还是有阴影", sender="wxid_u1", age=1100),
+        ]
+        # 私聊 p1：对方发消息后 bot 还没回；私聊 p2：bot 已经回过了
+        p1_hist = [self._msg("wxid_p1", 20, "在吗帮我看看", sender="wxid_p1", age=300)]
+        p2_hist = [
+            self._msg("wxid_p2", 30, "早", sender="wxid_p2", age=400),
+            self._msg("wxid_p2", 31, "早呀", sender="wxid_bot", is_self=True, age=390),
+        ]
+        b.reader.history.side_effect = lambda c, s: {"g@chatroom": g_hist, "wxid_p1": p1_hist, "wxid_p2": p2_hist}[c]
+
+        with mock.patch.dict(os.environ, {"FUXI_BUILD": "v1"}):
+            n = b._boot_catchup()
+        self.assertEqual(n, 2)
+        dispatched = [(call.args[1], [m.sort_seq for m in call.args[2]], call.args[5])
+                      for call in b.pool.submit.call_args_list]
+        self.assertEqual(dispatched, [
+            ("g@chatroom", [12, 13, 14], True),   # 路人闲聊不补回，Lucifer 反馈补回
+            ("wxid_p1", [20], True),              # 未回私聊补回，已回私聊 p2 跳过
+        ])
+        self.assertEqual(b.pending_boot, [])      # 已从 pending_boot 移出防重复
+
+        # 同版本再次重启：去重不再重复提交
+        b.pool.submit.reset_mock()
+        with mock.patch.dict(os.environ, {"FUXI_BUILD": "v1"}):
+            self.assertEqual(b._boot_catchup(), 0)
+        b.pool.submit.assert_not_called()
+
+        # 升级新版本重启（若仍没人回复）：允许重新评估一次
+        with mock.patch.dict(os.environ, {"FUXI_BUILD": "v2"}):
+            self.assertEqual(b._boot_catchup(), 2)
+
+    def test_owner_replied_or_disabled_skips_catchup(self):
+        tmp = tempfile.mkdtemp()
+        b = self._bridge(tmp)
+        now = int(time.time())
+        b.reader.sessions.return_value = [{"username": "g@chatroom", "last_timestamp": now - 100}]
+        b.reader.history.return_value = [
+            self._msg("g@chatroom", 10, "任务栏有个小问题有阴影", sender="wxid_u1", age=600),
+            self._msg("g@chatroom", 11, "收到我今晚修", sender="wxid_owner", age=300),
+        ]
+        self.assertEqual(b._boot_catchup(), 0)
+        b.pool.submit.assert_not_called()
+
+        # boot_catchup_min = 0 关闭补回
+        b.boot_catchup_min = 0
+        self.assertEqual(b._boot_catchup(), 0)
 
 
 if __name__ == "__main__":

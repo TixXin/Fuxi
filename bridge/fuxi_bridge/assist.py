@@ -151,6 +151,8 @@ class AssistMixin:
            - ④ 与浮屿无关的闲聊 → 不介入，交回内核按普通插话概率处理。
         """
         seq_before = payload.pop("_chat_seq", None)
+        boot_catchup = bool(payload.pop("_boot_catchup", False))
+        msg_ts = payload.pop("_msg_ts", None)
         q = payload["text"]
         for n in payload.get("self_names") or []:
             q = q.replace(f"@{n}", " ")
@@ -164,7 +166,7 @@ class AssistMixin:
         if payload.get("at_me") or payload.get("reply_to_bot"):
             self._assist_addressed(chat, payload, q)
         else:
-            self._assist_proactive(chat, payload, q, seq_before)
+            self._assist_proactive(chat, payload, q, seq_before, boot_catchup=boot_catchup, msg_ts=msg_ts)
 
     def _assist_private(self, chat: str, payload: dict, q: str) -> None:
         """私聊聊到浮屿 / 仓库 / #编号 时顺手附上仓库动态和相关资料（不触发转人工）。"""
@@ -229,7 +231,7 @@ class AssistMixin:
         table[chat] = time.monotonic()
 
     def _try_feedback_fallback(self, chat: str, payload: dict, q: str, notes: list[str], seq_before: int | None,
-                               owner_at: bool) -> bool:
+                               owner_at: bool, boot_catchup: bool = False, msg_ts: float | None = None) -> bool:
         """群友（非主人）报 bug 或提建议、没人 @ 她且主人没立刻回复时，主动接住并确认记下。"""
         if len(q) < 6 or not FEEDBACK_RE.search(q):
             return False
@@ -240,11 +242,13 @@ class AssistMixin:
         fb_pct = self.cfg.get("fuyu_feedback_pct")
         if fb_pct <= 0 or not self._fb_cooldown_ok(chat):
             return False
-        if random.random() * 100 >= fb_pct:
+        if not boot_catchup and random.random() * 100 >= fb_pct:
             return False
         base_delay = self.cfg.get("fuyu_qa_delay") or 8
         wait_s = max(25, base_delay * 3) if owner_at else max(12, base_delay)
-        if self._wait_qa_yield(chat, seq_before, wait_s):
+        elapsed = max(0.0, time.time() - float(msg_ts)) if msg_ts else 0.0
+        remain = max(0.0, wait_s - elapsed)
+        if self._wait_qa_yield(chat, seq_before, remain):
             log.info("产品助手 %s：反馈兜底避让（%d 秒内群里已有新消息）", self.name_of(chat), wait_s)
             return True   # 已处理（让贤），不要再往下掉进闲聊分支
         tail = ""
@@ -256,11 +260,13 @@ class AssistMixin:
         payload["at_me"] = True
         self._mark_fb_ack(chat)
         self._mark_fuyu_proactive(chat)
-        log.info("产品助手 %s：反馈兜底接话（未 @%s，概率 %d%%）",
-                 self.name_of(chat), "、原 @ 主人" if owner_at else "", fb_pct)
+        log.info("产品助手 %s：反馈兜底接话（未 @%s%s，概率 %d%%）",
+                 self.name_of(chat), "、原 @ 主人" if owner_at else "",
+                 "、重启补回" if boot_catchup else "", fb_pct)
         return True
 
-    def _assist_proactive(self, chat: str, payload: dict, q: str, seq_before: int | None = None) -> None:
+    def _assist_proactive(self, chat: str, payload: dict, q: str, seq_before: int | None = None,
+                          boot_catchup: bool = False, msg_ts: float | None = None) -> None:
         if len(q) < 2 or self._is_group_silenced(chat):
             return
         reply_to_other = bool(payload.get("reply_to_user_id") and not payload.get("reply_to_bot"))
@@ -272,7 +278,8 @@ class AssistMixin:
         if talking_other:
             if owner_at:
                 notes, _ = self._fuyu_notes(q)
-                self._try_feedback_fallback(chat, payload, q, notes, seq_before, owner_at=True)
+                self._try_feedback_fallback(chat, payload, q, notes, seq_before, owner_at=True,
+                                            boot_catchup=boot_catchup, msg_ts=msg_ts)
             return
 
         fuyu_mentioned = bool(FUYU_TOPIC_RE.search(q))
@@ -292,9 +299,11 @@ class AssistMixin:
                 if hits:
                     hits = self._judge(q, hits)
                 if hits or sure:
-                    if random.random() * 100 < qa_pct:
+                    if boot_catchup or random.random() * 100 < qa_pct:
                         delay = self.cfg.get("fuyu_qa_delay")
-                        if self._wait_qa_yield(chat, seq_before, delay):
+                        elapsed = max(0.0, time.time() - float(msg_ts)) if msg_ts else 0.0
+                        remain = max(0.0, delay - elapsed)
+                        if self._wait_qa_yield(chat, seq_before, remain):
                             log.info("产品助手 %s：主动答疑避让（%d 秒内群里已有新消息）", self.name_of(chat), delay)
                             return
                         hits_header, hits_body, tail = "", "", ""
@@ -307,16 +316,18 @@ class AssistMixin:
                         payload["text"] = _fit_append(payload["text"], hits_header, hits_body, tail)
                         payload["at_me"] = True
                         self._mark_fuyu_proactive(chat)
-                        log.info("产品助手 %s：主动答疑（未 @，概率 %d%%，命中 %d 段资料/%d 条仓库）",
-                                 self.name_of(chat), qa_pct, len(hits), len(notes))
+                        log.info("产品助手 %s：主动答疑（未 @%s，概率 %d%%，命中 %d 段资料/%d 条仓库）",
+                                 self.name_of(chat), "、重启补回" if boot_catchup else "", qa_pct, len(hits), len(notes))
                     return
             # 没命中资料，但明显是在报 bug / 提建议 → 走 ② 反馈兜底
-            if self._try_feedback_fallback(chat, payload, q, notes, seq_before, owner_at=False):
+            if self._try_feedback_fallback(chat, payload, q, notes, seq_before, owner_at=False,
+                                           boot_catchup=boot_catchup, msg_ts=msg_ts):
                 return
             return
 
         # ② 群友陈述式报 bug / 提建议（如「目前还有一个小问题…」「移动到任务栏还是有阴影」）
-        if self._try_feedback_fallback(chat, payload, q, notes, seq_before, owner_at=False):
+        if self._try_feedback_fallback(chat, payload, q, notes, seq_before, owner_at=False,
+                                       boot_catchup=boot_catchup, msg_ts=msg_ts):
             return
 
         # ③ 普通聊浮屿（非提问、非反馈）：温和概率 + 冷却

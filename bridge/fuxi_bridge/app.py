@@ -596,13 +596,23 @@ class Bridge(SendingMixin, ReplyMixin, AssistMixin, GroupWorkMixin):
             payload = self._payload(chat, batch)
             if boot_catchup:
                 payload["msg_id"] = payload["msg_id"] + ":catchup"
+            followup_img = False
             if self._is_blind_media(batch):
-                if payload["chat_type"] == "group" and not payload["at_me"] and not payload["reply_to_bot"]:
+                followup_img = (
+                    payload["chat_type"] == "group"
+                    and not payload["at_me"]
+                    and not payload["reply_to_bot"]
+                    and any(m.type == "image" for m in batch)
+                    and hasattr(self, "_has_recent_followup")
+                    and self._has_recent_followup(chat, payload)
+                )
+                if payload["chat_type"] == "group" and not payload["at_me"] and not payload["reply_to_bot"] and not followup_img:
                     log.info("跳过群里纯媒体（未看图/未听语音且未 @）：%s [%s]",
                              payload["chat_title"] or self.name_of(chat), payload["senderName"])
                     tr.reason = "群里纯媒体未看懂，跳过"
                     return
-                payload["text"] += "\n（提示：未能看清/听清这段媒体的具体内容，不要凭空猜测，自然说明看不到或听不清即可）"
+                if not followup_img:
+                    payload["text"] += "\n（提示：未能看清/听清这段媒体的具体内容，不要凭空猜测，自然说明看不到或听不清即可）"
             if self._source_asked(payload):
                 url = self.cfg.get("source_url")
                 log.info("%s 问源码，回仓库地址", self.name_of(chat))
@@ -622,10 +632,14 @@ class Bridge(SendingMixin, ReplyMixin, AssistMixin, GroupWorkMixin):
             payload["_msg_ts"] = batch[-1].create_time
             if boot_catchup:
                 payload["_boot_catchup"] = True
+            if followup_img:
+                payload["_followup_img"] = True
             self._assist(chat, payload)
+            was_followup = bool(payload.pop("_followup_turn", False))
             payload.pop("_chat_seq", None)
             payload.pop("_msg_ts", None)
             payload.pop("_boot_catchup", None)
+            payload.pop("_followup_img", None)
             log.info("→ 内核 %s [%s] %s", payload["chat_title"] or self.name_of(chat), payload["senderName"],
                      _brief(payload["text"]))
             try:
@@ -638,6 +652,8 @@ class Bridge(SendingMixin, ReplyMixin, AssistMixin, GroupWorkMixin):
             delivered = False
             try:
                 delivered = self._deliver(chat, batch, resp, tr, k0)
+                if delivered and payload.get("chat_type") == "group" and hasattr(self, "_note_group_reply"):
+                    self._note_group_reply(chat, payload, resp, was_followup=was_followup)
             finally:
                 if sticker:
                     self._send_sticker(chat, sticker, delivered)

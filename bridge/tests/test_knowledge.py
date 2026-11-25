@@ -381,6 +381,53 @@ class AssistTest(unittest.TestCase):
             b._assist("g@chatroom", p5)
         self.assertFalse(p5["at_me"])
 
+    def test_same_sender_followup_supplement_and_caps(self):
+        b = assist_bridge()
+        b.masters = ["wxid_owner"]
+        # 模拟刚回复过 pdone 并反问了一句
+        with mock.patch("fuxi_bridge.assist.time.monotonic", return_value=1000.0):
+            b._note_group_reply(
+                "g@chatroom",
+                {"sender_id": "wxid_pdone", "senderName": "pdone"},
+                {"reply": "我记下转给煜哥了。你是想弹窗带内容还是推一条就行？"},
+            )
+        # 1) 1 分钟后 pdone 发了超过 30 字的陈述式补充 + [图片]，没 @ 浮汐 → 应自动续接
+        p1 = {**payload("在企微设置中已启用通知显示详情了，服务收到通知时，在岛上显示消息内容即可\n[图片]", at=False),
+              "sender_id": "wxid_pdone", "senderName": "pdone"}
+        with mock.patch("fuxi_bridge.assist.time.monotonic", return_value=1060.0):
+            b._assist("g@chatroom", p1)
+        self.assertTrue(p1["at_me"])
+        self.assertTrue(p1.get("_followup_turn"))
+        self.assertIn("补充细节或回答你的问题", p1["text"])
+
+        # 记下第 1 轮续接（不再反问）
+        with mock.patch("fuxi_bridge.assist.time.monotonic", return_value=1065.0):
+            b._note_group_reply("g@chatroom", p1, {"reply": "收到，这个细节和截图也一起记上了。"}, was_followup=True)
+
+        # 2) 对方紧接着发「好的谢谢」这种结束语且浮汐没再反问 → 不强行回复，优雅收尾
+        p_close = {**payload("好的谢谢", at=False), "sender_id": "wxid_pdone"}
+        with mock.patch("fuxi_bridge.assist.time.monotonic", return_value=1080.0):
+            b._assist("g@chatroom", p_close)
+        self.assertFalse(p_close["at_me"])
+
+        # 3) 单独发一张补充截图（followup_img=True）→ 也能接住并确认收到截图
+        with mock.patch("fuxi_bridge.assist.time.monotonic", return_value=2000.0):
+            b._note_group_reply("g@chatroom", {"sender_id": "wxid_pdone"}, {"reply": "记下了，转给煜哥。"})
+        p_img = {**payload("[图片]", at=False), "sender_id": "wxid_pdone", "_followup_img": True}
+        with mock.patch("fuxi_bridge.assist.time.monotonic", return_value=2020.0):
+            b._assist("g@chatroom", p_img)
+        self.assertTrue(p_img["at_me"])
+        self.assertIn("补充刚才反馈的截图", p_img["text"])
+
+        # 4) 超过 2 轮或超过 3 分钟后不再自动续接；@ 别人也不抢答
+        with mock.patch("fuxi_bridge.assist.time.monotonic", return_value=2025.0):
+            b._note_group_reply("g@chatroom", p_img, {"reply": "截图收到了"}, was_followup=True)
+            b._note_group_reply("g@chatroom", p_img, {"reply": "好的"}, was_followup=True)
+        p_cap = {**payload("我还有一点想顺便补充说明一下情况", at=False), "sender_id": "wxid_pdone"}
+        with mock.patch("fuxi_bridge.assist.time.monotonic", return_value=2030.0):
+            b._assist("g@chatroom", p_cap)
+        self.assertFalse(p_cap["at_me"])
+
     def test_private_chat_attaches_fuyu_context(self):
         b = assist_bridge()
         b.names_cache["wxid_owner"] = "煜哥"

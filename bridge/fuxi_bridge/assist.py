@@ -31,6 +31,13 @@ FEEDBACK_RE = re.compile(
     re.I,
 )
 FEEDBACK_ACK_COOLDOWN = 120
+FOLLOWUP_WINDOW = 180          # 浮汐刚回复过某群友后，3 分钟内同人补充细节/截图自动接住（绕过内核 30 字截断）
+FOLLOWUP_MAX_TURNS = 2         # 单段对话最多自动续接 2 轮，防无限拉扯
+CLOSING_ACK_RE = re.compile(
+    r"^(?:好[的滴呀啊啦]?|行[吧的呀]?|嗯+[嗯呀啊]?|哦+[哦呀]?|ok|okay|收到|明白|了解|知道了|"
+    r"谢+谢[啦呀啊]?|多谢|感谢[啦呀]?|辛苦[了啦]?|太好了|赞|棒|👍|🙏|👌)+[。！!~～]*$",
+    re.I,
+)
 ISSUE_NUM_RE = re.compile(r"#(\d{1,6})")
 # 内核 pipeline/chat.js normalize() 会对 msg.text 做 2000 字硬截断，桥接拼资料时必须留出余量
 PAYLOAD_TEXT_LIMIT = 1920
@@ -153,6 +160,7 @@ class AssistMixin:
         seq_before = payload.pop("_chat_seq", None)
         boot_catchup = bool(payload.pop("_boot_catchup", False))
         msg_ts = payload.pop("_msg_ts", None)
+        followup_img = bool(payload.pop("_followup_img", False))
         q = payload["text"]
         for n in payload.get("self_names") or []:
             q = q.replace(f"@{n}", " ")
@@ -166,7 +174,8 @@ class AssistMixin:
         if payload.get("at_me") or payload.get("reply_to_bot"):
             self._assist_addressed(chat, payload, q)
         else:
-            self._assist_proactive(chat, payload, q, seq_before, boot_catchup=boot_catchup, msg_ts=msg_ts)
+            self._assist_proactive(chat, payload, q, seq_before, boot_catchup=boot_catchup,
+                                   msg_ts=msg_ts, followup_img=followup_img)
 
     def _assist_private(self, chat: str, payload: dict, q: str) -> None:
         """私聊聊到浮屿 / 仓库 / #编号 时顺手附上仓库动态和相关资料（不触发转人工）。"""
@@ -230,6 +239,80 @@ class AssistMixin:
             self._fuyu_fb_at = table
         table[chat] = time.monotonic()
 
+    def _note_group_reply(self, chat: str, payload: dict, resp: dict, was_followup: bool = False) -> None:
+        """记录产品助手群里浮汐刚回复过的非主人群友，用于后续 3 分钟内同人补充说明/截图时自动续接。"""
+        if not self.is_assistant_group(chat):
+            return
+        sender = payload.get("sender_id") or payload.get("user_id") or ""
+        masters = set(getattr(self, "masters", None) or [])
+        if not sender or sender in masters:
+            return
+        table = getattr(self, "_group_followup", None)
+        if table is None:
+            table = {}
+            self._group_followup = table
+        now = time.monotonic()
+        # 顺手清理过期的旧记录
+        for k in [k for k, v in table.items() if now - v.get("at", 0) > FOLLOWUP_WINDOW]:
+            table.pop(k, None)
+        prev = table.get((chat, sender)) or {}
+        turns = int(prev.get("turns", 0)) + 1 if was_followup else 0
+        reply_text = str((resp or {}).get("reply") or "")
+        table[(chat, sender)] = {
+            "at": now,
+            "turns": turns,
+            "had_question": bool(re.search(r"[?？]", reply_text)),
+        }
+
+    def _has_recent_followup(self, chat: str, payload: dict) -> bool:
+        """当前消息是否来自刚和浮汐聊过（3 分钟内且未超轮次）的同一非主人群友。"""
+        if not self.is_assistant_group(chat) or self._is_group_silenced(chat):
+            return False
+        if self._talking_to_other(payload):
+            return False
+        sender = payload.get("sender_id") or payload.get("user_id") or ""
+        masters = set(getattr(self, "masters", None) or [])
+        if not sender or sender in masters:
+            return False
+        table = getattr(self, "_group_followup", None) or {}
+        entry = table.get((chat, sender))
+        if not entry:
+            return False
+        if time.monotonic() - float(entry.get("at") or 0) > FOLLOWUP_WINDOW:
+            table.pop((chat, sender), None)
+            return False
+        return int(entry.get("turns", 0)) < FOLLOWUP_MAX_TURNS
+
+    def _try_followup(self, chat: str, payload: dict, q: str, hits: list, notes: list[str],
+                      followup_img: bool = False) -> bool:
+        """浮汐刚回复过该群友后，对方在 3 分钟内不 @ 补充细节/回答提问/发截图，直接接住避免被内核 30 字上限判为旁人闲聊。"""
+        if not self._has_recent_followup(chat, payload):
+            return False
+        sender = payload.get("sender_id") or payload.get("user_id") or ""
+        table = getattr(self, "_group_followup", None) or {}
+        entry = table.get((chat, sender)) or {}
+        clean_q = q.strip()
+        if not followup_img and CLOSING_ACK_RE.match(clean_q) and not entry.get("had_question"):
+            table.pop((chat, sender), None)
+            return False
+        hits_header = "\n\n（相关浮屿说明资料，仅作参考）\n" if hits else ""
+        hits_body = knowledge.render(hits[:2]) if hits else ""
+        tail = ""
+        if notes:
+            tail += "\n\n（浮屿仓库的相关记录，对不上就别提）\n" + "\n".join(notes)
+        if followup_img:
+            tail += "\n\n（对方正在补充刚才反馈的截图，没再 @ 你；简短自然地确认截图也收到了、一起记下转给开发者即可，不要继续追问）"
+        else:
+            tail += "\n\n（对方正在接着刚才的对话补充细节或回答你的问题，没再 @ 你；结合上文简短自然地确认已补充记下即可，不要继续追问系统版本或步骤，别用客服腔）"
+        payload["text"] = _fit_append(payload["text"], hits_header, hits_body, tail)
+        payload["at_me"] = True
+        payload["_followup_turn"] = True
+        log.info("产品助手 %s：同人对话续接（%s，第 %d/%d 轮%s）",
+                 self.name_of(chat), payload.get("senderName") or sender,
+                 int(entry.get("turns", 0)) + 1, FOLLOWUP_MAX_TURNS,
+                 "，纯截图" if followup_img else "")
+        return True
+
     def _try_feedback_fallback(self, chat: str, payload: dict, q: str, notes: list[str], seq_before: int | None,
                                owner_at: bool, boot_catchup: bool = False, msg_ts: float | None = None) -> bool:
         """群友（非主人）报 bug 或提建议、没人 @ 她且主人没立刻回复时，主动接住并确认记下。"""
@@ -267,7 +350,8 @@ class AssistMixin:
         return True
 
     def _assist_proactive(self, chat: str, payload: dict, q: str, seq_before: int | None = None,
-                          boot_catchup: bool = False, msg_ts: float | None = None) -> None:
+                          boot_catchup: bool = False, msg_ts: float | None = None,
+                          followup_img: bool = False) -> None:
         if len(q) < 2 or self._is_group_silenced(chat):
             return
         reply_to_other = bool(payload.get("reply_to_user_id") and not payload.get("reply_to_bot"))
@@ -281,6 +365,10 @@ class AssistMixin:
                 notes, _ = self._fuyu_notes(q)
                 self._try_feedback_fallback(chat, payload, q, notes, seq_before, owner_at=True,
                                             boot_catchup=boot_catchup, msg_ts=msg_ts)
+            return
+
+        if followup_img:
+            self._try_followup(chat, payload, q, [], [], followup_img=True)
             return
 
         fuyu_mentioned = bool(FUYU_TOPIC_RE.search(q))
@@ -320,10 +408,16 @@ class AssistMixin:
                         log.info("产品助手 %s：主动答疑（未 @%s，概率 %d%%，命中 %d 段资料/%d 条仓库）",
                                  self.name_of(chat), "、重启补回" if boot_catchup else "", qa_pct, len(hits), len(notes))
                     return
-            # 没命中资料，但明显是在报 bug / 提建议 → 走 ② 反馈兜底
+            # 没命中资料 → 优先检查是否刚对话过的同人续接，再走 ② 反馈兜底
+            if self._try_followup(chat, payload, q, hits, notes):
+                return
             if self._try_feedback_fallback(chat, payload, q, notes, seq_before, owner_at=False,
                                            boot_catchup=boot_catchup, msg_ts=msg_ts):
                 return
+            return
+
+        # ①.5 刚和此人聊过（3 分钟内）：对方接着补充细节/回答提问，不被内核 30 字限制判为旁人闲聊
+        if self._try_followup(chat, payload, q, hits, notes):
             return
 
         # ② 群友陈述式报 bug / 提建议（如「目前还有一个小问题…」「移动到任务栏还是有阴影」）

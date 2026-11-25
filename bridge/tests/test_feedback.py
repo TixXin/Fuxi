@@ -201,10 +201,19 @@ class WiringTest(unittest.TestCase):
                        create_time=int(ts or DAY + 9 * 3600 + n), text=text, source="", shard="s")
 
     def test_collect_roles_and_group_filter(self):
+        import collections
+        from fuxi_bridge.sending import _h
         b = self.b
+        b._control_hashes = collections.deque([_h("FB-1 → issue #1244")], maxlen=50)
         self.assertTrue(b.is_feedback_group("g@chatroom"))
         self.assertFalse(b.is_feedback_group("h@chatroom"))
-        b._collect([self.msg(1, "设置页闪退"), self.msg(2, "我看看", sender="wxid_me"), self.msg(3, "收到", sender="wxid_bot")])
+        b._collect([
+            self.msg(1, "设置页闪退"),
+            self.msg(2, "我看看", sender="wxid_me"),
+            self.msg(3, "收到", sender="wxid_bot"),
+            self.msg(4, "FB-1 → issue #1244", sender="wxid_bot"),
+            self.msg(5, "【预览】将在 TixXin/Fuyu 开 issue", sender="wxid_bot"),
+        ])
         recs = b.feedback._inbox(0)
         self.assertEqual([(r["name"], r["role"]) for r in recs], [("小明", ""), ("煜哥", "owner"), ("浮汐", "bot")])
 

@@ -296,6 +296,16 @@ class AgentWatchTest(unittest.TestCase):
         self.assertTrue(b.feedback.get(3)["agent_stuck"])
         self.assertIn("【代理没修成】反馈 FB-3", b.send.call_args.args[0].text)
 
+    def test_closed_issue_marks_agent_done(self):
+        b = bridge_stub()
+        b.feedback.items = [item(issue=1300, status="known", agent_at=T, agent_where="mac", agent_mode="fg")]
+        b.fuyu.issues["1300"] = {"number": 1300, "state": "closed", "labels": []}
+        b._agent_watch(T + 300)
+        self.assertTrue(b.feedback.get(3)["agent_done"])
+        self.assertEqual(b.feedback.agent_waiting(), [])
+        self.assertIn("已完成（issue #1300 已关闭）", b.feedback.detail(3))
+        b.send.assert_not_called()
+
     def test_late_once_and_pr_from_cache(self):
         b = bridge_stub()
         b.feedback.items = [item(issue=1300, status="known", agent_at=T)]

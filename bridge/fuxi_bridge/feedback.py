@@ -418,7 +418,7 @@ class Feedback:
                 it["agent_at"] = time.time()
                 it["agent_where"] = where
                 it["agent_mode"] = mode if where in ("mac", "win", "local") else "bg"
-                for k in ("agent_pr", "agent_stuck", "agent_late"):
+                for k in ("agent_pr", "agent_stuck", "agent_late", "agent_done"):
                     it.pop(k, None)
             self._save()
 
@@ -427,8 +427,9 @@ class Feedback:
         return [i for i in self.items if i.get("agent_at") and i.get("issue") in set(refs)]
 
     def agent_waiting(self) -> list[dict]:
-        """派给代理、还没有结果（没出 PR、没说修不了）的条目。"""
-        return [i for i in self.items if i.get("agent_at") and not i.get("agent_pr") and not i.get("agent_stuck")
+        """派给代理、还没有结果（没出 PR、没说修不了、对应 issue 也未关闭）的条目。"""
+        return [i for i in self.items if i.get("agent_at") and not i.get("agent_pr")
+                and not i.get("agent_stuck") and not i.get("agent_done")
                 and i["status"] != "ignored"]
 
     def set_fields(self, it: dict, **kw) -> None:
@@ -508,6 +509,11 @@ class Feedback:
                 return head + f"PR #{pr}"
         if it.get("agent_stuck"):
             return head + f"没修成，查到的情况在 issue #{it['issue']} 的评论里"
+        if it.get("agent_done"):
+            return head + f"已完成（issue #{it['issue']} 已关闭）"
+        cached = (getattr(self.fuyu, "issues", None) or {}).get(str(it.get("issue"))) if self.fuyu else None
+        if cached and cached.get("state") == "closed":
+            return head + f"已完成（issue #{it['issue']} 已关闭）"
         return head + "还在修" + ("（超过 2 小时没结果，已提醒过）" if it.get("agent_late") else "")
 
     def listing(self, days: int = 7) -> str:

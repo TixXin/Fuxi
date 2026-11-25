@@ -85,6 +85,7 @@ class Bridge(SendingMixin, ReplyMixin, AssistMixin, GroupWorkMixin):
 
         self.sendq: "queue.Queue[SendJob]" = queue.Queue()
         self.sent_hashes: collections.deque[str] = collections.deque(maxlen=500)
+        self._control_hashes: collections.deque[str] = collections.deque(maxlen=200)
         self.media_sent: dict[str, float] = {}   # 会话 → bot 最近一次发图/表情包的时刻（认出自己的回声）
         self.pending: dict[str, list[Message]] = {}
         self.pending_at: dict[str, float] = {}
@@ -346,6 +347,9 @@ class Bridge(SendingMixin, ReplyMixin, AssistMixin, GroupWorkMixin):
 
     def _run_command(self, text: str, reply_to: str = "filehelper") -> None:
         reply = self.control.handle(text)
+        ch = getattr(self, "_control_hashes", None)
+        if ch is not None and reply:
+            ch.append(_h(reply))
         job = self.send(SendJob(chat=reply_to, text=reply, source="control"))
         if job.error:
             log.error("遥控回报发送失败（%s）：%s", reply_to, job.error)

@@ -9,7 +9,7 @@ import time
 
 from . import feedback, fuyu
 from .messages import Message
-from .sending import SendJob
+from .sending import SendJob, _h
 
 log = logging.getLogger("fuxi")
 
@@ -37,6 +37,11 @@ class GroupWorkMixin:
             if m.type in ("system", "revoke") or not m.text.strip():
                 continue
             if m.is_self:
+                ch = getattr(self, "_control_hashes", None)
+                if ch and _h(m.text) in ch:
+                    continue   # 遥控指令在群里的回报，不混进反馈原话
+                if m.text.lstrip().startswith(("【预览】", "反馈群：", "最近 7 天的反馈", "用法：/")):
+                    continue
                 role, name = "bot", "浮汐"
             else:
                 role = "owner" if m.sender in self.masters else ""
@@ -133,6 +138,8 @@ class GroupWorkMixin:
             cached_issue = (getattr(self.fuyu, "issues", None) or {}).get(str(issue_num)) or {}
             if prs:
                 self.feedback.set_fields(it, agent_pr=prs[-1]["number"])
+            elif cached_issue.get("state") == "closed":
+                self.feedback.set_fields(it, agent_done=True)
             elif "claude-stuck" in (cached_issue.get("labels") or []):
                 self.feedback.set_fields(it, agent_stuck=True)
                 url = cached_issue.get("html_url") or f"https://github.com/{self.cfg.get('knowledge_repo') or self.fuyu.repo}/issues/{issue_num}"
@@ -200,6 +207,10 @@ class GroupWorkMixin:
                     self.feedback.set_fields(it, agent_stuck=True)
                     texts.append(f"【代理没修成】反馈 {feedback.fb_code(it['id'])}「{it['title']}」→ issue #{it['issue']}\n"
                                  f"它查到的情况写在 issue 评论里：{e['url']}\n可以补充线索后再 /fix {it['id']} [mac|win] [fg]，或者自己修。")
+            elif e.get("type") == "issue_closed":
+                for it in self.feedback.agent_items([e["number"]]):
+                    if not it.get("agent_done") and not it.get("agent_pr"):
+                        self.feedback.set_fields(it, agent_done=True)
         mode = self.cfg.get("fuyu_notify")
         if mode == "release":
             events = [e for e in events if e.get("type") == "new_release"]

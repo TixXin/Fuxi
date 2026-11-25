@@ -60,7 +60,7 @@ const fail = (url, error) => ({ ok: false, source: 'fuxi', url, kind: links.kind
 
 const NAME = /^[A-Za-z0-9_.-]+$/;
 
-/** 识别 GitHub issue / PR / release 链接，返回对应的 API 地址；其它返回 null */
+/** 识别 GitHub issue / PR / release / 仓库首页 / blob 文件链接，返回对应的 API 地址；其它返回 null */
 function githubTarget(urlString) {
   let u;
   try { u = new URL(urlString); } catch { return null; }
@@ -68,6 +68,15 @@ function githubTarget(urlString) {
   const [owner, repo, type, ...rest] = u.pathname.split('/').filter(Boolean);
   if (!owner || !repo || !NAME.test(owner) || !NAME.test(repo)) return null;
   const base = `https://api.github.com/repos/${owner}/${repo}`;
+  if (!type) {
+    return { owner, repo, kind: 'repo', api: base, readmeApi: `${base}/readme` };
+  }
+  if (type === 'blob' && rest.length >= 2) {
+    const [ref, ...fileParts] = rest;
+    const filePath = fileParts.map((p) => { try { return decodeURIComponent(p); } catch { return p; } }).join('/');
+    const encoded = fileParts.map((p) => encodeURIComponent(p)).join('/');
+    return { owner, repo, kind: 'blob', ref, filePath, api: `${base}/contents/${encoded}?ref=${encodeURIComponent(ref)}` };
+  }
   if ((type === 'issues' || type === 'pull') && /^\d+$/.test(rest[0] || '')) {
     return { owner, repo, kind: type === 'pull' ? 'pr' : 'issue', number: rest[0], api: `${base}/issues/${rest[0]}` };
   }
@@ -76,6 +85,11 @@ function githubTarget(urlString) {
     return { owner, repo, kind: 'release', tag, api: `${base}/releases/tags/${encodeURIComponent(tag)}` };
   }
   return null;
+}
+
+function decodeBase64Utf8(b64) {
+  if (!b64 || typeof b64 !== 'string') return '';
+  try { return Buffer.from(b64.replace(/\s+/g, ''), 'base64').toString('utf8'); } catch { return ''; }
 }
 
 function cleanMarkdown(s) {
@@ -89,9 +103,37 @@ function cleanMarkdown(s) {
 const day = (iso) => (iso ? String(iso).slice(0, 10) : '');
 
 /** 把 API 返回的 JSON 转成链接信息；结构不对返回 null */
-function githubInfo(target, data, url) {
+function githubInfo(target, data, url, readmeText = '') {
   if (!data || typeof data !== 'object') return null;
   const repo = `${target.owner}/${target.repo}`;
+  if (target.kind === 'repo') {
+    if (!data.full_name && !data.name) return null;
+    const meta = [
+      data.language && `语言 ${data.language}`,
+      Number.isFinite(Number(data.stargazers_count)) && `Star ${data.stargazers_count}`,
+      data.pushed_at && `最近更新 ${day(data.pushed_at)}`,
+      data.license && data.license.spdx_id && data.license.spdx_id !== 'NOASSERTION' && `协议 ${data.license.spdx_id}`,
+    ].filter(Boolean).join(' · ');
+    const article = cleanMarkdown(readmeText) || cleanMarkdown(data.description) || '（没有 README）';
+    return {
+      title: `${data.full_name || repo}（GitHub 仓库）`,
+      description: String(data.description || '').trim(),
+      meta,
+      article,
+      url,
+    };
+  }
+  if (target.kind === 'blob') {
+    if (data.type !== 'file' || !data.content) return null;
+    const text = cleanMarkdown(decodeBase64Utf8(data.content));
+    if (!text) return null;
+    return {
+      title: `${repo} 文件：${data.path || target.filePath}`,
+      meta: [target.ref && `分支/标签 ${target.ref}`, data.size && `${Math.max(1, Math.round(data.size / 1024))} KB`].filter(Boolean).join(' · '),
+      article: text,
+      url,
+    };
+  }
   if (target.kind === 'release') {
     if (!data.tag_name) return null;
     return {
@@ -123,7 +165,17 @@ async function readGithub(target, url, opts) {
   if (!res.ok || res.status !== 200) return null; // 限流、私有仓库等：退回读网页
   let data;
   try { data = JSON.parse(res.body); } catch { return null; }
-  const info = githubInfo(target, data, url);
+  let readmeText = '';
+  if (target.kind === 'repo' && target.readmeApi) {
+    try {
+      const r = await links.fetchUrl(target.readmeApi, { ...opts, maxBytes: 1024 * 1024 });
+      if (r.ok && r.status === 200) {
+        const rj = JSON.parse(r.body);
+        readmeText = decodeBase64Utf8(rj && rj.content);
+      }
+    } catch { /* README 拿不到仍保留仓库元信息 */ }
+  }
+  const info = githubInfo(target, data, url, readmeText);
   if (!info) return null;
   return { ok: true, source: 'fuxi', url, kind: 'github', site: 'GitHub', description: '', byline: '', ...info,
     article: info.article.slice(0, MAX_ARTICLE), fullLength: info.article.length };

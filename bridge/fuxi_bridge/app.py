@@ -369,10 +369,19 @@ class Bridge(SendingMixin, ReplyMixin, AssistMixin, GroupWorkMixin):
                  or any(m.type == "pat" for m in mine))
         other_uids = [u for m in mine for u in messages.at_users(m.source) if u != self.self_wxid]
         self_lower = {n.lower() for n in names}
+        masters = set(getattr(self, "masters", None) or [])
+        master_names = {self.name_of(u).lower() for u in masters if u}
         text_ats = [m.group(1) for m in re.finditer(r"(?:^|[\s，,。！？!?])@([^\s@，,。！？!?\u2005]+)", bare)]
         other_text = [a for a in text_ats if a.lower() not in self_lower and not any(a.lower() in s or s in a.lower() for s in self_lower)]
         other_names = [self.name_of(u) for u in other_uids if u != "notify@all"] + other_text
         mentioned = list(dict.fromkeys([n for n in names if f"@{n}" in bare] + other_names))
+        at_other = bool(other_uids or other_text)
+        # 是否只 @ 了主人（群友报 bug 常直接 @ 开发者，主人一时没回时可由助手兜底接住）
+        only_owner_uids = bool(other_uids) and all(u in masters for u in other_uids)
+        only_owner_text = bool(other_text) and all(
+            any(a.lower() in mn or mn in a.lower() for mn in master_names) for a in other_text
+        ) if master_names else False
+        at_owner_only = at_other and (only_owner_uids or (not other_uids and only_owner_text))
         quote = next((m.quote for m in reversed(mine) if m.quote), {})
         sender_name = self.name_of(last.sender) if last.sender else ""
         return {
@@ -383,7 +392,8 @@ class Bridge(SendingMixin, ReplyMixin, AssistMixin, GroupWorkMixin):
             "text": text,
             "msg_id": f"{chat}:{last.shard}:" + "|".join(str(m.local_id) for m in batch),
             "at_me": at_me,
-            "at_other": bool(other_uids or other_text),
+            "at_other": at_other,
+            "at_owner_only": at_owner_only,
             "reply_to_bot": quote.get("sender") == self.self_wxid if quote else False,
             "reply_to_name": quote.get("name", ""),
             "reply_to_user_id": quote.get("sender", ""),

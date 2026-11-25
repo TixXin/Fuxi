@@ -68,17 +68,36 @@ test('纯文本直接当正文', async () => {
   assert.match(info.article, /第二行/);
 });
 
-test('识别 GitHub issue / PR / release 链接', () => {
+test('识别 GitHub 仓库 / 文件 / issue / PR / release 链接', () => {
   assert.deepEqual(fuxi.githubTarget('https://github.com/a/b/issues/12#issuecomment-1'),
     { owner: 'a', repo: 'b', kind: 'issue', number: '12', api: 'https://api.github.com/repos/a/b/issues/12' });
   assert.equal(fuxi.githubTarget('https://github.com/a/b/pull/3/files').kind, 'pr');
   assert.equal(fuxi.githubTarget('https://github.com/a/b/releases/tag/v1.2.0').api,
     'https://api.github.com/repos/a/b/releases/tags/v1.2.0');
-  assert.equal(fuxi.githubTarget('https://github.com/a/b'), null);
+  assert.deepEqual(fuxi.githubTarget('https://github.com/a/b'),
+    { owner: 'a', repo: 'b', kind: 'repo', api: 'https://api.github.com/repos/a/b', readmeApi: 'https://api.github.com/repos/a/b/readme' });
+  assert.deepEqual(fuxi.githubTarget('https://github.com/a/b/blob/main/docs/README.md'),
+    { owner: 'a', repo: 'b', kind: 'blob', ref: 'main', filePath: 'docs/README.md',
+      api: 'https://api.github.com/repos/a/b/contents/docs/README.md?ref=main' });
+  assert.equal(fuxi.githubTarget('https://github.com/a'), null);
   assert.equal(fuxi.githubTarget('https://gitlab.com/a/b/issues/1'), null);
 });
 
-test('GitHub API 结果：PR 合并状态、issue 标签、正文去掉注释', () => {
+test('GitHub API 结果：仓库 README、blob 文件、PR 合并状态、issue 标签', () => {
+  const rt = fuxi.githubTarget('https://github.com/a/b');
+  const repo = fuxi.githubInfo(rt, { full_name: 'a/b', description: '桌面小岛', language: 'Rust', stargazers_count: 99,
+    pushed_at: '2026-11-24T00:00:00Z', license: { spdx_id: 'AGPL-3.0' } }, 'https://github.com/a/b', '# 标题\n正文内容');
+  assert.equal(repo.title, 'a/b（GitHub 仓库）');
+  assert.match(repo.meta, /语言 Rust/);
+  assert.match(repo.meta, /Star 99/);
+  assert.match(repo.article, /正文内容/);
+
+  const bt = fuxi.githubTarget('https://github.com/a/b/blob/main/README.md');
+  const blob = fuxi.githubInfo(bt, { type: 'file', path: 'README.md', size: 2048,
+    content: Buffer.from('# 说明\n这是文件内容', 'utf8').toString('base64') }, 'https://github.com/a/b/blob/main/README.md');
+  assert.equal(blob.title, 'a/b 文件：README.md');
+  assert.match(blob.article, /这是文件内容/);
+
   const t = fuxi.githubTarget('https://github.com/a/b/pull/7');
   const pr = fuxi.githubInfo(t, { number: 7, title: '修复', state: 'closed', comments: 2, body: '<!-- 模板 -->改了X',
     pull_request: { merged_at: '2026-11-20T01:00:00Z' }, user: { login: 'u' }, labels: [{ name: 'bug' }] });

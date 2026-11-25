@@ -339,6 +339,50 @@ class AssistTest(unittest.TestCase):
         self.assertTrue(out.startswith("原问题\n\n（资料）\n"))
         self.assertTrue(out.endswith("…\n\n（尾注不要丢）"))
 
+    def test_proactive_feedback_fallback_and_cooldown(self):
+        b = assist_bridge()
+        b.masters = ["wxid_owner"]
+        # 群友报新 bug（没写「浮屿」、资料库也查不到）→ 兜底接住
+        p = {**payload("目前还有一个小问题，放到任务栏鼠标移上去色块会压暗不和谐", at=False), "sender_id": "wxid_u1"}
+        with mock.patch("fuxi_bridge.assist.random.random", return_value=0.0), \
+             mock.patch("fuxi_bridge.assist.time.monotonic", return_value=1000.0):
+            b._assist("g@chatroom", p)
+        self.assertTrue(p["at_me"])
+        self.assertIn("反馈浮屿的问题或建议", p["text"])
+        # 120 秒内连发第二条不重复兜底
+        p2 = {**payload("而且移动到任务栏还是有阴影，这一块底下", at=False), "sender_id": "wxid_u1"}
+        with mock.patch("fuxi_bridge.assist.random.random", return_value=0.0), \
+             mock.patch("fuxi_bridge.assist.time.monotonic", return_value=1030.0):
+            b._assist("g@chatroom", p2)
+        self.assertFalse(p2["at_me"])
+        # 主人自己说 bug 不触发兜底
+        p3 = {**payload("这里有个小问题阴影不对，我晚上修", at=False), "sender_id": "wxid_owner"}
+        with mock.patch("fuxi_bridge.assist.random.random", return_value=0.0), \
+             mock.patch("fuxi_bridge.assist.time.monotonic", return_value=1200.0):
+            b._assist("g@chatroom", p3)
+        self.assertFalse(p3["at_me"])
+        # 群友只 @ 主人报 bug → 允许兜底；@ 普通群友 → 不插嘴
+        p4 = {**payload("@tixxin 建议加个导出按钮", at=False), "sender_id": "wxid_u2", "at_other": True, "at_owner_only": True}
+        with mock.patch("fuxi_bridge.assist.random.random", return_value=0.0), \
+             mock.patch("fuxi_bridge.assist.time.monotonic", return_value=1300.0):
+            b._assist("g@chatroom", p4)
+        self.assertTrue(p4["at_me"])
+        p5 = {**payload("@小明 建议你重启试试", at=False), "sender_id": "wxid_u2", "at_other": True, "at_owner_only": False}
+        with mock.patch("fuxi_bridge.assist.random.random", return_value=0.0), \
+             mock.patch("fuxi_bridge.assist.time.monotonic", return_value=1500.0):
+            b._assist("g@chatroom", p5)
+        self.assertFalse(p5["at_me"])
+
+    def test_private_chat_attaches_fuyu_context(self):
+        b = assist_bridge()
+        b.names_cache["wxid_owner"] = "煜哥"
+        b.fuyu.latest.return_value = {"tag_name": "v0.3.14-beta.1"}
+        b.fuyu.version_brief.return_value = "浮屿最新测试版 v0.3.14-beta.1"
+        p = {**payload("浮屿现在最新版本是多少", at=False), "chat_type": "private"}
+        b._assist("wxid_owner", p)
+        self.assertIn("v0.3.14-beta.1", p["text"])
+        b.send.assert_not_called()                                    # 私聊不转人工
+
     def test_handoff_once(self):
         b = assist_bridge()
         with mock.patch("threading.Thread") as th:

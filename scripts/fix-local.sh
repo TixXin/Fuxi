@@ -17,7 +17,7 @@ CLONE="$WORK/Fuyu"
 LABELS=("fix-mac" "fix-local")
 FG_LABEL="fix-fg"
 PLIST="$HOME/Library/LaunchAgents/com.fuxi.fix-local.plist"
-export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH="$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 log() { echo "$(date '+%F %T') $*"; }
 
@@ -116,7 +116,7 @@ launch_fg_ghostty() {
   prompt_fg "$n" > "$pfile"
   cat > "$runner" <<EOF
 #!/usr/bin/env bash
-export PATH="\$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH="\$HOME/.local/bin:\$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 cd "$CLONE" || exit 1
 clear
 echo "============================================================"
@@ -124,7 +124,7 @@ echo "  Fuxi Mac 前台修复  $REPO #$n"
 echo "  分支: $branch   目录: $CLONE"
 echo "============================================================"
 echo
-claude --permission-mode acceptEdits "\$(cat "$pfile")"
+claude --permission-mode auto "\$(cat "$pfile")"
 echo
 echo "------------------------------------------------------------"
 echo "Claude 会话已结束。当前分支状态："
@@ -165,7 +165,7 @@ fix_one() {
     return
   fi
 
-  claude -p "$(prompt_bg "$n")" --permission-mode acceptEdits --max-turns 80 \
+  claude -p "$(prompt_bg "$n")" --permission-mode auto --max-turns 80 \
     --allowedTools "Edit,Write,Read,Glob,Grep,Bash(pnpm:*),Bash(node:*),Bash(git:*),Bash(cargo:*),Bash(gh issue view:*),Bash(ls:*),Bash(cat:*)" \
     >>"$out" 2>&1 || rc=$?
   if [ -n "$(git log --oneline origin/main..HEAD)" ]; then

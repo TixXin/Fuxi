@@ -135,7 +135,8 @@ class GroupWorkMixin:
         for it in self.feedback.agent_waiting():
             issue_num = it["issue"]
             prs = [p for p in self.fuyu.fixes_for(issue_num) if fuyu._ts(p.get("created_at")) >= it["agent_at"] - 60]
-            cached_issue = (getattr(self.fuyu, "issues", None) or {}).get(str(issue_num)) or {}
+            issues_map = getattr(self.fuyu, "issues", None) or {}
+            cached_issue = issues_map.get(issue_num) or issues_map.get(str(issue_num)) or {}
             if prs:
                 self.feedback.set_fields(it, agent_pr=prs[-1]["number"])
             elif cached_issue.get("state") == "closed":
@@ -192,25 +193,32 @@ class GroupWorkMixin:
             if e.get("type") == "new_release" and not e.get("prerelease") and self.cfg.get("outreach"):
                 threading.Thread(target=self.outreach.on_release, args=(e["tag"],), name="fix-notify", daemon=True).start()
         texts = []
-        for e in events:   # /修 派给代理的 issue 有结果了：不管「浮屿动态」怎么设都告诉主人
+        fb = getattr(self, "feedback", None)
+        for e in events:   # /fix 派给代理的 issue 有结果了：不管「浮屿动态」怎么设都告诉主人
+            if not fb:
+                break
             if e.get("type") == "pr_opened":
-                for it in self.feedback.agent_items(e.get("refs") or []):
+                for it in fb.agent_items(e.get("refs") or []):
                     if it.get("agent_pr"):
                         continue
-                    self.feedback.set_fields(it, agent_pr=e["number"])
+                    fb.set_fields(it, agent_pr=e["number"])
                     texts.append(f"【代理出 PR 了】反馈 {feedback.fb_code(it['id'])}「{it['title']}」→ issue #{it['issue']}\n"
                                  f"PR #{e['number']}：{e['title']}\n{e['url']}\n看过没问题就在 GitHub 上转正式并合并。")
+            elif e.get("type") == "pr_merged":
+                for it in fb.agent_items(e.get("refs") or []):
+                    if not it.get("agent_pr"):
+                        fb.set_fields(it, agent_pr=e["number"])
             elif e.get("type") == "agent_stuck":
-                for it in self.feedback.agent_items([e["number"]]):
+                for it in fb.agent_items([e["number"]]):
                     if it.get("agent_stuck") or it.get("agent_pr"):
                         continue
-                    self.feedback.set_fields(it, agent_stuck=True)
+                    fb.set_fields(it, agent_stuck=True)
                     texts.append(f"【代理没修成】反馈 {feedback.fb_code(it['id'])}「{it['title']}」→ issue #{it['issue']}\n"
                                  f"它查到的情况写在 issue 评论里：{e['url']}\n可以补充线索后再 /fix {it['id']} [mac|win] [fg]，或者自己修。")
             elif e.get("type") == "issue_closed":
-                for it in self.feedback.agent_items([e["number"]]):
+                for it in fb.agent_items([e["number"]]):
                     if not it.get("agent_done") and not it.get("agent_pr"):
-                        self.feedback.set_fields(it, agent_done=True)
+                        fb.set_fields(it, agent_done=True)
         mode = self.cfg.get("fuyu_notify")
         if mode == "release":
             events = [e for e in events if e.get("type") == "new_release"]

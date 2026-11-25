@@ -511,9 +511,18 @@ class Feedback:
             return head + f"没修成，查到的情况在 issue #{it['issue']} 的评论里"
         if it.get("agent_done"):
             return head + f"已完成（issue #{it['issue']} 已关闭）"
-        cached = (getattr(self.fuyu, "issues", None) or {}).get(str(it.get("issue"))) if self.fuyu else None
-        if cached and cached.get("state") == "closed":
-            return head + f"已完成（issue #{it['issue']} 已关闭）"
+        issue_num = it.get("issue")
+        if self.fuyu and issue_num:
+            try:
+                prs = [p for p in self.fuyu.fixes_for(issue_num) if p.get("created_at") and p.get("number")]
+                if prs:
+                    return head + self.fuyu.status(prs[-1]["number"])
+            except Exception:
+                pass
+            issues_map = getattr(self.fuyu, "issues", None) or {}
+            cached = issues_map.get(issue_num) or issues_map.get(str(issue_num))
+            if cached and cached.get("state") == "closed":
+                return head + f"已完成（issue #{issue_num} 已关闭）"
         return head + "还在修" + ("（超过 2 小时没结果，已提醒过）" if it.get("agent_late") else "")
 
     def listing(self, days: int = 7) -> str:

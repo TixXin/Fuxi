@@ -291,7 +291,7 @@ class AgentWatchTest(unittest.TestCase):
     def test_agent_watch_detects_stuck_from_cache(self):
         b = bridge_stub()
         b.feedback.items = [item(issue=1300, status="known", agent_at=T)]
-        b.fuyu.issues["1300"] = {"number": 1300, "labels": ["claude-stuck"], "html_url": "https://x/1300"}
+        b.fuyu.issues[1300] = {"number": 1300, "labels": ["claude-stuck"], "html_url": "https://x/1300"}
         b._agent_watch(T + 300)
         self.assertTrue(b.feedback.get(3)["agent_stuck"])
         self.assertIn("【代理没修成】反馈 FB-3", b.send.call_args.args[0].text)
@@ -299,12 +299,24 @@ class AgentWatchTest(unittest.TestCase):
     def test_closed_issue_marks_agent_done(self):
         b = bridge_stub()
         b.feedback.items = [item(issue=1300, status="known", agent_at=T, agent_where="mac", agent_mode="fg")]
-        b.fuyu.issues["1300"] = {"number": 1300, "state": "closed", "labels": []}
+        b.fuyu.issues[1300] = {"number": 1300, "state": "closed", "labels": []}
         b._agent_watch(T + 300)
         self.assertTrue(b.feedback.get(3)["agent_done"])
         self.assertEqual(b.feedback.agent_waiting(), [])
         self.assertIn("已完成（issue #1300 已关闭）", b.feedback.detail(3))
         b.send.assert_not_called()
+
+    def test_fast_merged_pr_updates_agent_pr(self):
+        pr = {"number": 1309, "title": "fix: shadow", "html_url": "u", "state": "closed",
+              "created_at": "x", "merged_at": "y", "body": "Fixes #1300"}
+        ev = fuyu.Fuyu._diff(None, pr, True)
+        self.assertEqual(ev[0]["type"], "pr_merged")
+        self.assertEqual(ev[0]["refs"], [1300])
+        b = bridge_stub(fuyu_notify="关闭")
+        b.feedback.items = [item(issue=1300, status="known", agent_at=T, agent_where="mac", agent_mode="fg")]
+        b._fuyu_events(ev)
+        self.assertEqual(b.feedback.get(3)["agent_pr"], 1309)
+        self.assertEqual(b.feedback.agent_waiting(), [])
 
     def test_late_once_and_pr_from_cache(self):
         b = bridge_stub()

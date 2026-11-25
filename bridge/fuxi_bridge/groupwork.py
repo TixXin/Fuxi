@@ -80,7 +80,7 @@ class GroupWorkMixin:
         if digest_due:
             since = float(fb.meta.get("digest_at") or 0) or now - 86400
             text = fb.digest(since=max(since, now - 3 * 86400))
-            to = self.masters[0] if self.masters else "filehelper"
+            to = self.owner_chat() if hasattr(self, "owner_chat") else (self.masters[0] if self.masters else "filehelper")
             fb.mark("digest", now)
             job = self.send(SendJob(chat=to, text=text, source="control"))
             if job.ok:
@@ -135,8 +135,9 @@ class GroupWorkMixin:
                 self.feedback.meta["expiry_day"] = day
                 self.feedback._save()
                 texts.append("【到期提醒】" + "；".join(soon) + "。到期后 /修 用不了，记得换新的（步骤见 docs/feedback-loop.md）。")
+        to = self.owner_chat() if hasattr(self, "owner_chat") else (self.masters[0] if self.masters else "filehelper")
         for text in texts:
-            job = self.send(SendJob(chat="filehelper", text=text, source="control"))
+            job = self.send(SendJob(chat=to, text=text, source="control"))
             if not job.ok:
                 log.warning("云端代理提醒没发出去：%s", job.error)
 
@@ -182,8 +183,10 @@ class GroupWorkMixin:
             return
         text = "\n\n".join(texts)
 
+        to = self.owner_chat() if hasattr(self, "owner_chat") else (self.masters[0] if self.masters else "filehelper")
+
         def go():   # 同步线程还拿着锁，发送可能要等几十秒，放到别的线程里
-            job = self.send(SendJob(chat="filehelper", text=text, source="control"))
+            job = self.send(SendJob(chat=to, text=text, source="control"))
             if not job.ok:
                 log.warning("浮屿动态通知没发出去：%s", job.error)
         threading.Thread(target=go, name="fuyu-notify", daemon=True).start()

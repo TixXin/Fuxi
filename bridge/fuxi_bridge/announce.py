@@ -125,12 +125,13 @@ class Announcer:
         from .app import SendJob
         head = (f"【待发 #{it['code']}】下面这条将发到「{it['to']}」\n"
                 f"回复 /发布 {it['code']} 发出，/取消 {it['code']} 放弃（24 小时内有效）")
-        jobs = [SendJob(chat="filehelper", text=head, source="control")]
+        to = self.b.owner_chat() if hasattr(self.b, "owner_chat") else "filehelper"
+        jobs = [SendJob(chat=to, text=head, source="control")]
         if it.get("image"):
-            jobs.append(SendJob(chat="filehelper", image=it["image"], source="control"))
+            jobs.append(SendJob(chat=to, image=it["image"], source="control"))
         if it.get("text"):
             prefix = f"@{it['at']} " if it.get("at") else ""   # 预览里用文字表示，真发时是真 @
-            jobs.append(SendJob(chat="filehelper", text=prefix + it["text"], source="control"))
+            jobs.append(SendJob(chat=to, text=prefix + it["text"], source="control"))
         for j in jobs:
             r = self.b.send(j)
             if not r.ok:

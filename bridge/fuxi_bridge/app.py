@@ -289,12 +289,15 @@ class Bridge(SendingMixin, ReplyMixin, AssistMixin, GroupWorkMixin):
             except Exception:
                 log.exception("读取 %s 失败", chat)
                 continue
-            cmds = [m for m in new if control.is_command(m, self.self_wxid)]
+            names = self.self_names()
+            cmds = [m for m in new if control.is_command(m, self.self_wxid, self.masters, names)]
             if new and self.is_feedback_group(chat):
-                self._collect(new)
+                non_cmds = [m for m in new if m not in cmds]
+                if non_cmds:
+                    self._collect(non_cmds)
             for m in cmds:
                 if m.create_time >= time.time() - self.stale:
-                    self.pool.submit(self._run_command, m.text)
+                    self.pool.submit(self._run_command, control.extract_command(m.text, names), m.chat)
             acc = [m for m in new if m not in cmds and self._accept(m)]
             if acc:
                 self._chat_msg_seq[chat] = self._chat_msg_seq.get(chat, 0) + len(acc)
@@ -341,11 +344,11 @@ class Bridge(SendingMixin, ReplyMixin, AssistMixin, GroupWorkMixin):
         who = "你" if q.get("sender") == self.self_wxid else (q.get("name") or self.name_of(q.get("sender", "")))
         return f"{m.text}\n（引用 {who} 的消息：{q.get('text') or '[消息]'}）"
 
-    def _run_command(self, text: str) -> None:
+    def _run_command(self, text: str, reply_to: str = "filehelper") -> None:
         reply = self.control.handle(text)
-        job = self.send(SendJob(chat="filehelper", text=reply, source="control"))
+        job = self.send(SendJob(chat=reply_to, text=reply, source="control"))
         if job.error:
-            log.error("遥控回报发送失败：%s", job.error)
+            log.error("遥控回报发送失败（%s）：%s", reply_to, job.error)
 
     @staticmethod
     def _is_blind_media(batch: list[Message]) -> bool:
@@ -508,12 +511,13 @@ class Bridge(SendingMixin, ReplyMixin, AssistMixin, GroupWorkMixin):
                     continue
                 if m.is_self or (is_group and m.sender in masters):
                     last_reply_seq = max(last_reply_seq, m.sort_seq)
+            names = self.self_names()
             trailing = [
                 m for m in hist
                 if m.sort_seq > last_reply_seq
                 and m.msg_id not in gone
                 and not m.is_self
-                and not control.is_command(m, self.self_wxid)
+                and not control.is_command(m, self.self_wxid, self.masters, names)
                 and m.type in ACCEPT_TYPES
                 and m.text.strip()
             ]

@@ -268,6 +268,25 @@ class ControlTest(unittest.TestCase):
         self.assertFalse(control.is_command(msg(chat="filehelper", is_self=True, text="/状态栏怎么调"), SELF))
         self.assertFalse(control.is_command(msg(chat="filehelper", is_self=True, text="随便聊"), SELF))
 
+    def test_owner_commands_in_private_and_group(self):
+        owners = ["wxid_owner"]
+        names = ["浮汐", "fuxi"]
+        # 主人在私聊发指令 / 在群里发指令（含 @浮汐 /反馈）
+        self.assertTrue(control.is_command(msg(chat="wxid_owner", sender="wxid_owner", is_self=False, text="/反馈"), SELF, owners, names))
+        self.assertTrue(control.is_command(msg(chat="g@chatroom", sender="wxid_owner", is_self=False, text="/反馈 1"), SELF, owners, names))
+        self.assertTrue(control.is_command(msg(chat="g@chatroom", sender="wxid_owner", is_self=False, text="@浮汐 /反馈"), SELF, owners, names))
+        self.assertEqual(control.extract_command("@浮汐\u2005/开issue 1", names), "/开issue 1")
+        # 非主人群友 / 非主人私聊发指令无效
+        self.assertFalse(control.is_command(msg(chat="g@chatroom", sender="wxid_u1", is_self=False, text="/反馈"), SELF, owners, names))
+        self.assertFalse(control.is_command(msg(chat="wxid_u1", sender="wxid_u1", is_self=False, text="/状态"), SELF, owners, names))
+        # _run_command 哪里发的回哪里
+        self.b.control = self.c
+        self.b.send = mock.Mock(return_value=mock.Mock(error=""))
+        self.b._run_command("/名单", "g@chatroom")
+        self.assertEqual(self.b.send.call_args.args[0].chat, "g@chatroom")
+        self.b._run_command("/名单", "wxid_owner")
+        self.assertEqual(self.b.send.call_args.args[0].chat, "wxid_owner")
+
     def test_pause_resume_persist(self):
         self.b.halted = "测试熔断"
         self.c.handle("/暂停")

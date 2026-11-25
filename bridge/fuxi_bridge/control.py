@@ -47,10 +47,35 @@ log = logging.getLogger("fuxi.control")
 HELP = __doc__.split("\n\n", 2)[2].strip().replace("  /", "/")
 
 
-def is_command(m: "Message", self_wxid: str) -> bool:
-    if m.chat != "filehelper" or not m.is_self or m.type != "text":
+def extract_command(text: str, self_names=()) -> str:
+    """去掉群里可能带在前面的 @浮汐 前缀，返回以 / 开头的原始指令串（不是指令则原样 strip 返回）。"""
+    s = (text or "").strip()
+    if not s:
+        return ""
+    if not s.startswith("/") and self_names:
+        for n in self_names:
+            if not n:
+                continue
+            for sep in (" ", "\u2005", "\u00a0", "\t", "\n"):
+                prefix = f"@{n}{sep}"
+                if s.startswith(prefix):
+                    cand = s[len(prefix):].lstrip()
+                    if cand.startswith("/"):
+                        return cand
+    return s
+
+
+def is_command(m: "Message", self_wxid: str, owners=None, self_names=()) -> bool:
+    if m.type != "text":
         return False
-    head = m.text.strip().split(maxsplit=1)[0] if m.text.strip() else ""
+    allowed = (m.chat == "filehelper" and m.is_self)
+    if not allowed and not m.is_self and owners:
+        owner_set = set(owners)
+        allowed = (m.sender in owner_set) or (not m.is_group and m.chat in owner_set)
+    if not allowed:
+        return False
+    s = extract_command(m.text, self_names)
+    head = s.split(maxsplit=1)[0] if s else ""
     return head in COMMANDS
 
 

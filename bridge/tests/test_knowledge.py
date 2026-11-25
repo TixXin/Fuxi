@@ -343,13 +343,19 @@ class AssistTest(unittest.TestCase):
     def test_proactive_feedback_fallback_and_cooldown(self):
         b = assist_bridge()
         b.masters = ["wxid_owner"]
-        # 群友报新 bug（没写「浮屿」、资料库也查不到）→ 兜底接住
+        b.names_cache["wxid_owner"] = "煜哥"
+        # 群友报新 bug（没写「浮屿」、资料库也查不到）→ 兜底接住并立刻私聊通知主人
         p = {**payload("目前还有一个小问题，放到任务栏鼠标移上去色块会压暗不和谐", at=False), "sender_id": "wxid_u1"}
-        with mock.patch("fuxi_bridge.assist.random.random", return_value=0.0), \
+        with mock.patch("threading.Thread") as th, \
+             mock.patch("fuxi_bridge.assist.random.random", return_value=0.0), \
              mock.patch("fuxi_bridge.assist.time.monotonic", return_value=1000.0):
+            th.return_value.start = lambda: th.call_args.kwargs["target"]()
             b._assist("g@chatroom", p)
         self.assertTrue(p["at_me"])
         self.assertIn("反馈浮屿的问题或建议", p["text"])
+        self.assertEqual(b.send.call_count, 1)
+        self.assertEqual(b.send.call_args.args[0].chat, "wxid_owner")
+        self.assertIn("【浮屿群反馈】", b.send.call_args.args[0].text)
         # 120 秒内连发第二条不重复兜底
         p2 = {**payload("而且移动到任务栏还是有阴影，这一块底下", at=False), "sender_id": "wxid_u1"}
         with mock.patch("fuxi_bridge.assist.random.random", return_value=0.0), \
@@ -364,7 +370,8 @@ class AssistTest(unittest.TestCase):
         self.assertFalse(p3["at_me"])
         # 群友只 @ 主人报 bug → 允许兜底；@ 普通群友 → 不插嘴
         p4 = {**payload("@tixxin 建议加个导出按钮", at=False), "sender_id": "wxid_u2", "at_other": True, "at_owner_only": True}
-        with mock.patch("fuxi_bridge.assist.random.random", return_value=0.0), \
+        with mock.patch("threading.Thread"), \
+             mock.patch("fuxi_bridge.assist.random.random", return_value=0.0), \
              mock.patch("fuxi_bridge.assist.time.monotonic", return_value=1300.0):
             b._assist("g@chatroom", p4)
         self.assertTrue(p4["at_me"])

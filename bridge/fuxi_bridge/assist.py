@@ -260,6 +260,7 @@ class AssistMixin:
         payload["at_me"] = True
         self._mark_fb_ack(chat)
         self._mark_fuyu_proactive(chat)
+        self._notify_feedback(chat, payload, q)
         log.info("产品助手 %s：反馈兜底接话（未 @%s%s，概率 %d%%）",
                  self.name_of(chat), "、原 @ 主人" if owner_at else "",
                  "、重启补回" if boot_catchup else "", fb_pct)
@@ -387,13 +388,53 @@ class AssistMixin:
             log.warning("浮屿仓库信息出错：%s", e)
         return notes, sure
 
+    def owner_chat(self) -> str:
+        """通知主人的目标会话：优先发给主人个人微信（owners[0]），未配主人时回退到 filehelper。"""
+        masters = getattr(self, "masters", None) or []
+        return masters[0] if masters else "filehelper"
+
     def tell_owner(self, text: str) -> None:
-        """私聊主人（发到文件传输助手），不等结果。"""
+        """私聊主人，不等结果。"""
+        to = self.owner_chat()
+
         def go():
-            job = self.send(SendJob(chat="filehelper", text=text, source="control"))
+            job = self.send(SendJob(chat=to, text=text, source="control"))
             if not job.ok:
-                log.warning("给主人的通知没发出去：%s", job.error)
+                log.warning("给主人的通知没发出去（%s）：%s", to, job.error)
         threading.Thread(target=go, name="tell-owner", daemon=True).start()
+
+    def _notify_feedback(self, chat: str, payload: dict, q: str) -> None:
+        """群反馈兜底接住后立刻通知主人，并在反馈群场景下补跑一次归类以带上编号与操作提示。"""
+        now = time.time()
+        recent = [t for t, c in self.handoffs if now - t < 3600]
+        if len(recent) >= 10 or any(c == chat and now - t < 180 for t, c in self.handoffs):
+            return
+        self.handoffs.append((now, chat))
+        sender = payload.get("senderName") or "群友"
+        chat_name = self.name_of(chat)
+        self.events.publish("handoff", {"chat": chat, "chat_name": chat_name,
+                                        "sender": sender, "question": q[:300]})
+        to = self.owner_chat()
+
+        def go():
+            hint = "回复 /反馈 整理 可立刻归类，/反馈 看列表"
+            fb = getattr(self, "feedback", None)
+            if fb is not None and getattr(self, "is_feedback_group", lambda _c: False)(chat):
+                try:
+                    fb.classify(time.time() + 31)   # 跳过 30 秒缓冲，立即把刚收到的反馈归类出编号
+                except Exception as e:
+                    log.debug("反馈即时归类失败：%s", e)
+                items = [it for it in getattr(fb, "items", []) if chat in (it.get("chats") or [])]
+                if items:
+                    latest = max(items, key=lambda it: it.get("last_seen", 0))
+                    if time.time() - latest.get("last_seen", 0) <= 7200:
+                        iid = latest["id"]
+                        hint = f"已归类为反馈 #{iid}「{latest['title']}」\n回复 /反馈 {iid} 看详情，/开issue {iid} 开 issue，/修 {iid} 派代理修"
+            text = f"【浮屿群反馈】{sender} 在「{chat_name}」反馈：\n{q[:300]}\n\n{hint}"
+            job = self.send(SendJob(chat=to, text=text, source="control"))
+            if not job.ok:
+                log.warning("群反馈通知没发出去（%s）：%s", to, job.error)
+        threading.Thread(target=go, name="fb-notify", daemon=True).start()
 
     def _handoff(self, chat: str, payload: dict, q: str) -> None:
         now = time.time()
@@ -406,10 +447,11 @@ class AssistMixin:
                                         "sender": payload.get("senderName") or "", "question": q[:300]})
         text = (f"【浮屿群求助】{payload.get('senderName') or '有人'} 在「{self.name_of(chat)}」问：\n{q[:300]}\n"
                 "资料里没找到相关内容，可能需要你来回。")
+        to = self.owner_chat()
 
         def go():
-            job = self.send(SendJob(chat="filehelper", text=text, source="control"))
+            job = self.send(SendJob(chat=to, text=text, source="control"))
             if not job.ok:
-                log.warning("转人工通知没发出去：%s", job.error)
+                log.warning("转人工通知没发出去（%s）：%s", to, job.error)
         threading.Thread(target=go, name="handoff", daemon=True).start()
-        log.info("产品助手 %s：资料里没找到，已转主人", self.name_of(chat))
+        log.info("产品助手 %s：资料里没找到，已转主人（%s）", self.name_of(chat), self.name_of(to) if to != "filehelper" else "filehelper")

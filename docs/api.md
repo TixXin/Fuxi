@@ -103,14 +103,16 @@ curl -s -H "Authorization: Bearer $T" -H "Content-Type: application/json" \
 
 ### `POST /announce`、`GET /announce?key=`
 
-要人确认的群发（浮屿发版公告）：先发到文件传输助手预览，主人在那里回 `/发布 编号` 才真的发到群。
+浮屿发版公告：收到就直接发到发版群（`/设置 发版群`）。打开 `/设置 发版公告预览 开` 后改成先发到文件传输助手预览，
+主人在那里回 `/发布 编号` 才真的发到群。
 
 ```json
 {"key": "fuyu-v1.2.3", "text": "浮屿 v1.2.3 已更新…", "image_base64": "<png>", "to": "可省，默认用 /设置 发版群"}
 ```
 
 → `{"ok": true, "created": true, "item": {"key", "code", "to", "status", "status_zh"}}`。`key` 是幂等键：
-同一个 key 再调只返回原记录（`created: false`），不会重复预览或重复发群。`status`：`pending` 等确认、
+同一个 key 再调只返回原记录（`created: false`），不会重复预览或重复发群。直接发时返回的 `status` 已是 `sent` 或 `failed`。
+`status`：`pending` 等确认、
 `sent` 已发出、`cancelled`、`expired`（24 小时没确认）、`failed`（发了一半不会自动重试，避免刷屏）。
 遥控：`/待发` 列出、`/发布 [编号]`、`/取消 [编号]`。
 
@@ -134,5 +136,6 @@ python3 -c 'import base64,json;print(json.dumps({"chat_id":"123@chatroom","text"
    ```
 4. CI 里照常用 `share-push`：它执行的命令会被强制命令替换掉，JSON 照样从 stdin 进，网关只转给 `POST /announce`。
 
-这把钥匙泄露的最坏结果：往主人的文件传输助手塞公告预览（要主人回 `/发布` 才进群），发不了别的、也读不到东西。
+这把钥匙泄露的最坏结果：往发版群发公告（打开「发版公告预览」后只能往主人的文件传输助手塞预览），发不了别的、也读不到东西。
+放到 CI 前建议打开预览。
 不用了就删掉 `authorized_keys` 那一行。网关每次被调用会写一条系统日志（`journalctl -t fuxi-announce-gateway`）。

@@ -10,7 +10,7 @@
   GET  /settings                     全部行为设置 {items: [{key, label, type, value, default, desc, choices, kernel}]}
   POST /settings {"key": 值, ...}    修改（立即生效）；→ {ok, items} 或 {ok:false, error}
   POST /announce {key, text?, image_base64?, image_name?, to?|chat_id?}
-       先发到文件传输助手预览，主人回 /发布 才发群；key 幂等（见 announce.py）→ {ok, created, item}
+       直接发到发版群（设置「发版公告预览」开着时先预览、主人回 /发布 才发）；key 幂等（见 announce.py）→ {ok, created, item}
   GET  /announce?key=...             查公告状态
   GET  /fuyu                         浮屿仓库同步状态 {brief, version, latest, events}；?issue=N 查进度；?q=文字 找相关 issue
   GET  /chats?q=关键词                按备注/昵称/群名模糊搜，返回 [{chat_id, name, remark, isGroup}]
@@ -288,10 +288,11 @@ def serve(bridge: "Bridge") -> None:
                 text = body.get("text")
                 try:
                     it, created = bridge.announcer.create(str(body.get("key") or ""), chat,
-                                                          str(text) if text else None, image, ext)
+                                                          str(text) if text else None, image, ext,
+                                                          confirm=bool(bridge.cfg.get("announce_confirm")))
                 except AnnounceError as e:
                     return self._json(e.code, {"ok": False, "error": str(e)})
-                log.warning("公告 %s：%s", it["key"], "已发预览，等确认" if created else f"已存在（{it['status']}）")
+                log.warning("公告 %s：%s", it["key"], f"新建（{it['status']}）" if created else f"已存在（{it['status']}）")
                 return self._json(200, {"ok": True, "created": created, "item": bridge.announcer.public(it)})
             if urlparse(self.path).path == "/resume":
                 return self._json(200, {"ok": True, "was": handlers.resume(bridge)})

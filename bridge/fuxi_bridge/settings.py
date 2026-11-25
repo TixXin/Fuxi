@@ -105,6 +105,8 @@ ITEMS: list[Item] = [
     Item("agent_token_expires", "代理凭据到期", "text", "", "浮屿仓库 secret CLAUDE_CODE_OAUTH_TOKEN 的到期日（如 2027-11-24），"
          "到期前 14 天每天提醒；空 = 不提醒（开 issue 的 token 到期日自动从 GitHub 读）"),
     Item("announce_to", "发版群", "text", "", "发版公告（POST /announce）默认发到哪个群：群名或 chat_id；空 = 调用方必须指定"),
+    Item("announce_confirm", "发版公告预览", "bool", False,
+         "开 = 发版公告先发到文件传输助手预览，回 /发布 才进群；关 = 收到就直接发到发版群"),
     Item("reply_scope", "回复范围", "choice", "list",
          "除了白名单里的会话，还回哪些。放宽后陌生人也能和 bot 聊、会多花模型费用，也更容易被微信风控，建议先只开私聊观察；"
          "群里仍按人设的群聊策略（默认被 @ 才回）",

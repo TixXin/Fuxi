@@ -1,4 +1,5 @@
-"""要人确认的群发（浮屿发版公告等）：先发到文件传输助手预览，主人回 /发布 才真发。
+"""群发公告（浮屿发版公告、修复通知）：默认先发到文件传输助手预览，主人回 /发布 才真发；
+create(..., confirm=False) 跳过预览直接发（/announce 在「发版公告预览」关着时这样调）。
 
   POST /announce {key, text?, image_base64?, image_name?, to?, chat_id?}
        key 是幂等键（如 fuyu-v1.2.3）：同一个 key 再调只返回原状态，不会重复预览/重复发群。
@@ -90,8 +91,8 @@ class Announcer:
 
     # ---- 新建：存起来、发预览 ----
     def create(self, key: str, chat: str, text: str | None, image: bytes | None, image_ext: str = ".png",
-               at: str = "") -> tuple[dict, bool]:
-        """返回 (记录, 是否新建)。同 key 已存在时原样返回，不再预览。"""
+               at: str = "", confirm: bool = True) -> tuple[dict, bool]:
+        """返回 (记录, 是否新建)。同 key 已存在时原样返回，不再预览也不再发。"""
         key = (key or "").strip()
         if not key or len(key) > 128:
             raise AnnounceError("需要 key（幂等键，128 字以内）")
@@ -114,6 +115,8 @@ class Announcer:
                   "at": at}
             self.items[key] = it
             self._save()
+        if not confirm:
+            return self.publish(code), True
         try:
             self._preview(it)
         except Exception as e:   # 预览没发出去：记录还在，主人仍可 /待发 → /发布
@@ -161,7 +164,7 @@ class Announcer:
             it["status"] = "sending"   # 防止并发的第二次 /发布
         chat = it["chat_id"]
         if not self.b.allowlist.allows(chat):
-            log.info("公告目标 %s 不在白名单，按主人确认照发", it["to"])
+            log.info("公告目标 %s 不在白名单，照发（主人确认或已关预览）", it["to"])
         results = []
         if it.get("image"):
             results.append(self.b.send(SendJob(chat=chat, image=it["image"], source="api")))

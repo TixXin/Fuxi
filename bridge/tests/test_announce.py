@@ -1,4 +1,4 @@
-"""发版公告：预览 → /发布 才发群；幂等键；过期；失败不重试。"""
+"""发版公告：预览 → /发布 才发群，或直接发；幂等键；过期；失败不重试。"""
 
 import os
 import tempfile
@@ -43,6 +43,21 @@ class AnnounceTest(unittest.TestCase):
         self.assertEqual(it["status"], "sent")
         self.assertEqual(self.b.sent, [("g@chatroom", None, True, "api"), ("g@chatroom", "浮屿 v1.2.3 已更新", False, "api")])
         self.assertFalse(os.path.exists(os.path.join(self.root, os.path.basename(it["image"]))))
+
+    def test_direct_skips_preview(self):
+        it, created = self.a.create("fuyu-v1.2.4", "g@chatroom", "浮屿 v1.2.4 已更新", b"png", ".png", confirm=False)
+        self.assertTrue(created)
+        self.assertEqual(it["status"], "sent")
+        self.assertEqual(self.b.sent, [("g@chatroom", None, True, "api"), ("g@chatroom", "浮屿 v1.2.4 已更新", False, "api")])
+        self.b.sent.clear()
+        it, created = self.a.create("fuyu-v1.2.4", "g@chatroom", "again", None, confirm=False)
+        self.assertEqual((created, it["status"], self.b.sent), (False, "sent", []))
+
+    def test_direct_failure_recorded(self):
+        self.b.fail_on = lambda j: True
+        it, _ = self.a.create("y", "g@chatroom", "字", None, confirm=False)
+        self.assertEqual(it["status"], "failed")
+        self.assertEqual(self.a.pending(), [])
 
     def test_idempotent_key(self):
         self.a.create("k", "g@chatroom", "hi", None)

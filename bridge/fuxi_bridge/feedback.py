@@ -437,6 +437,38 @@ class Feedback:
             it.update(kw)
             self._save()
 
+    def claim(self, iid: int, by: str = "", branch: str = "", note: str = "") -> dict | None:
+        with self._lock:
+            it = self.get(iid)
+            if not it:
+                return None
+            it["status"] = "in_progress"
+            it["claimed_by"] = (by or "local-agent").strip()[:60]
+            it["claimed_at"] = time.time()
+            if branch:
+                it["claimed_branch"] = branch.strip()[:120]
+            if note:
+                it["claimed_note"] = note.strip()[:300]
+            self._save()
+            return it
+
+    def done(self, iid: int, pr: int | None = None, issue: int | None = None, note: str = "") -> dict | None:
+        with self._lock:
+            it = self.get(iid)
+            if not it:
+                return None
+            it["status"] = "fixed"
+            it["done_at"] = time.time()
+            if pr:
+                it["agent_pr"] = int(pr)
+                it["agent_done"] = True
+            if issue:
+                it["issue"] = int(issue)
+            if note:
+                it["done_note"] = note.strip()[:300]
+            self._save()
+            return it
+
     def progress(self, it: dict) -> str:
         """给主人看的进度（带 issue 编号）。"""
         if it.get("issue") and self.fuyu:
@@ -444,15 +476,26 @@ class Feedback:
                 return self.fuyu.status(it["issue"])
             except Exception:
                 pass
-        return {"new": "新问题，GitHub 上还没有对应 issue", "known": "已记下", "answered": "群里已解答", "fixed": f"已在 {it.get('fixed_in')} 修复",
+        if it["status"] == "in_progress":
+            who = f"（{it['claimed_by']}）" if it.get("claimed_by") else ""
+            return f"正在处理中{who}"
+        if it["status"] == "fixed":
+            if it.get("fixed_in"):
+                return f"已在 {it['fixed_in']} 修复"
+            if it.get("agent_pr"):
+                return f"已处理（PR #{it['agent_pr']}）"
+            return "已处理，等待发版"
+        return {"new": "新问题，GitHub 上还没有对应 issue", "known": "已记下", "answered": "群里已解答",
                 "ignored": "已忽略"}.get(it["status"], it["status"])
 
     def public_state(self, it: dict) -> str:
         """给群里看的处理状态：不带 issue 编号和人名。"""
         if it["status"] == "answered":
             return "已在群里解答"
-        if it["status"] == "fixed" and it.get("fixed_in"):
-            return f"已在 {it['fixed_in']} 修复，更新到最新版即可"
+        if it["status"] == "in_progress":
+            return "正在处理中"
+        if it["status"] == "fixed":
+            return f"已在 {it['fixed_in']} 修复，更新到最新版即可" if it.get("fixed_in") else "已修好，会在下个版本发布"
         if it.get("issue") and self.fuyu:
             try:
                 s = self.fuyu.status(it["issue"])
@@ -483,6 +526,9 @@ class Feedback:
                  + (f"；附图 {img_cnt} 张" if img_cnt else ""),
                  f"首次 {time.strftime('%m-%d %H:%M', time.localtime(it['first_seen']))}，"
                  f"最近 {time.strftime('%m-%d %H:%M', time.localtime(it['last_seen']))}",
+                 f"认领：{it['claimed_by']}" + (f"（分支 {it['claimed_branch']}）" if it.get("claimed_branch") else "")
+                 if it.get("status") == "in_progress" and it.get("claimed_by") else "",
+                 f"结单备注：{it['done_note']}" if it.get("done_note") else "",
                  "进度：" + self.progress(it),
                  self._agent_line(it)]
         if it["quotes"]:
@@ -536,7 +582,18 @@ class Feedback:
     def _line(self, it: dict) -> str:
         n = len(it["reporters"])
         heat = f"（{n} 人）" if n > 1 else ""
-        tag = f" → issue #{it['issue']}" if it.get("issue") else (" → 群里已解答" if it["status"] == "answered" else " → 新")
+        if it.get("status") == "in_progress":
+            who = f"({it['claimed_by']})" if it.get("claimed_by") else ""
+            tag = f" → 处理中{who}" + (f" / issue #{it['issue']}" if it.get("issue") else "")
+        elif it.get("status") == "fixed":
+            extra = f"PR #{it['agent_pr']}" if it.get("agent_pr") else (f"issue #{it['issue']}" if it.get("issue") else "")
+            tag = f" → 已处理" + (f"（{extra}）" if extra else "")
+        elif it.get("issue"):
+            tag = f" → issue #{it['issue']}"
+        elif it["status"] == "answered":
+            tag = " → 群里已解答"
+        else:
+            tag = " → 新"
         return f"{fb_code(it['id'])} [{CATEGORIES[it['category']]}] {it['title']}{heat}{tag}"
 
     # ---- 摘要与小结 ----

@@ -134,6 +134,44 @@ def serve(bridge: "Bridge") -> None:
                 snap = bridge.remote.nodes_snapshot() if hasattr(bridge, "remote") else {}
                 active = dict(bridge.remote.active) if hasattr(bridge, "remote") and bridge.remote.active else None
                 return self._json(200, {"ok": True, "nodes": snap, "active": active})
+            if u.path == "/feedback":
+                qs = parse_qs(u.query)
+                days = max(1, min(int((qs.get("days") or ["14"])[0]), 90))
+                ignored = (qs.get("ignored") or ["0"])[0] in ("1", "true", "yes")
+                status = (qs.get("status") or [""])[0].strip()
+                sync_res = ""
+                if (qs.get("sync") or ["0"])[0] in ("1", "true", "yes"):
+                    try:
+                        sync_res = bridge.feedback.classify(__import__("time").time() + 31)
+                    except Exception as e:
+                        sync_res = f"整理失败：{e}"
+                data = handlers.feedback_list(bridge, days=days, ignored=ignored, status=status)
+                if sync_res:
+                    data["sync_result"] = sync_res
+                return self._json(200, {"ok": True, **data})
+            m_fb = re.fullmatch(r"/feedback/(\d+)", u.path)
+            if m_fb:
+                try:
+                    return self._json(200, {"ok": True, "item": handlers.feedback_get(bridge, int(m_fb.group(1)))})
+                except handlers.HandlerError as e:
+                    return self._json(e.code, {"ok": False, "error": str(e)})
+            m_med = re.fullmatch(r"/feedback/(\d+)/media/([^/]+)", u.path)
+            if m_med:
+                it = bridge.feedback.get(int(m_med.group(1)))
+                fname = m_med.group(2)
+                if not it or fname not in (it.get("images") or []):
+                    return self._json(404, {"ok": False, "error": "找不到该截图"})
+                fp = bridge.feedback.media_path(fname)
+                if not fp:
+                    return self._json(404, {"ok": False, "error": "截图文件不存在"})
+                with open(fp, "rb") as f:
+                    raw_img = f.read()
+                self.send_response(200)
+                self.send_header("Content-Type", "image/jpeg")
+                self.send_header("Content-Length", str(len(raw_img)))
+                self.end_headers()
+                self.wfile.write(raw_img)
+                return
             if u.path == "/chats":
                 q = (parse_qs(u.query).get("q") or [""])[0].strip()
                 if not q:
@@ -280,6 +318,30 @@ def serve(bridge: "Bridge") -> None:
                 )
                 return self._json(200, res)
             path = urlparse(self.path).path
+            if path == "/feedback/classify":
+                try:
+                    res = bridge.feedback.classify(__import__("time").time() + 31)
+                except Exception as e:
+                    return self._json(502, {"ok": False, "error": str(e)})
+                return self._json(200, {"ok": True, "result": res})
+            m_fb_act = re.fullmatch(r"/feedback/(\d+)/(claim|done|ignore|unignore)", path)
+            if m_fb_act:
+                iid = int(m_fb_act.group(1))
+                act = m_fb_act.group(2)
+                body = self._body() if int(self.headers.get("Content-Length") or 0) > 0 else {}
+                if body is None:
+                    return
+                try:
+                    if act == "claim":
+                        item = handlers.feedback_claim(bridge, iid, body)
+                        return self._json(200, {"ok": True, "item": item})
+                    if act == "done":
+                        item = handlers.feedback_done(bridge, iid, body)
+                        return self._json(200, {"ok": True, "item": item})
+                    res = handlers.feedback_ignore(bridge, iid, on=(act == "ignore"))
+                    return self._json(200, {"ok": True, **res})
+                except handlers.HandlerError as e:
+                    return self._json(e.code, {"ok": False, "error": str(e)})
             m = re.fullmatch(r"/schedule/(\d+)/cancel", path)
             if m:
                 try:

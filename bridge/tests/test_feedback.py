@@ -246,6 +246,22 @@ class WiringTest(unittest.TestCase):
         self.assertIn("已忽略", self.c.ignore("FB-1"))
         self.assertEqual(self.c.ignore("x"), "用法：/ignore 3（或 FB-3）")
 
+    def test_claim_and_done_lifecycle(self):
+        from fuxi_bridge import handlers
+        self.b._collect([self.msg(1, "设置页一点就闪退")])
+        self.b.feedback.classify(DAY + 9 * 3600 + 60)
+        it = handlers.feedback_claim(self.b, 1, {"by": "MacBook", "branch": "fix/settings-crash", "note": "排查中"})
+        self.assertEqual(it["status"], "in_progress")
+        self.assertEqual(it["claimed_by"], "MacBook")
+        self.assertIn("处理中(MacBook)", self.b.feedback._line(self.b.feedback.get(1)))
+        self.assertEqual(self.b.feedback.public_state(self.b.feedback.get(1)), "正在处理中")
+
+        it2 = handlers.feedback_done(self.b, 1, {"pr": "1299", "note": "已修复并提 PR"})
+        self.assertEqual(it2["status"], "fixed")
+        self.assertEqual(it2["agent_pr"], 1299)
+        self.assertIn("PR #1299", self.b.feedback._line(self.b.feedback.get(1)))
+        self.assertEqual(handlers.feedback_get(self.b, 1)["done_note"], "已修复并提 PR")
+
 
 if __name__ == "__main__":
     unittest.main()

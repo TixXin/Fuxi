@@ -384,28 +384,76 @@ def announce_act(b: "Bridge", code: str, action: str, confirm: bool = False) -> 
     return b.announcer.public(it)
 
 
+def _feedback_row(fb, it: dict, quote_limit: int = 5) -> dict:
+    from .feedback import CATEGORIES, fb_code
+    try:
+        progress = fb.progress(it)
+    except Exception:
+        progress = ""
+    imgs = [fn for fn, _ in fb.image_paths(it)]
+    return ({k: it.get(k) for k in ("id", "category", "title", "detail", "platform", "status", "first_seen",
+                                    "last_seen", "count", "issue", "fixed_in", "claimed_by", "claimed_at",
+                                    "claimed_branch", "claimed_note", "done_at", "done_note", "agent_pr")}
+            | {"code": fb_code(it["id"]),
+               "category_zh": CATEGORIES.get(it["category"], it["category"]),
+               "reporters": [r.get("name") or "" for r in it.get("reporters", [])],
+               "quotes": it.get("quotes", [])[-quote_limit:],
+               "images": imgs,
+               "image_count": len(imgs),
+               "progress": progress,
+               "agent": fb._agent_line(it)})
+
+
 # ---- 群反馈 ----
-def feedback_list(b: "Bridge", days: int = 30, ignored: bool = False) -> dict:
-    from .feedback import CATEGORIES
+def feedback_list(b: "Bridge", days: int = 30, ignored: bool = False, status: str = "") -> dict:
     fb = b.feedback
     cut = time.time() - days * 86400
     items = [i for i in fb.items if i["last_seen"] >= cut and (ignored or i["status"] != "ignored")]
+    if status:
+        want = {s.strip() for s in status.split(",") if s.strip()}
+        items = [i for i in items if i.get("status") in want]
     items.sort(key=lambda i: -i["last_seen"])
-    rows = []
-    for it in items[:200]:
-        try:
-            progress = fb.progress(it)
-        except Exception:
-            progress = ""
-        rows.append({k: it.get(k) for k in ("id", "category", "title", "detail", "platform", "status", "first_seen",
-                                             "last_seen", "count", "issue", "fixed_in")}
-                    | {"category_zh": CATEGORIES.get(it["category"], it["category"]),
-                       "reporters": [r.get("name") or "" for r in it.get("reporters", [])],
-                       "quotes": it.get("quotes", [])[-5:], "progress": progress,
-                       "agent": fb._agent_line(it)})
+    rows = [_feedback_row(fb, it, quote_limit=5) for it in items[:200]]
     return {"items": rows, "brief": fb.brief(), "groups": b.cfg.get("feedback_groups") or [],
             "classifying": getattr(fb, "classifying", False), "last_error": fb.meta.get("last_error", ""),
             "digest_time": b.cfg.get("digest_time"), "group_summary_time": b.cfg.get("group_summary_time")}
+
+
+def feedback_get(b: "Bridge", iid: int) -> dict:
+    fb = b.feedback
+    it = fb.get(iid)
+    if not it:
+        raise HandlerError(f"没有 #{iid}", 404)
+    return _feedback_row(fb, it, quote_limit=20)
+
+
+def feedback_claim(b: "Bridge", iid: int, body: dict) -> dict:
+    fb = b.feedback
+    it = fb.claim(
+        iid,
+        by=str(body.get("by") or "local-agent"),
+        branch=str(body.get("branch") or ""),
+        note=str(body.get("note") or ""),
+    )
+    if not it:
+        raise HandlerError(f"没有 #{iid}", 404)
+    if hasattr(b, "events"):
+        b.events.publish("feedback", {"id": iid})
+    return _feedback_row(fb, it, quote_limit=20)
+
+
+def feedback_done(b: "Bridge", iid: int, body: dict) -> dict:
+    fb = b.feedback
+    pr_raw = body.get("pr")
+    issue_raw = body.get("issue")
+    pr = int(pr_raw) if str(pr_raw or "").isdigit() else None
+    issue = int(issue_raw) if str(issue_raw or "").isdigit() else None
+    it = fb.done(iid, pr=pr, issue=issue, note=str(body.get("note") or ""))
+    if not it:
+        raise HandlerError(f"没有 #{iid}", 404)
+    if hasattr(b, "events"):
+        b.events.publish("feedback", {"id": iid})
+    return _feedback_row(fb, it, quote_limit=20)
 
 
 def feedback_ignore(b: "Bridge", iid: int, on: bool = True) -> dict:

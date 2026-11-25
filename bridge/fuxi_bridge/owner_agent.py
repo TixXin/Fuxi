@@ -59,11 +59,11 @@ ROUTER_SYSTEM = """你是「浮汐」（Fuxi，一个微信 AI 助手）的【�
 可用工具白名单：
 - feedback_sync: {} — 立刻把反馈群新消息和刚收到的截图归类成反馈条目
 - feedback_list: {"days":7} — 列出最近 N 天群反馈
-- feedback_detail: {"fb_id":1} — 查看某条反馈详情（fb_id 为整数）
-- feedback_ignore: {"fb_id":1} — 忽略某条反馈
-- feedback_attach_images: {"fb_id":0,"count":1,"upload_if_issue":true} — 把本会话最近 count 张截图补挂到 fb_id（fb_id=0 表示自动选最近一条反馈，必要时先归类）；若该反馈已开 issue 则顺带上传补评论
-- issue_open: {"fb_id":0,"noimg":false,"note":""} — 预览为反馈开 GitHub issue（不派修；fb_id=0 自动选最近一条）
-- issue_fix: {"fb_id":0,"target":"cloud","mode":"bg","noimg":false,"note":""} — 预览开 issue 并派修；target 为 cloud|mac|win，mode 为 bg|fg（fg=弹窗终端）
+- feedback_detail: {"fb_id":0,"query":""} — 查看某条反馈详情（知道编号填 fb_id；只提主题词如「日历」时 fb_id=0 且填 query）
+- feedback_ignore: {"fb_id":0,"query":""} — 忽略某条反馈
+- feedback_attach_images: {"fb_id":0,"query":"","count":1,"upload_if_issue":true} — 把本会话最近 count 张截图补挂到目标反馈（fb_id=0 时按 query 匹配，如「日历」）；若已开 issue 顺带上传补评论
+- issue_open: {"fb_id":0,"query":"","noimg":false,"note":""} — 预览为反馈开 GitHub issue（不派修；提到主题词时必填 query，不要把主题名塞进 note）
+- issue_fix: {"fb_id":0,"query":"","target":"cloud","mode":"bg","noimg":false,"note":""} — 预览开 issue 并派修；target 为 cloud|mac|win，mode 为 bg|fg（fg=弹窗终端）；提到主题词时必填 query，note 只放额外开发/流程要求（如「修完自动跑 mq:verify」）
 - persona_add_rule: {"rule":"一句话行为准则"} — 主人纠正浮汐的说话方式/习惯（如「以后别老问系统版本」），永久写入人设规则
 - persona_undo_rule: {} — 撤销上一次修改的人设规则
 - persona_list_rules: {} — 查看当前人设行为准则
@@ -82,7 +82,8 @@ ROUTER_SYSTEM = """你是「浮汐」（Fuxi，一个微信 AI 助手）的【�
 示例：
 - 主人说「别老是问别人系统和 fuyu 版本是啥」→ {"mode":"act","calls":[{"tool":"persona_add_rule","args":{"rule":"有人报 bug 或提建议时不要老追问系统版本、浮屿版本号或复现步骤，简短确认记下转给开发者即可"}}]}
 - 主人说「把这个截图补上」→ {"mode":"act","calls":[{"tool":"feedback_attach_images","args":{"fb_id":0,"count":1,"upload_if_issue":true}}]}
-- 主人说「把刚才那个日历需求开个 issue 让 mac 前台修」→ {"mode":"act","calls":[{"tool":"feedback_sync","args":{}},{"tool":"issue_fix","args":{"fb_id":0,"target":"mac","mode":"fg"}}]}
+- 主人说「把刚才那个日历需求开个 issue 让 mac 前台修」→ {"mode":"act","calls":[{"tool":"feedback_sync","args":{}},{"tool":"issue_fix","args":{"fb_id":0,"query":"日历","target":"mac","mode":"fg"}}]}
+- 主人说「把刚才那个日历需求开个 issue 让 mac 前台修 修完自动测试自动提 PR」→ {"mode":"act","calls":[{"tool":"feedback_sync","args":{}},{"tool":"issue_fix","args":{"fb_id":0,"query":"日历","target":"mac","mode":"fg","note":"修完自动测试并提 PR"}}]}
 - 主人说「建任务了没 没有的话就 create」→ {"mode":"act","calls":[{"tool":"issue_open","args":{"fb_id":0}}]}
 - 主人说「你分析下这个问题什么原因导致的 怎么解决」→ {"mode":"chat"}
 - 主人说「群里插话概率调成 3」→ {"mode":"act","calls":[{"tool":"setting_set","args":{"key":"free_chat_pct","value":"3"}}]}
@@ -245,16 +246,64 @@ class OwnerAgent:
         return "\n\n".join(parts)
 
     # ---------- 工具执行 ----------
-    def _resolve_fb_item(self, chat: str, fb_id_raw) -> dict | None:
+    def _resolve_fb_item(self, chat: str, fb_id_raw, query: str = "") -> dict | None:
         fb = self.b.feedback
         iid = fb_mod.parse_fb_id(str(fb_id_raw)) if fb_id_raw not in (None, "", 0, "0") else None
         if iid:
             return fb.get(iid)
-        # fb_id=0/未指定：选当前会话（或全局）最近一条未忽略反馈
         cands = [i for i in fb.items if i.get("status") != "ignored"]
         in_chat = [i for i in cands if chat in (i.get("chats") or [])]
         pool = in_chat or cands
-        return max(pool, key=lambda i: i.get("last_seen", 0)) if pool else None
+        if not pool:
+            return None
+        q = (query or "").strip()
+        if q:
+            q_low = q.lower()
+            # 去掉常见泛词后再按字面/二元切词打分，确保「日历需求」精准命中「日历」条目而非最新的其他反馈
+            core = re.sub(r"需求|问题|建议|反馈|功能|一下|刚才|那个|这个|bug", "", q_low).strip() or q_low
+            toks = [t for t in re.findall(r"[a-z0-9_]+|[\u4e00-\u9fff]{2,}", core) if t]
+            if not toks and len(core) >= 2:
+                toks = [core]
+            # 补充中文 2-gram 提高模糊命中率
+            grams = set(toks)
+            for t in toks:
+                if re.fullmatch(r"[\u4e00-\u9fff]+", t) and len(t) > 2:
+                    for idx in range(len(t) - 1):
+                        grams.add(t[idx:idx + 2])
+
+            def score(it: dict) -> tuple[int, float]:
+                title = (it.get("title") or "").lower()
+                detail = (it.get("detail") or "").lower()
+                quotes = " ".join(it.get("quotes") or []).lower()
+                s = 0
+                if core in title:
+                    s += 10
+                elif core in detail:
+                    s += 6
+                elif core in quotes:
+                    s += 3
+                for g in grams:
+                    if g in title:
+                        s += 4
+                    elif g in detail:
+                        s += 2
+                    elif g in quotes:
+                        s += 1
+                return s, float(it.get("last_seen") or 0)
+
+            ranked = sorted(pool, key=score, reverse=True)
+            if score(ranked[0])[0] > 0:
+                return ranked[0]
+            return None
+        return max(pool, key=lambda i: i.get("last_seen", 0))
+
+    def _not_found_fb(self, query: str) -> str:
+        fb = self.b.feedback
+        recent = sorted((i for i in fb.items if i.get("status") != "ignored"), key=lambda i: -i.get("last_seen", 0))[:5]
+        tip = "\n最近反馈：\n" + "\n".join(f"- {fb_mod.fb_code(i['id'])} {i['title']}" for i in recent) if recent else ""
+        if query:
+            return f"没找到和「{query}」匹配的反馈条目。请直接指定编号（如 /fix 编号 mac fg）。{tip}"
+        return f"没找到对应的反馈条目（发 /fb 看列表）。{tip}"
 
     def _recent_image_files(self, chat: str, count: int) -> list[str]:
         """从最近 1 小时的消息里找最新 count 张图片，确保已解密保存到 /state/feedback/media/。"""
@@ -319,23 +368,26 @@ class OwnerAgent:
             return b.feedback.listing(days=days)
 
         if tool == "feedback_detail":
-            it = self._resolve_fb_item(chat, args.get("fb_id"))
-            return b.feedback.detail(it["id"]) if it else "没找到对应的反馈（发 /fb 看列表）。"
+            q = str(args.get("query") or "").strip()
+            it = self._resolve_fb_item(chat, args.get("fb_id"), query=q)
+            return b.feedback.detail(it["id"]) if it else self._not_found_fb(q)
 
         if tool == "feedback_ignore":
-            it = self._resolve_fb_item(chat, args.get("fb_id"))
-            return b.feedback.ignore(it["id"]) if it else "没找到要忽略的反馈。"
+            q = str(args.get("query") or "").strip()
+            it = self._resolve_fb_item(chat, args.get("fb_id"), query=q)
+            return b.feedback.ignore(it["id"]) if it else self._not_found_fb(q)
 
         if tool == "feedback_attach_images":
+            q = str(args.get("query") or "").strip()
             # 若还没归类，先立刻归类一次，避免刚发的反馈还没进 items.json
             if not args.get("fb_id"):
                 try:
                     b.feedback.classify(time.time() + 31)
                 except Exception:
                     pass
-            it = self._resolve_fb_item(chat, args.get("fb_id"))
+            it = self._resolve_fb_item(chat, args.get("fb_id"), query=q)
             if not it:
-                return "没找到可补图的反馈条目（先发 /fb sync 整理一下再试）。"
+                return self._not_found_fb(q)
             cnt = int(args.get("count") or 1)
             files = self._recent_image_files(chat, cnt)
             if not files:
@@ -376,14 +428,15 @@ class OwnerAgent:
 
         if tool in ("issue_open", "issue_fix"):
             is_fix = (tool == "issue_fix")
+            q = str(args.get("query") or "").strip()
             if not args.get("fb_id"):
                 try:
                     b.feedback.classify(time.time() + 31)
                 except Exception:
                     pass
-            it = self._resolve_fb_item(chat, args.get("fb_id"))
+            it = self._resolve_fb_item(chat, args.get("fb_id"), query=q)
             if not it:
-                return "没找到对应的反馈条目（发 /fb 看列表）。"
+                return self._not_found_fb(q)
             target = str(args.get("target") or "cloud").lower()
             if target not in ("cloud", "mac", "win"):
                 target = "cloud"

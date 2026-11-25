@@ -129,6 +129,27 @@ class OwnerAgentTest(unittest.TestCase):
         self.assertIn("已记入知识库常见问答", out2)
         self.assertEqual(len(b.knowledge.faq_list()), 1)
 
+    def test_issue_fix_matches_query_instead_of_latest_unrelated(self):
+        b, ag = make_bridge()
+        # 新增一条更新时间更晚的无关反馈 FB-9（反重力）
+        b.feedback.items.append({
+            "id": 9, "category": "question", "title": "弹窗点允许后回到Antigravity再确认是否正常",
+            "detail": "反重力审批 hook", "platform": "未知", "status": "new",
+            "first_seen": time.time() - 5, "last_seen": time.time() - 1, "count": 1,
+            "reporters": [{"wxid": "wxid_u1", "name": "群友A"}], "quotes": ["16:06 群友A：反重力"],
+            "issue": None, "issue_score": 0, "chats": ["g@chatroom"],
+        })
+        b.kernel.complete.return_value = '{"mode":"act","calls":[{"tool":"issue_fix","args":{"fb_id":0,"query":"日历","target":"mac","mode":"fg"}}]}'
+        prev = ag.maybe_handle("g@chatroom", p("@浮汐 把刚才那个日历需求开个 issue 让 mac 前台修"))
+        self.assertIn("日历支持国际节日", prev)
+        self.assertIn("FB-7", prev)
+        self.assertNotIn("Antigravity", prev)
+
+        # 关键词不匹配任何反馈时不乱抓最新一条
+        b.kernel.complete.return_value = '{"mode":"act","calls":[{"tool":"issue_fix","args":{"fb_id":0,"query":"蓝牙耳机","target":"mac","mode":"fg"}}]}'
+        miss = ag.maybe_handle("g@chatroom", p("@浮汐 把蓝牙耳机那个开 issue"))
+        self.assertIn("没找到和「蓝牙耳机」匹配的反馈", miss)
+
     def test_router_returns_chat_falls_through(self):
         b, ag = make_bridge()
         b.kernel.complete.return_value = '{"mode":"chat"}'

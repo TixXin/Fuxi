@@ -255,7 +255,7 @@ class AssistMixin:
         if notes:
             tail += "\n\n（浮屿仓库的相关记录，对不上就别提）\n" + "\n".join(notes)
         tail += ("\n\n（群友在反馈浮屿的问题或建议，没直接 @ 你，开发者暂时没回复；"
-                 "请自然接住情绪、简短确认你已经记下转给开发者；如果是 bug 且对方没说系统和浮屿版本，可以顺口轻问一句，别用客服腔）")
+                 "请自然接住、简短确认已经记下转给开发者即可；不要动不动追问对方的系统版本、浮屿版本号或复现步骤，别用客服腔）")
         payload["text"] = _fit_append(payload["text"], "", "", tail)
         payload["at_me"] = True
         self._mark_fb_ack(chat)

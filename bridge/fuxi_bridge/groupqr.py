@@ -401,7 +401,8 @@ class GroupQr:
             return f"仓库里的码有效到 {st['expires']}，还不用换"
         today = dt.date.fromtimestamp(now)
         shot = self.capture()
-        if shot["url"] == old_url or (shot["expires"] and st["expires"] and shot["expires"].isoformat() <= st["expires"]):
+        if shot["url"] == old_url or (not force and shot["expires"] and st["expires"]
+                                      and shot["expires"].isoformat() <= st["expires"]):
             if nightly:
                 st["done_day"] = today.isoformat()
                 self._save()
@@ -620,7 +621,7 @@ class GroupQr:
             lines.append(f"上次换码：{st['last_pr']}")
         if st.get("last_error"):
             lines.append(f"上次出错：{st['last_error']}")
-        lines.append("/换码 预演：只截图解码发给你；/换码 立即：现在就检查并换")
+        lines.append("/换码 预演：只截图解码发给你；/换码 立即：现在就换（不比有效期）")
         return "\n".join(lines)
 
     def command(self, arg: str) -> str:

@@ -102,6 +102,9 @@ ITEMS: list[Item] = [
          "外部贡献者在插件市场或主仓库提新 PR 时立刻私聊主人，PR 合并后在营业时段自动发群上新/致谢（自动排除仓库作者本人和 bot）"),
     Item("community_ignore_users", "PR播报忽略账号", "list", [],
          "这些 GitHub 用户名不触发社区 PR 播报（仓库作者本人和常见 bot 已自动排除）"),
+    Item("wechat_qr_group", "换码群", "text", "",
+         "每周自动换浮屿仓库里这个微信群的二维码（群名，浮汐要在群里，最好是管理员）：旧码到期后打开群二维码截图，"
+         "开 PR 直接合并（不跑 CI）；要 .env 的 FUXI_GITHUB_QR_TOKEN；空 = 不换"),
     Item("agent_token_expires", "代理凭据到期", "text", "", "浮屿仓库 secret CLAUDE_CODE_OAUTH_TOKEN 的到期日（如 2027-11-24），"
          "到期前 14 天每天提醒；空 = 不提醒（开 issue 的 token 到期日自动从 GitHub 读）"),
     Item("announce_to", "发版群", "text", "", "发版公告（POST /announce）默认发到哪个群：群名或 chat_id；空 = 调用方必须指定"),

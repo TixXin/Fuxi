@@ -70,6 +70,7 @@ ssh <host> 'chmod 600 <fuxi-dir>/.env'
 | `FUXI_API_PORT` | 对外 API 在宿主回环上的端口，默认 8790，先确认没被占用 |
 | `DEEPSEEK_API_KEY` | 模型 key |
 | `KUMA_PUSH_URL` | 告警用的 Uptime Kuma Push 地址，见「告警」；留空只写日志 |
+| `FUXI_GITHUB_QR_TOKEN` | 每周换浮屿群二维码用，见 [group-qr.md](group-qr.md)；留空则不换 |
 
 `.env` 只放部署相关的配置。**行为设置**（看图、语音转文字、主动搭话、主人、bot 名字、静默时段、限速、
 回复自己、合并等待、表情包）在桥接状态卷的 `settings.json` 里，改了立即生效、不用重建容器：

@@ -49,6 +49,7 @@ services:
       FUXI_API_PORT: "8790"
       FUXI_ADMIN_TOKEN: ${FUXI_ADMIN_TOKEN:-}   # 管理台口令（OpenResty 补到 X-Fuxi-Admin）；留空则管理台不启动
       FUXI_GITHUB_ISSUE_TOKEN: ${FUXI_GITHUB_ISSUE_TOKEN:-}   # /修 开 issue 用（只授权浮屿仓库 Issues 读写）
+      FUXI_GITHUB_QR_TOKEN: ${FUXI_GITHUB_QR_TOKEN:-}   # 每周换群二维码（仓库管理员的细粒度 token，只授权浮屿仓库 Contents + Pull requests 读写）
       DISPLAY: ":1"
     volumes:
       - ${WX_CONFIG_DIR:?请在 .env 设置 WX_CONFIG_DIR}:/wxconfig:ro   # 微信数据，只读

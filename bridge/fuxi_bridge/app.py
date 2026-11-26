@@ -26,7 +26,7 @@ import threading
 import time
 
 from . import messages, store
-from . import announce, assist, care, community, control, events, feedback, fuyu, images, issues, knowledge, outreach, owner_agent, remote_agent, schedule, settings, timing, voice
+from . import announce, assist, care, community, control, events, feedback, fuyu, groupqr, images, issues, knowledge, outreach, owner_agent, remote_agent, schedule, settings, timing, voice
 from . import allow
 from .allow import AllowList
 from .assist import AssistMixin
@@ -125,6 +125,7 @@ class Bridge(SendingMixin, ReplyMixin, AssistMixin, GroupWorkMixin):
                                           fuyu=self.fuyu)
         self.outreach = outreach.Outreach(self, os.path.join(state, "outreach"))
         self.community = community.CommunityWatcher(self, os.path.join(state, "community"))
+        self.groupqr = groupqr.GroupQr(self, os.path.join(state, "groupqr"))
         self.remote = remote_agent.RemoteAgent(self, os.path.join(state, "remote"))
         self.fixflow = issues.FixFlow(self.feedback, issues.Issues(lambda: self.cfg.get("knowledge_repo") or self.fuyu.repo))
         self.handoffs: collections.deque[tuple[float, str]] = collections.deque(maxlen=50)

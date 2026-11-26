@@ -155,6 +155,7 @@ mindmap
 | 凭据 | 放在哪 | 到期日从哪来 | 怎么换 |
 |---|---|---|---|
 | `FUXI_GITHUB_ISSUE_TOKEN` | 服务器 `.env` | GitHub 响应头，每天读一次 | GitHub → Settings → Developer settings → Fine-grained tokens，重新生成（只授权浮屿仓库，Issues 读写），写进 `.env` 后重建 bridge |
+| `FUXI_GITHUB_QR_TOKEN` | 服务器 `.env` | 不自动读（过期后换码失败会私聊） | 同上，权限换成 Contents 和 Pull requests 读写，必须是浮屿仓库管理员账号生成，见 [group-qr.md](group-qr.md) |
 | `CLAUDE_CODE_OAUTH_TOKEN` | 浮屿仓库 Actions secret | 设置「代理凭据到期」（`/设置 代理凭据到期 2027-11-24`） | Mac 上 `claude setup-token`，`gh secret set CLAUDE_CODE_OAUTH_TOKEN -R TixXin/Fuyu`，再改上面的设置 |
 
 ### 编码 agent（F3）

@@ -23,6 +23,7 @@
   /outreach /营业          群营业状态；/outreach idle 试写；/outreach welcome；/outreach fix v0.3.14
   /fuyu /浮屿              浮屿版本与动态；/fuyu 1244 查进度；/fuyu search 问题；/fuyu sync
   /cron /定时              等发的定时消息；/cron cancel 编号 取消
+  /qr /换码                群二维码自动换的状态；/换码 预演 截图解码发给你；/换码 立即 现在检查并换
   /agent                   查看远程电脑节点（mac/win）与活跃会话；/agent stop 打断当前轮；/agent exit 结束并关窗
   /set /设置               查看/修改设置（/set 项名 值）
 """
@@ -463,6 +464,10 @@ class Control:
             return f"#{it['code']} 已发到「{it['to']}」。"
         return f"#{it['code']} 发送失败：{it.get('error')}（不会自动重试，避免重复发）"
 
+    def group_qr(self, arg: str) -> str:
+        qr = getattr(self.b, "groupqr", None)
+        return qr.command(arg) if qr else "换码未启用。"
+
     def remote_agent(self, arg: str) -> str:
         r = getattr(self.b, "remote", None)
         if not r:
@@ -532,5 +537,6 @@ COMMANDS = {
     "/开issue": "open_issue", "/issue": "open_issue",
     "/营业": "outreach", "/outreach": "outreach",
     "/定时": "scheduled", "/cron": "scheduled", "/sched": "scheduled",
+    "/换码": "group_qr", "/qr": "group_qr",
     "/agent": "remote_agent",
 }

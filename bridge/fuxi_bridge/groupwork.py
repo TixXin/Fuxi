@@ -1,5 +1,5 @@
 """浮屿用户群的后台工作：群反馈收集与定时整理/摘要/群小结（F1）、云端代理进度和凭据到期提醒（F3）、
-浮屿仓库动态通知（F2）。"""
+浮屿仓库动态通知（F2）、每周换群二维码（groupqr.py）。"""
 
 from __future__ import annotations
 
@@ -78,6 +78,12 @@ class GroupWorkMixin:
             time.sleep(60)
 
     def _feedback_tick(self, now: float | None = None) -> None:
+        qr = getattr(self, "groupqr", None)
+        if qr is not None:
+            try:
+                qr.tick(now)
+            except Exception:
+                log.exception("换群码定时任务出错")
         if not self.cfg.get("feedback_groups"):
             return
         fb, now = self.feedback, now or time.time()

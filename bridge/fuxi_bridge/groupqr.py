@@ -5,7 +5,8 @@
   拿发送锁 → 打开群 → 右上角「…」→ 群信息面板里找到「群二维码」点开 → 整屏截图解码
   → 链接和仓库里那张不一样才换：裁出二维码（裁出来解不对就用链接重新生成）
   → 建分支、开 PR、用 token 主人的管理员身份直接合并（不等 CI；浮屿 ci.yml 对只改这几个文件的改动不跑）。
-链接没变说明微信还没换新码（旧码还在有效期里），下次再试。
+链接没变说明微信还没换新码（旧码还在有效期里），下次再试。每个群成员拿到的群码链接都不一样（仓库里那张可能是主人手机上截的），
+所以链接不同、但有效期不比仓库里的晚，也不换。
 
 只点 OCR 认出来、文字完全等于「群二维码」的那一行（同一个面板里还有「退出群聊」「清空聊天记录」）。
 整个界面操作都拿着 Sender 的锁，不会和发消息抢界面；有人在网页版微信里操作时不动手。
@@ -362,6 +363,8 @@ class GroupQr:
         shot = self.capture()
         if shot["url"] == old_url:
             return f"微信里还是同一个码（{shot['expires_text'] or '没读到有效期'}），旧码没过期，稍后再试"
+        if shot["expires"] and st["expires"] and shot["expires"].isoformat() <= st["expires"]:
+            return f"浮汐的码{shot['expires_text']}，不比仓库里的（有效到 {st['expires']}）新，稍后再试"
         today = dt.date.fromtimestamp(now)
         exp = shot["expires"] or today + dt.timedelta(days=6)
         png = qr_png(shot["img"], shot["url"])

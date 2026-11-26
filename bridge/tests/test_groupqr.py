@@ -178,6 +178,14 @@ class FlowTest(unittest.TestCase):
         self.assertFalse(qr.due(T_DUE + 600))
         self.assertTrue(qr.due(T_DUE + groupqr.RETRY_EVERY + 1))
 
+    def test_other_members_code_with_same_expiry_waits(self):
+        http = FakeGitHub()
+        qr, b = make(http)
+        qr.capture = lambda: {"url": URL2, "img": screen_with_qr(URL2), "expires": dt.date(2026, 12, 2),
+                              "expires_text": "12月3日前有效"}
+        self.assertIn("不比仓库里的", qr.refresh(T_DUE))
+        self.assertFalse(any(c[1] == "/pulls" for c in http.calls))
+
     def test_new_code_opens_pr_and_merges(self):
         http = FakeGitHub()
         qr, b = make(http)

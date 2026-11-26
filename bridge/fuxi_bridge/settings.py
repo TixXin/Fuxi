@@ -105,6 +105,9 @@ ITEMS: list[Item] = [
     Item("wechat_qr_group", "换码群", "text", "",
          "每周自动换浮屿仓库里这个微信群的二维码（群名，浮汐要在群里，最好是管理员）：旧码到期后打开群二维码截图，"
          "开 PR 直接合并（不跑 CI）；要 .env 的 FUXI_GITHUB_QR_TOKEN；空 = 不换"),
+    Item("wechat_qr_time", "换码时间", "text", "00:00",
+         "每天几点换一次群二维码（微信每次打开都给一张 7 天有效的新码，天天换仓库里的码就一直不过期），如 00:00；"
+         "空 = 只在码到最后有效那天才换"),
     Item("agent_token_expires", "代理凭据到期", "text", "", "浮屿仓库 secret CLAUDE_CODE_OAUTH_TOKEN 的到期日（如 2027-11-24），"
          "到期前 14 天每天提醒；空 = 不提醒（开 issue 的 token 到期日自动从 GitHub 读）"),
     Item("announce_to", "发版群", "text", "", "发版公告（POST /announce）默认发到哪个群：群名或 chat_id；空 = 调用方必须指定"),

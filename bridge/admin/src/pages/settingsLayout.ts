@@ -38,7 +38,7 @@ export const TABS: SettingsTab[] = [
       { title: "产品助手", keys: ["assistant_groups", "knowledge_repo", "fuyu_qa_pct", "fuyu_qa_delay", "fuyu_feedback_pct", "fuyu_chat_pct", "fuyu_chat_cooldown"] },
       { title: "群反馈", keys: ["feedback_groups", "digest_time", "group_summary_time"] },
       { title: "群营业", keys: ["outreach", "idle_hours", "open_hours", "fix_notify"] },
-      { title: "浮屿仓库", keys: ["fuyu_sync", "fuyu_notify", "plugins_repo", "community_notify", "community_ignore_users", "agent_token_expires", "wechat_qr_group"] },
+      { title: "浮屿仓库", keys: ["fuyu_sync", "fuyu_notify", "plugins_repo", "community_notify", "community_ignore_users", "agent_token_expires", "wechat_qr_group", "wechat_qr_time"] },
       { title: "发版公告", keys: ["announce_to"] },
     ],
   },

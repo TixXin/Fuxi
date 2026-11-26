@@ -96,6 +96,21 @@ class PureTest(unittest.TestCase):
         with self.assertRaises(groupqr.QrError):
             groupqr.patch_community(COMMUNITY, "qq-users", "2026-12-09", "2026-12-03")
 
+    def test_readme_png_has_title_and_date_and_still_scans(self):
+        raw = groupqr.readme_png(groupqr.render_qr(URL), "群聊：浮屿用户交流群", "2026-12-09")
+        img = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_GRAYSCALE)
+        self.assertGreater(img.shape[0], img.shape[1], "上下各多一行字")
+        self.assertEqual(groupqr.decode(img)[0], URL)
+        self.assertLess(int(img[:90].min()), 128, "上面有群名")
+        self.assertLess(int(img[-80:].min()), 160, "下面有有效期")
+
+    def test_slot_at(self):
+        now = time.mktime((2026, 11, 27, 15, 0, 0, 0, 0, -1))
+        self.assertEqual(groupqr.slot_at("00:00", now), time.mktime((2026, 11, 27, 0, 0, 0, 0, 0, -1)))
+        self.assertEqual(groupqr.slot_at("24:00", now), groupqr.slot_at("0:00", now))
+        self.assertIsNone(groupqr.slot_at("", now))
+        self.assertIsNone(groupqr.slot_at("25:00", now))
+
     def test_wechat_group(self):
         self.assertEqual(groupqr.wechat_group(json.loads(COMMUNITY))["id"], "wechat-users")
 
@@ -147,6 +162,7 @@ def make(http):
     b = type("B", (), {})()
     b.cfg = settings.Settings(os.path.join(d, "settings.json"), {})
     b.cfg.set("wechat_qr_group", "浮屿用户交流群")
+    b.cfg.set("wechat_qr_time", "")
     b.halted = ""
     b.sender = FakeSender()
     b.told = []
@@ -173,7 +189,7 @@ class FlowTest(unittest.TestCase):
         http = FakeGitHub()
         qr, b = make(http)
         qr.capture = lambda: {"url": URL, "img": screen_with_qr(URL), "expires": None, "expires_text": ""}
-        self.assertIn("同一个码", qr.refresh(T_DUE))
+        self.assertIn("不用换", qr.refresh(T_DUE))
         self.assertFalse(any(c[1] == "/pulls" for c in http.calls))
         self.assertFalse(qr.due(T_DUE + 600))
         self.assertTrue(qr.due(T_DUE + groupqr.RETRY_EVERY + 1))
@@ -201,6 +217,8 @@ class FlowTest(unittest.TestCase):
         self.assertEqual(tree["base_tree"], "tree1")
         paths = {t["path"]: http.blobs[t["sha"]] for t in tree["tree"]}
         self.assertEqual(set(paths), {groupqr.COMMUNITY_JSON, "docs/assets/community/wechat-group.png", groupqr.README_QR})
+        app_img = cv2.imdecode(np.frombuffer(paths["docs/assets/community/wechat-group.png"], np.uint8), cv2.IMREAD_GRAYSCALE)
+        self.assertEqual(app_img.shape, (groupqr.QR_SIZE, groupqr.QR_SIZE), "应用里那张保持正方形纯二维码")
         data = json.loads(paths[groupqr.COMMUNITY_JSON])
         self.assertEqual(data["groups"][0]["expiresAt"], "2026-12-09")
         img = cv2.imdecode(np.frombuffer(paths[groupqr.README_QR], np.uint8), cv2.IMREAD_COLOR)
@@ -211,7 +229,35 @@ class FlowTest(unittest.TestCase):
         qr.capture = lambda: self.fail("刚换过的码还没到期，不该动微信界面")
         self.assertIn("还不用换", qr.refresh(T_DUE + 3 * 86400))
         self.assertEqual(qr.state["expires"], "2026-12-09")
-        self.assertTrue(qr.due(T_DUE + groupqr.LIFETIME))
+        self.assertTrue(qr.due(time.mktime((2026, 12, 9, 0, 1, 0, 0, 0, -1))))
+
+    def test_nightly_refresh_once_a_day(self):
+        http = FakeGitHub()
+        qr, b = make(http)
+        b.cfg.set("wechat_qr_time", "00:00")
+        night = time.mktime((2026, 11, 28, 0, 5, 0, 0, 0, -1))
+        qr.capture = lambda: {"url": URL2, "img": screen_with_qr(URL2), "expires": dt.date(2026, 12, 4),
+                              "expires_text": "12月5日前有效"}
+        self.assertTrue(qr.due(night))
+        self.assertIn("#1300", qr.refresh(night))
+        self.assertEqual(qr.state["done_day"], "2026-11-28")
+        self.assertEqual(b.told, [], "每晚换成功不私聊")
+        self.assertFalse(qr.due(night + 3600))
+        qr.capture = lambda: self.fail("今天换过了，白天只查仓库、不动微信界面")
+        self.assertIn("还不用换", qr.refresh(night + 20 * 3600))
+        self.assertTrue(qr.due(night + 86400))
+
+    def test_nightly_same_expiry_marks_done_without_pr(self):
+        http = FakeGitHub()
+        qr, b = make(http)
+        b.cfg.set("wechat_qr_time", "00:00")
+        noon = time.mktime((2026, 11, 26, 12, 0, 0, 0, 0, -1))
+        qr.capture = lambda: {"url": URL2, "img": screen_with_qr(URL2), "expires": dt.date(2026, 12, 2),
+                              "expires_text": "12月3日前有效"}
+        self.assertIn("不用换", qr.refresh(noon))
+        self.assertFalse(any(c[1] == "/pulls" for c in http.calls))
+        self.assertEqual(qr.state["done_day"], "2026-11-26")
+        self.assertFalse(qr.due(noon + groupqr.RETRY_EVERY + 1))
 
     def test_merge_refused_reports(self):
         http = FakeGitHub(merge_status=405)

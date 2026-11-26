@@ -10,7 +10,7 @@ RUN pnpm build
 FROM python:3.12-slim
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends xdotool xclip x11-apps libxss1 tzdata \
+ && apt-get install -y --no-install-recommends xdotool xclip x11-apps libxss1 tzdata fonts-wqy-microhei \
  && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt /app/requirements.txt

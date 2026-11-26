@@ -1,12 +1,12 @@
-"""浮屿用户群二维码每周自动换（微信群码 7 天过期，浮屿仓库 main 上的码要跟着换）。
+"""浮屿用户群二维码自动换（微信群码 7 天过期，浮屿仓库 main 上的码要跟着换）。
 
-什么时候动手：仓库 main 上 docs/assets/community/community.json 里这个群的 expiresAt（码最后有效的那天）
-到了，或者上次换到的码满 7 天了，每 30 分钟试一次：
-  拿发送锁 → 打开群 → 右上角「…」→ 群信息面板里找到「群二维码」点开 → 整屏截图解码
-  → 链接和仓库里那张不一样才换：裁出二维码（裁出来解不对就用链接重新生成）
+微信每次打开「群二维码」都给一条新链接，有效期是打开那天往后 7 天（「12月3日前有效」）。所以每晚到点
+（设置「换码时间」，默认 00:00）换一次，仓库里的码一直还剩 6 天以上；到点没换成每 30 分钟再试。
+「换码时间」留空时只在仓库里的码到了最后有效那天才换。
+
+换一次：拿发送锁 → 打开群 → 右上角「…」→ 群信息面板里找到「群二维码」点开 → 截二维码小窗解码
+  → 新码有效期比仓库里的晚才换：裁出二维码（裁出来解不对就用链接重新生成），README 那张再加上群名和有效期
   → 建分支、开 PR、用 token 主人的管理员身份直接合并（不等 CI；浮屿 ci.yml 对只改这几个文件的改动不跑）。
-链接没变说明微信还没换新码（旧码还在有效期里），下次再试。每个群成员拿到的群码链接都不一样（仓库里那张可能是主人手机上截的），
-所以链接不同、但有效期不比仓库里的晚，也不换。
 
 只点 OCR 认出来、文字完全等于「群二维码」的那一行（同一个面板里还有「退出群聊」「清空聊天记录」）。
 整个界面操作都拿着 Sender 的锁，不会和发消息抢界面；有人在网页版微信里操作时不动手。
@@ -43,8 +43,9 @@ README_QR = "docs/assets/readme/wechat-group.png"
 URL_PREFIX = "https://weixin.qq.com/g/"
 RETRY_EVERY = 1800
 CHECK_EVERY = 6 * 3600
-LIFETIME = 7 * 86400
 QR_SIZE = 480
+FONT = "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc"
+_TIME = re.compile(r"^([01]?\d|2[0-4]):([0-5]\d)$")
 _EXPIRY = re.compile(r"(\d{1,2})\s*月\s*(\d{1,2})\s*日\s*前")
 
 
@@ -181,6 +182,40 @@ def patch_community(text: str, group_id: str, expires: str, today: str) -> str:
     return text
 
 
+def readme_png(qr: np.ndarray, title: str, expires: str) -> bytes:
+    """README 用的图：上面群名、中间二维码、下面有效期（应用里那张保持纯二维码，有效期由应用自己写）。"""
+    import cv2
+    from PIL import Image, ImageDraw, ImageFont
+
+    pad, head, foot = 40, 92, 84
+    w = QR_SIZE + 2 * pad
+    canvas = Image.new("L", (w, head + QR_SIZE + foot), 255)
+    canvas.paste(Image.fromarray(qr), (pad, head))
+    draw = ImageDraw.Draw(canvas)
+    for text, y, size, color in ((title, head // 2 + 6, 34, 20), (f"有效期至 {expires}", head + QR_SIZE + foot // 2 - 4, 30, 90)):
+        font = ImageFont.truetype(FONT, size)
+        while draw.textlength(text, font=font) > w - 24 and size > 16:
+            size -= 2
+            font = ImageFont.truetype(FONT, size)
+        draw.text((w // 2, y), text, fill=color, font=font, anchor="mm")
+    ok, png = cv2.imencode(".png", np.array(canvas))
+    if not ok:
+        raise QrError("README 图编码失败")
+    return png.tobytes()
+
+
+def slot_at(at: str, now: float) -> float | None:
+    """「换码时间」今天对应的时刻；24:00 当 00:00；格式不对或空返回 None。"""
+    m = _TIME.match((at or "").strip())
+    if not m:
+        return None
+    h, mi = int(m.group(1)), int(m.group(2))
+    if h == 24:
+        h, mi = 0, 0
+    lt = time.localtime(now)
+    return time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, h, mi, 0, 0, 0, -1))
+
+
 def day_start(d: str) -> float:
     try:
         return time.mktime(time.strptime(d[:10], "%Y-%m-%d"))
@@ -278,7 +313,7 @@ class GroupQr:
                 return data
         except (OSError, ValueError):
             pass
-        return {"checked_at": 0.0, "tried_at": 0.0, "expires": "", "url": "", "url_since": 0.0,
+        return {"checked_at": 0.0, "tried_at": 0.0, "expires": "", "url": "", "done_day": "",
                 "last_pr": "", "last_error": "", "error_day": ""}
 
     def _save(self) -> None:
@@ -310,15 +345,19 @@ class GroupQr:
         return text, g, url
 
     # ---- 什么时候动手 ----
+    def scheduled(self, now: float) -> bool:
+        """今天的换码时间到了、今天还没换过。"""
+        slot = slot_at(self.b.cfg.get("wechat_qr_time") or "", now)
+        return slot is not None and now >= slot and self.state.get("done_day") != time.strftime("%Y-%m-%d", time.localtime(now))
+
     def due(self, now: float) -> bool:
         st = self.state
         if now - float(st.get("tried_at") or 0) < RETRY_EVERY:
             return False
+        if self.scheduled(now):
+            return True
         if st.get("expires") and now - float(st.get("checked_at") or 0) < CHECK_EVERY:
-            start = day_start(st["expires"])
-            if st.get("url_since"):
-                start = min(start, float(st["url_since"]) + LIFETIME - 600)
-            return now >= start
+            return now >= day_start(st["expires"])
         return True
 
     def tick(self, now: float | None = None) -> None:
@@ -354,35 +393,51 @@ class GroupQr:
         st["tried_at"] = now
         text, g, old_url = self.published()
         st["checked_at"], st["expires"] = now, g.get("expiresAt") or ""
-        if old_url and old_url != st.get("url"):
-            st["url"], st["url_since"] = old_url, 0.0
+        if old_url:
+            st["url"] = old_url
         self._save()
-        if not force and now < day_start(st["expires"]) and not (
-                st.get("url_since") and now >= float(st["url_since"]) + LIFETIME - 600):
+        nightly = self.scheduled(now)
+        if not force and not nightly and now < day_start(st["expires"]):
             return f"仓库里的码有效到 {st['expires']}，还不用换"
-        shot = self.capture()
-        if shot["url"] == old_url:
-            return f"微信里还是同一个码（{shot['expires_text'] or '没读到有效期'}），旧码没过期，稍后再试"
-        if shot["expires"] and st["expires"] and shot["expires"].isoformat() <= st["expires"]:
-            return f"浮汐的码{shot['expires_text']}，不比仓库里的（有效到 {st['expires']}）新，稍后再试"
         today = dt.date.fromtimestamp(now)
+        shot = self.capture()
+        if shot["url"] == old_url or (shot["expires"] and st["expires"] and shot["expires"].isoformat() <= st["expires"]):
+            if nightly:
+                st["done_day"] = today.isoformat()
+                self._save()
+            return f"浮汐拿到的码{shot['expires_text'] or '没读到有效期'}，不比仓库里的（有效到 {st['expires']}）新，不用换"
         exp = shot["expires"] or today + dt.timedelta(days=6)
         png = qr_png(shot["img"], shot["url"])
-        new_json = patch_community(text, g["id"], exp.isoformat(), today.isoformat())
-        files = {COMMUNITY_JSON: new_json.encode("utf-8"), f"{COMMUNITY_DIR}/{g['qr']}": png, README_QR: png}
+        files = {COMMUNITY_JSON: patch_community(text, g["id"], exp.isoformat(), today.isoformat()).encode("utf-8"),
+                 f"{COMMUNITY_DIR}/{g['qr']}": png, README_QR: self._readme(png, g, exp)}
         title = f"docs(community): refresh the WeChat group QR code through {exp.isoformat()}"
-        body = (f"浮汐自动换的浮屿用户群微信二维码：旧码到期，微信里新码显示「{shot['expires_text'] or '7 天内有效'}」，"
+        body = (f"浮汐自动换的浮屿用户群微信二维码：微信里新码显示「{shot['expires_text'] or '7 天内有效'}」，"
                 f"expiresAt 填 {exp.isoformat()}。\n\n不跑 CI：只改二维码图片和 community.json，由仓库管理员 token 直接合并。")
         res = self.gh.publish(files, f"community/wechat-qr-{today:%Y%m%d-%H%M}", title, body)
-        st.update(url=shot["url"], url_since=now, expires=exp.isoformat(), last_error="", error_day="",
+        st.update(url=shot["url"], expires=exp.isoformat(), last_error="", error_day="", done_day=today.isoformat(),
                   last_pr=f"#{res['number']} {res['url']}")
         self._save()
         if not res["merged"]:
             raise QrError(f"PR #{res['number']} 开好了但没合并：{res['error']}（{res['url']}）")
         msg = f"浮屿用户群二维码换好了，有效到 {exp.isoformat()}，已合入 PR #{res['number']}：{res['url']}"
         log.info(msg)
-        self.b.tell_owner("【换码】" + msg)
+        if not nightly:
+            self.b.tell_owner("【换码】" + msg)
         return msg
+
+    @staticmethod
+    def _readme(png: bytes, g: dict, exp: dt.date) -> bytes:
+        """README 那张加上群名和有效期；没装中文字体等出错时退回纯二维码。"""
+        import cv2
+
+        name = g.get("name")
+        name = (name.get("zh-CN") or name.get("en") or "") if isinstance(name, dict) else str(name or "")
+        try:
+            qr = cv2.imdecode(np.frombuffer(png, np.uint8), cv2.IMREAD_GRAYSCALE)
+            return readme_png(qr, f"群聊：{name}" if name else "微信群", exp.isoformat())
+        except Exception as e:
+            log.warning("README 群码加字失败，用纯二维码：%s", e)
+            return png
 
     # ---- 微信界面 ----
     def capture(self) -> dict:
@@ -557,7 +612,8 @@ class GroupQr:
             return "没设置换码群（/设置 换码群 浮屿用户交流群）。"
         lines = [f"换码群：{self.group()}",
                  f"仓库：{self.b.cfg.get('knowledge_repo') or 'TixXin/Fuyu'}（token {'已配置' if self.gh.ready else '没配置 FUXI_GITHUB_QR_TOKEN'}）",
-                 f"仓库里的码有效到：{st.get('expires') or '未知'}"]
+                 f"仓库里的码有效到：{st.get('expires') or '未知'}",
+                 f"每天换码时间：{self.b.cfg.get('wechat_qr_time') or '不定时（码到期那天才换）'}"]
         if st.get("tried_at"):
             lines.append("上次检查：" + time.strftime("%m-%d %H:%M", time.localtime(float(st["tried_at"]))))
         if st.get("last_pr"):
@@ -597,15 +653,14 @@ class GroupQr:
         from .sending import SendJob
 
         shot = self.capture()
-        png = qr_png(shot["img"], shot["url"])
+        exp = shot["expires"] or dt.date.today() + dt.timedelta(days=6)
+        png = self._readme(qr_png(shot["img"], shot["url"]), {"name": self.group()}, exp)
         f = tempfile.NamedTemporaryFile(suffix=".png", delete=False, dir=self.root)
         f.write(png)
         f.close()
         try:
-            same = shot["url"] == self.state.get("url")
             text = (f"【换码预演】{self.group()}：{shot['expires_text'] or '没读到有效期'}"
-                    f"（expiresAt 会填 {shot['expires'] or '今天 + 6 天'}）。"
-                    f"{'和仓库里的是同一个码。' if same else '和仓库里记的不是同一个码。'}下面是会提交的图，扫一下确认能进群。")
+                    f"（expiresAt 会填 {exp}）。下面是 README 会用的图（应用里那张只有二维码），扫一下确认能进群。")
             job = self.b.send(SendJob(chat=self.b.owner_chat(), text=text, image=f.name, source="control"))
             if not job.ok:
                 log.warning("换码预演结果没发出去：%s", job.error)

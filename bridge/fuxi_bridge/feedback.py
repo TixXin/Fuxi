@@ -30,6 +30,10 @@ import re
 import threading
 import time
 
+# 「包含在 v0.3.12（2026-11-23 发布）」：fuyu.status 给出的修复版本和发布日期
+_FIXED_RELEASE = re.compile(r"包含在 (v[\w.-]+)（(\d{4}-\d{2}-\d{2}) 发布）")
+REGRESS_GRACE_DAYS = 2   # 修复版发布后这么多天内有人报，仍当作「还没更新」
+
 log = logging.getLogger("fuxi.feedback")
 
 CATEGORIES = {"bug": "问题", "suggestion": "建议", "question": "提问"}
@@ -469,11 +473,26 @@ class Feedback:
             self._save()
             return it
 
+    @staticmethod
+    def _regressed(it: dict, status: str) -> str:
+        """关联的 issue 已在某个正式版修过，但那个版本发布两天后还有人报：返回版本号，否则空。
+        多半是复发或没修全；这时不能再跟群友说「更新到最新版即可」（2026-11-26 当天报的两条被说成早已修复）。"""
+        m = _FIXED_RELEASE.search(status or "")
+        if not m:
+            return ""
+        try:
+            day = time.mktime(time.strptime(m.group(2), "%Y-%m-%d"))
+        except ValueError:
+            return ""
+        return m.group(1) if float(it.get("last_seen") or 0) >= day + REGRESS_GRACE_DAYS * 86400 else ""
+
     def progress(self, it: dict) -> str:
         """给主人看的进度（带 issue 编号）。"""
         if it.get("issue") and self.fuyu:
             try:
-                return self.fuyu.status(it["issue"])
+                s = self.fuyu.status(it["issue"])
+                again = self._regressed(it, s)
+                return f"{s}；但 {again} 发布后还有人报，可能复发" if again else s
             except Exception:
                 pass
         if it["status"] == "in_progress":
@@ -501,6 +520,8 @@ class Feedback:
                 s = self.fuyu.status(it["issue"])
             except Exception:
                 s = ""
+            if self._regressed(it, s):
+                return "之前修过，这次又有人遇到，已在跟进"
             m = re.search(r"包含在 (v[\w.-]+)", s)
             if m:
                 return f"已在 {m.group(1)} 修复，更新到最新版即可"

@@ -265,3 +265,22 @@ class WiringTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RegressionTest(unittest.TestCase):
+    """关联 issue 已在 v0.3.13（2026-11-23 发布）修过：发布两天后还有人报，就不再说「更新到最新版即可」。"""
+
+    def item(self, last_seen):
+        return {"id": 9, "status": "known", "issue": 1234, "last_seen": last_seen}
+
+    def test_report_soon_after_release_still_says_update(self):
+        f = make(FakeModel())
+        it = self.item(DAY + 9 * 3600)                       # 11-24，发布后第二天
+        self.assertEqual(f.public_state(it), "已在 v0.3.13 修复，更新到最新版即可")
+        self.assertNotIn("可能复发", f.progress(it))
+
+    def test_report_well_after_release_is_regression(self):
+        f = make(FakeModel())
+        it = self.item(DAY + 2 * 86400 + 9 * 3600)            # 11-26，发布三天后
+        self.assertEqual(f.public_state(it), "之前修过，这次又有人遇到，已在跟进")
+        self.assertTrue(f.progress(it).endswith("；但 v0.3.13 发布后还有人报，可能复发"))

@@ -117,8 +117,8 @@ class Sender:
         return res
 
     def window(self) -> str:
-        """微信主窗口 id。主窗口被隐藏到托盘时，点托盘图标恢复一次。"""
-        for attempt in range(2):
+        """微信主窗口 id。主窗口被隐藏到托盘时，先点托盘图标，不行再按微信的显示窗口快捷键 Ctrl+Alt+W。"""
+        for attempt in range(3):
             wins = self._windows()
             main = [w for w in wins if w[1] >= 1000]
             if main:
@@ -127,6 +127,11 @@ class Sender:
             if attempt == 0 and tray:
                 log.warning("微信主窗口不可见，点击托盘图标恢复")
                 self._run("xdotool", "mousemove", "--window", tray[0][0], "12", "12", "click", "1")
+                time.sleep(1.5)
+                continue
+            if attempt == 1 and tray:
+                log.warning("点托盘图标没恢复，按 Ctrl+Alt+W")
+                self._run("xdotool", "key", "--clearmodifiers", "ctrl+alt+w")
                 time.sleep(1.5)
                 continue
             break

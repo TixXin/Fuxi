@@ -402,70 +402,153 @@ class GroupQr:
             finally:
                 s.forget_chat()
 
-    @staticmethod
-    def _panel_boxes(s, w: str, ww: int) -> list[tuple[int, int, str, float]]:
-        return [b for b in s._ocr_boxes(w) if b[0] > ww * 0.6]
+    PANEL_X = 0.6
+
+    @classmethod
+    def _panel_boxes(cls, s, w: str, ww: int) -> list[tuple[int, int, str, float]]:
+        """只识别右侧群信息面板那一块（整窗识别一次要 2~3 秒）。"""
+        x0 = int(ww * cls.PANEL_X)
+        img = np.ascontiguousarray(s._capture(w).bgr[:, x0:])
+        try:
+            res, _ = _ocr()(img, use_cls=False)
+        except Exception as e:
+            raise QrError(f"OCR 失败：{e}") from e
+        out = []
+        for box, txt, score in res or []:
+            t = str(txt or "").strip()
+            if t and float(score) >= 0.7:
+                out.append((int(sum(p[0] for p in box) / 4) + x0, int(sum(p[1] for p in box) / 4), t, float(score)))
+        return out
 
     @staticmethod
     def _panel_open(boxes) -> bool:
         return any(t.replace(" ", "") in ("搜索群成员", "群聊名称", "群二维码", "我在本群的昵称") for _, _, t, _ in boxes)
 
+    @classmethod
+    def _panel_px(cls, s, w: str, ww: int) -> np.ndarray:
+        return s._capture(w).bgr[150::6, int(ww * cls.PANEL_X)::6].astype(np.int16)
+
+    @staticmethod
+    def _moved(a: np.ndarray, b: np.ndarray) -> bool:
+        return a.shape == b.shape and float((np.abs(a - b).max(axis=2) > 24).mean()) > 0.002
+
+    @classmethod
+    def _wait_panel(cls, s, w: str, ww: int, before: np.ndarray, timeout: float = 2.0) -> bool:
+        """等面板那块画面变了、再停住（相邻两帧不动），代替固定等待。"""
+        deadline = time.monotonic() + timeout
+        last, changed = before, False
+        while time.monotonic() < deadline:
+            time.sleep(0.08)
+            cur = cls._panel_px(s, w, ww)
+            if changed and not cls._moved(cur, last):
+                return True
+            changed = changed or cls._moved(cur, before)
+            last = cur
+        return changed
+
+    def _show_bottom(self, s, w: str, ww: int, hh: int) -> list:
+        """点「…」，把面板滚到底（「群二维码」在群成员头像下面），识别一次。"""
+        before = self._panel_px(s, w, ww)
+        s._click_in(w, ww - 64, 112)
+        self._wait_panel(s, w, ww, before)
+        s._run("xdotool", "mousemove", "--window", w, str(ww - 256), str(int(hh * 0.83)))
+        before = self._panel_px(s, w, ww)
+        s._run("xdotool", "click", "--repeat", "20", "--delay", "8", "5")
+        self._wait_panel(s, w, ww, before, timeout=1.0)
+        return self._panel_boxes(s, w, ww)
+
+    @staticmethod
+    def _new_windows(s, w: str, before: set) -> list[tuple[str, int, int]]:
+        """点「群二维码」后新出来的窗口；太小的（提示、菜单之类）不算。"""
+        return [x for x in s._windows() if x[0] not in before and x[0] != w and x[1] >= 300 and x[2] >= 300]
+
+    @classmethod
+    def _wait_popup(cls, s, w: str, before: set, timeout: float = 3.0) -> str | None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            new = cls._new_windows(s, w, before)
+            if new:
+                return new[0][0]
+            time.sleep(0.1)
+        return None
+
+    @staticmethod
+    def _grab(s, popup: str | None):
+        """截二维码小窗；小窗刚映射、还没画好时 xwd 会失败，当作还没好。"""
+        try:
+            return np.ascontiguousarray(s._capture(popup).bgr) if popup else _root_shot(s)
+        except (SendError, QrError):
+            return None
+
+    @staticmethod
+    def _expiry_words(img, pts) -> str:
+        """只识别二维码下面那两行字（「该二维码7天内(12月3日前)有效…」），识别不到再整张图识别。"""
+        y1 = int(pts[:, 1].max()) if pts is not None else 0
+        crops = [img[y1:y1 + max(120, img.shape[0] // 5)]] if y1 else []
+        for crop in crops + [img]:
+            try:
+                res, _ = _ocr()(np.ascontiguousarray(crop), use_cls=False)
+            except Exception as e:
+                log.warning("读群码有效期 OCR 失败：%s", e)
+                continue
+            words = "".join(str(t) for _, t, _ in (res or []))
+            if _EXPIRY.search(words.replace(" ", "")):
+                return words
+        return ""
+
     def _open_qr(self, s, w: str, ww: int, hh: int, before: set) -> dict:
-        if not self._panel_open(self._panel_boxes(s, w, ww)):
-            s._click_in(w, ww - 64, 112)
-            time.sleep(1.0)
-        hit = None
-        for attempt in range(3):
-            boxes = self._panel_boxes(s, w, ww)
-            if attempt == 0 and not self._panel_open(boxes):
-                raise QrError("点「…」没打开群信息面板")
-            hits = [b for b in boxes if b[2].replace(" ", "") == "群二维码"]
-            if len(hits) == 1:
-                hit = hits[0]
-                break
-            s._run("xdotool", "mousemove", "--window", w, str(ww - 256), str(int(hh * 0.83)))
-            for _ in range(8):
-                s._run("xdotool", "click", "5")
-            time.sleep(0.6)
-        if not hit:
+        self._panel_shown = False
+        boxes = self._show_bottom(s, w, ww, hh)
+        if not self._panel_open(boxes):
+            boxes = self._show_bottom(s, w, ww, hh)
+        if not self._panel_open(boxes):
+            raise QrError("点「…」没打开群信息面板")
+        self._panel_shown = True
+        hits = [b for b in boxes if b[2].replace(" ", "") == "群二维码"]
+        if len(hits) != 1:
             raise QrError("群信息面板里没找到「群二维码」（浮汐要在群里；群开了邀请确认时只有群主/管理员有）")
-        s._click_in(w, hit[0], hit[1])
-        deadline = time.monotonic() + 5
+        s._click_in(w, hits[0][0], hits[0][1])
+        popup = self._wait_popup(s, w, before)
+        url, pts, img = "", None, None
+        deadline = time.monotonic() + 4
         while True:
-            time.sleep(0.8)
-            img = _root_shot(s)
-            url, _ = decode(img)
+            img = self._grab(s, popup)
+            if img is not None:
+                url, pts = decode(img)
             if url or time.monotonic() > deadline:
                 break
-        if not url:
+            time.sleep(0.1)
+        log.info("群码小窗 %s：%s", popup or "无（整屏）", "解出链接" if url else "没解出")
+        if not url or img is None:
             raise QrError("点开「群二维码」后截图里没解出群码")
-        try:
-            res, _ = _ocr()(img, use_cls=False)
-            words = "".join(str(t) for _, t, _ in (res or []))
-        except Exception as e:
-            log.warning("读群码有效期 OCR 失败：%s", e)
-            words = ""
+        words = self._expiry_words(img, pts)
         m = _EXPIRY.search(words.replace(" ", ""))
         return {"url": url, "img": img, "expires_text": m.group(0) + "有效" if m else "",
                 "expires": expiry_from_text(words, dt.date.today())}
 
     def _restore(self, s, w: str, ww: int, before: set) -> None:
-        """关掉二维码小窗和群信息面板。不在聊天里按 Esc（会把主窗口收进托盘）。"""
-        for x in s._windows():
-            if x[0] not in before and x[0] != w:
-                try:
-                    s._run("xdotool", "windowactivate", "--sync", x[0])
-                    s._run("xdotool", "key", "--window", x[0], "Escape")
-                    time.sleep(0.5)
-                except SendError as e:
-                    log.warning("关二维码小窗失败：%s", e)
+        """关掉二维码小窗和群信息面板。一律点按钮，不按 Esc：Esc 落到主窗口上会把它收进托盘。"""
+        for pid, pw, _ph in self._new_windows(s, w, before):
+            try:
+                s._run("xdotool", "mousemove", "--window", pid, str(pw - 46), "34", "click", "1")
+            except SendError as e:
+                log.warning("关二维码小窗失败：%s", e)
+                continue
+            deadline = time.monotonic() + 1.5
+            while time.monotonic() < deadline and any(y[0] == pid for y in s._windows()):
+                time.sleep(0.05)
+            if any(y[0] == pid for y in s._windows()):
+                log.warning("二维码小窗 %s 点 × 没关掉", pid)
         try:
             w = s.window()
-            if self._panel_open(self._panel_boxes(s, w, ww)):
+            shown = getattr(self, "_panel_shown", False) or self._panel_open(self._panel_boxes(s, w, ww))
+            if shown:
+                before_px = self._panel_px(s, w, ww)
                 s._click_in(w, ww - 64, 112)
-                time.sleep(0.6)
-        except SendError as e:
+                self._wait_panel(s, w, ww, before_px, timeout=0.8)
+        except (SendError, QrError) as e:
             log.warning("关群信息面板失败：%s", e)
+        self._panel_shown = False
 
     # ---- 遥控 /换码 ----
     def status(self) -> str:

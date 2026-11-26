@@ -26,7 +26,8 @@ FUYU_TOPIC_RE = re.compile(
 )
 # 群友在用户群里报 bug / 反馈视觉与交互问题 / 提建议时的典型表达（即便没写出「浮屿」二字也能认出）
 FEEDBACK_RE = re.compile(
-    r"小问题|bug|报错|闪退|崩溃|卡死|卡顿|打不开|用不了|没反应|不显示|看不到|没效果|不生效|异常|失灵|"
+    r"小问题|新问题|有问题|bug|报错|闪退|崩溃|卡死|卡顿|打不开|用不了|没反应|不显示|看不到|没效果|不生效|异常|失灵|"
+    r"过期|失效|无效|不见了|消失|出不来|莫名其妙|乱码|"
     r"错位|重叠|阴影|压暗|闪烁|遮挡|穿透|不和谐|任务栏.{0,12}(问题|阴影|压暗|挡|偏|歪|显示)|"
     r"建议|希望(能|可以)?|能不能加|可以加个|想要个|提个建议|反馈|提个?需求",
     re.I,
@@ -316,8 +317,18 @@ class AssistMixin:
 
     def _try_feedback_fallback(self, chat: str, payload: dict, q: str, notes: list[str], seq_before: int | None,
                                owner_at: bool, boot_catchup: bool = False, msg_ts: float | None = None) -> bool:
-        """群友（非主人）报 bug 或提建议、没人 @ 她且主人没立刻回复时，主动接住并确认记下。"""
-        if len(q) < 6 or not FEEDBACK_RE.search(q):
+        """群友（非主人）报 bug/提建议、或直接 @ 主人说正事且主人没立刻回复时，主动接住并确认记下。"""
+        if owner_at:
+            # 去掉微信 @名字\u2005（或裸 @名字）前缀，光秃秃只 @ 一下不接，有实质内容（≥4字）不卡死在关键词上
+            body = re.sub(r"@[^\u2005\n]+\u2005", "", q)
+            for mn in payload.get("mentioned_names") or []:
+                if mn:
+                    body = body.replace(f"@{mn}", "")
+            body = re.sub(r"^@\S+(?:\s*-\s*\S+)?\s*", "", body.strip())
+            body = re.sub(r"@[^\s@，,。！？!?]+\s*", "", body).strip()
+            if len(body) < 4:
+                return False
+        elif len(q) < 6 or not FEEDBACK_RE.search(q):
             return False
         masters = set(getattr(self, "masters", None) or [])
         sender = payload.get("sender_id") or payload.get("user_id") or ""
@@ -329,7 +340,7 @@ class AssistMixin:
         if not boot_catchup and random.random() * 100 >= fb_pct:
             return False
         base_delay = self.cfg.get("fuyu_qa_delay") or 8
-        wait_s = max(25, base_delay * 3) if owner_at else max(12, base_delay)
+        wait_s = 10 if owner_at else max(10, base_delay)
         elapsed = max(0.0, time.time() - float(msg_ts)) if msg_ts else 0.0
         remain = max(0.0, wait_s - elapsed)
         if self._wait_qa_yield(chat, seq_before, remain):

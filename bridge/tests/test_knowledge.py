@@ -380,6 +380,21 @@ class AssistTest(unittest.TestCase):
              mock.patch("fuxi_bridge.assist.time.monotonic", return_value=1500.0):
             b._assist("g@chatroom", p5)
         self.assertFalse(p5["at_me"])
+        # 群友只 @ 主人说正事（无特定 bug 词也能接住，且避让为 10 秒）；光秃秃只 @ 不接
+        p6 = {**payload("@煜哥 - tixxin\u2005用户群的二维码过期了", at=False), "sender_id": "wxid_u2",
+              "at_other": True, "at_owner_only": True}
+        with mock.patch("threading.Thread"), \
+             mock.patch("fuxi_bridge.assist.random.random", return_value=0.0), \
+             mock.patch("fuxi_bridge.assist.time.monotonic", return_value=1700.0), \
+             mock.patch.object(b, "_wait_qa_yield", return_value=False) as wy:
+            b._assist("g@chatroom", p6)
+        self.assertTrue(p6["at_me"])
+        self.assertEqual(wy.call_args.args[2], 10)
+        p7 = {**payload("@煜哥 - tixxin", at=False), "sender_id": "wxid_u2", "at_other": True, "at_owner_only": True}
+        with mock.patch("fuxi_bridge.assist.random.random", return_value=0.0), \
+             mock.patch("fuxi_bridge.assist.time.monotonic", return_value=1900.0):
+            b._assist("g@chatroom", p7)
+        self.assertFalse(p7["at_me"])
 
     def test_same_sender_followup_supplement_and_caps(self):
         b = assist_bridge()

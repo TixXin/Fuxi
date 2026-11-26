@@ -218,6 +218,8 @@ class FlowTest(unittest.TestCase):
         msg = qr.refresh(T_DUE)
         self.assertIn("2026-12-09", msg)
         self.assertIn("#1300", msg)
+        ref = [c for c in http.calls if c[1] == "/git/refs"][0][2]
+        self.assertEqual(ref["ref"], "refs/heads/community/wechat-qr-20261203-110000")
         merge = [c for c in http.calls if c[1] == "/pulls/1300/merge"][0][2]
         self.assertEqual(merge["merge_method"], "squash")
         self.assertTrue(merge["commit_title"].startswith("docs(community): refresh the WeChat group QR code through 2026-12-09"))

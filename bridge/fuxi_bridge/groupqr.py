@@ -414,7 +414,7 @@ class GroupQr:
         title = f"docs(community): refresh the WeChat group QR code through {exp.isoformat()}"
         body = (f"浮汐自动换的浮屿用户群微信二维码：微信里新码显示「{shot['expires_text'] or '7 天内有效'}」，"
                 f"expiresAt 填 {exp.isoformat()}。\n\n不跑 CI：只改二维码图片和 community.json，由仓库管理员 token 直接合并。")
-        res = self.gh.publish(files, f"community/wechat-qr-{today:%Y%m%d-%H%M}", title, body)
+        res = self.gh.publish(files, f"community/wechat-qr-{time.strftime('%Y%m%d-%H%M%S', time.localtime(now))}", title, body)
         st.update(url=shot["url"], expires=exp.isoformat(), last_error="", error_day="", done_day=today.isoformat(),
                   last_pr=f"#{res['number']} {res['url']}")
         self._save()

@@ -100,15 +100,23 @@ class WelcomeTest(unittest.TestCase):
         b.outreach.tick(DAY + 10 * 3600 + 200)
         self.assertEqual(b.send.call_count, 1)
 
-    def test_many_joins_text_at_and_outside_hours(self):
+    def test_many_joins_text_at_and_quiet_hours(self):
         b = bridge()
-        b.outreach.observe(msg(INVITE, typ="system", ts=DAY + 23 * 3600))   # 晚上 11 点进群
+        # 营业时段外（23:00）没开静默 → 等 1 分钟后立刻欢迎，不等到第二天早上 10 点
+        b.outreach.observe(msg(INVITE, typ="system", ts=DAY + 23 * 3600))
         b.outreach.tick(DAY + 23 * 3600 + 120)
-        b.send.assert_not_called()                                            # 营业时段外不发
-        b.outreach.tick(DAY + 86400 + 10 * 3600)                              # 第二天 10 点（11 小时内）
         job = b.send.call_args.args[0]
         self.assertEqual(job.at, "")
         self.assertIn("欢迎 @小红 @小刚！", job.text)
+
+        # 配了静默时段（00:30-07:30）时：静默内暂存，出静默立即发
+        b.send.reset_mock()
+        b.cfg.set("quiet", "00:30-07:30")
+        b.outreach.observe(msg(SCAN, typ="system", ts=DAY + 86400 + 1 * 3600))
+        b.outreach.tick(DAY + 86400 + 1 * 3600 + 120)
+        b.send.assert_not_called()
+        b.outreach.tick(DAY + 86400 + 7 * 3600 + 35 * 60)
+        self.assertEqual(b.send.call_count, 1)
 
 
 class IdleTest(unittest.TestCase):

@@ -257,6 +257,20 @@ class FlowTest(unittest.TestCase):
         self.assertIn("还不用换", qr.refresh(night + 20 * 3600))
         self.assertTrue(qr.due(night + 86400))
 
+    def test_nightly_retry_after_error_sends_recovery_notice(self):
+        http = FakeGitHub()
+        qr, b = make(http)
+        b.cfg.set("wechat_qr_time", "00:00")
+        night = time.mktime((2026, 11, 28, 0, 5, 0, 0, 0, -1))
+        qr._fail(night, RuntimeError("DNS 临时抖动"))
+        self.assertEqual(len(b.told), 1)
+        self.assertIn("换码失败", b.told[0])
+        qr.capture = lambda: {"url": URL2, "img": screen_with_qr(URL2), "expires": dt.date(2026, 12, 4),
+                              "expires_text": "12月5日前有效"}
+        self.assertIn("#1300", qr.refresh(night + 1800))
+        self.assertEqual(len(b.told), 2)
+        self.assertIn("换码已恢复", b.told[1])
+
     def test_nightly_same_expiry_marks_done_without_pr(self):
         http = FakeGitHub()
         qr, b = make(http)

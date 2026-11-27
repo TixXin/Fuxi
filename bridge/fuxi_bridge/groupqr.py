@@ -243,16 +243,22 @@ class GitHub:
             "User-Agent": "fuxi-bridge", "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28", "Authorization": "Bearer " + self.token,
             **({"Content-Type": "application/json"} if data else {})})
-        try:
-            with urllib.request.urlopen(req, timeout=60) as r:
-                raw = r.read()
-                return r.status, json.loads(raw) if raw else {}
-        except urllib.error.HTTPError as e:
+        for attempt in range(3):
             try:
-                msg = json.loads(e.read() or b"{}").get("message", "")
-            except ValueError:
-                msg = ""
-            return e.code, {"message": msg}
+                with urllib.request.urlopen(req, timeout=60) as r:
+                    raw = r.read()
+                    return r.status, json.loads(raw) if raw else {}
+            except urllib.error.HTTPError as e:
+                try:
+                    msg = json.loads(e.read() or b"{}").get("message", "")
+                except ValueError:
+                    msg = ""
+                return e.code, {"message": msg}
+            except (urllib.error.URLError, OSError) as e:
+                if attempt == 2:
+                    raise
+                log.info("GitHub 请求网络抖动（%s），%d 秒后重试", e, 2 * (attempt + 1))
+                time.sleep(2 * (attempt + 1))
 
     def call(self, method: str, path: str, body: dict | None = None, ok=(200, 201)) -> dict:
         if not self.token:
@@ -415,6 +421,7 @@ class GroupQr:
         body = (f"浮汐自动换的浮屿用户群微信二维码：微信里新码显示「{shot['expires_text'] or '7 天内有效'}」，"
                 f"expiresAt 填 {exp.isoformat()}。\n\n不跑 CI：只改二维码图片和 community.json，由仓库管理员 token 直接合并。")
         res = self.gh.publish(files, f"community/wechat-qr-{time.strftime('%Y%m%d-%H%M%S', time.localtime(now))}", title, body)
+        had_err = bool(st.get("error_day"))
         st.update(url=shot["url"], expires=exp.isoformat(), last_error="", error_day="", done_day=today.isoformat(),
                   last_pr=f"#{res['number']} {res['url']}")
         self._save()
@@ -422,8 +429,8 @@ class GroupQr:
             raise QrError(f"PR #{res['number']} 开好了但没合并：{res['error']}（{res['url']}）")
         msg = f"浮屿用户群二维码换好了，有效到 {exp.isoformat()}，已合入 PR #{res['number']}：{res['url']}"
         log.info(msg)
-        if not nightly:
-            self.b.tell_owner("【换码】" + msg)
+        if not nightly or had_err:
+            self.b.tell_owner(("【换码已恢复】" if had_err else "【换码】") + msg)
         return msg
 
     @staticmethod

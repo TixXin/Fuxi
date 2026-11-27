@@ -33,7 +33,7 @@ if TYPE_CHECKING:
 log = logging.getLogger("fuxi.outreach")
 
 WELCOME_WAIT = 60
-WELCOME_MAX_AGE = 12 * 3600
+WELCOME_MAX_AGE = 18 * 3600
 SUMMARY_GAP = 3600
 
 WELCOME = ("欢迎{who}！我是浮汐，浮屿的群助手，24 小时在线～用浮屿遇到问题、有想法或建议，直接在群里说就行，"
@@ -161,10 +161,13 @@ class Outreach:
         if not self.on:
             return
         now = now or time.time()
+        # 进群欢迎 24 小时即时响应（只避开手动配置的静默时段 quiet，不受 open_hours 营业时段限制）
+        quiet = (self.b.cfg.get("quiet") or "").strip()
+        if not getattr(self.b, "paused", False) and not (quiet and in_window(quiet, now)):
+            self._welcome_due(now)
         window = self.b.cfg.get("open_hours")
         if not in_window(window, now):
             return
-        self._welcome_due(now)
         self._idle_due(now)
 
     def _welcome_due(self, now: float) -> None:

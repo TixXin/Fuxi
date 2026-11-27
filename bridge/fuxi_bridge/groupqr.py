@@ -390,8 +390,10 @@ class GroupQr:
         self.state["error_day"] = day
         self._save()
         if tell:
-            self.b.tell_owner(f"【换码失败】浮屿用户群二维码没换成：{e}\n"
-                              f"每 30 分钟会再试；/换码 预演 看截图，或按浮屿 docs/features/community.md 手动换。")
+            (getattr(self.b, "notify_owner", None) or self.b.tell_owner)(
+                f"【换码失败】浮屿用户群二维码没换成：{e}\n"
+                f"每 30 分钟会再试；/换码 预演 看截图，或按浮屿 docs/features/community.md 手动换。"
+            )
 
     def refresh(self, now: float, force: bool = False) -> str:
         """检查一次，需要就换。返回一句话结果。"""
@@ -430,7 +432,8 @@ class GroupQr:
         msg = f"浮屿用户群二维码换好了，有效到 {exp.isoformat()}，已合入 PR #{res['number']}：{res['url']}"
         log.info(msg)
         if not nightly or had_err:
-            self.b.tell_owner(("【换码已恢复】" if had_err else "【换码】") + msg)
+            fn = (getattr(self.b, "notify_owner", None) or self.b.tell_owner) if nightly else self.b.tell_owner
+            fn(("【换码已恢复】" if had_err else "【换码】") + msg)
         return msg
 
     @staticmethod

@@ -71,6 +71,7 @@ class Bridge(SendingMixin, ReplyMixin, AssistMixin, GroupWorkMixin):
         self.cfg = settings.Settings(os.path.join(state, "settings.json"), dict(env))
         self.settle, self.group_settle, self.stale, self.boot_catchup_min, self.reply_self = 1.5, 3.5, 120, 60, False
         self.catchup_path = os.path.join(state, "boot_catchup.json")
+        self.owner_notify_path = os.path.join(state, "owner_notify.json")
         self.rate_chat, self.rate_global, self.quiet = 6, 20, ""
         self.extra_names: list[str] = []
         self.masters: list[str] = []
@@ -266,7 +267,7 @@ class Bridge(SendingMixin, ReplyMixin, AssistMixin, GroupWorkMixin):
             return False
         if m.type == "pat" and m.patted != self.self_wxid:
             return False  # 只关心拍了拍「我」
-        if self.in_quiet_hours():
+        if self.in_quiet_hours() and not self.is_assistant_group(m.chat):
             return False
         if not self._allowed_chat(m.chat):
             return False

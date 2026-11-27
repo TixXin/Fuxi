@@ -23,7 +23,7 @@ log = logging.getLogger(__name__)
 _ON = {"1", "true", "on", "yes", "开", "开启", "打开", "是"}
 _OFF = {"0", "false", "off", "no", "关", "关闭", "否"}
 _EMPTY = {"", "无", "空", "-", "none", "清空"}
-_QUIET = re.compile(r"^([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d$")
+_QUIET = re.compile(r"^([01]\d|2[0-3]):[0-5]\d-(([01]\d|2[0-3]):[0-5]\d|24:00)$")
 
 
 @dataclass(frozen=True)
@@ -89,7 +89,9 @@ ITEMS: list[Item] = [
     Item("group_summary_time", "群小结时间", "text", "20:00", "每天几点在反馈群发当天的反馈小结（不带人名，没有反馈不发）；空 = 不发"),
     Item("outreach", "群营业", "bool", True, "在反馈群里：新人进群欢迎、冷场时每天说一句、修好后 @ 反馈人"),
     Item("idle_hours", "冷场时长", "int", 2, "反馈群多少小时没人说话算冷场（每天最多说一次）", min=1, max=12),
-    Item("open_hours", "营业时段", "text", "10:00-21:30", "进群欢迎和冷场发言只在这段时间里发，如 10:00-21:30"),
+    Item("open_hours", "营业时段", "text", "10:00-21:30", "冷场发言和社区 PR 群播报只在这段时间里发，如 10:00-21:30"),
+    Item("owner_notify_hours", "主人通知时段", "text", "09:00-24:00",
+         "群反馈、转人工、社区 PR、夜间换码等被动私聊提醒只在这段时间发给你（其余时段暂存，到点汇总发；你主动发指令与远程 Agent 不受限）；空 = 24 小时实时发"),
     Item("fix_notify", "修复通知", "choice", "preview", "浮屿发正式版时 @ 当初反馈这些问题的人",
          {"preview": "先预览", "direct": "直接发", "off": "关闭"}),
     Item("fuyu_sync", "浮屿同步", "bool", True, "每 30 分钟同步浮屿仓库的版本、issue、PR 到 /state/fuyu（仓库同「资料仓库」），"
@@ -191,8 +193,8 @@ def parse(item: Item, raw) -> object:
         raise ValueError(f"{item.label} 格式：12:00")
     if item.key == "agent_token_expires" and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", s):
         raise ValueError(f"{item.label} 格式：2027-11-24")
-    if item.key in ("quiet", "open_hours") and not _QUIET.match(s):
-        raise ValueError(f"{item.label} 格式：00:30-07:30")
+    if item.key in ("quiet", "open_hours", "owner_notify_hours") and not _QUIET.match(s):
+        raise ValueError(f"{item.label} 格式：09:00-24:00")
     return s
 
 

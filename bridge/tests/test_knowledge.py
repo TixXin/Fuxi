@@ -164,6 +164,7 @@ def assist_bridge():
     b = object.__new__(Bridge)
     b.cfg = settings.Settings(os.path.join(tempfile.mkdtemp(), "s.json"), {})
     b.cfg.set("assistant_groups", "浮屿用户群")
+    b.cfg.set("owner_notify_hours", "")
     b.names_cache = {"g@chatroom": "浮屿用户群", "h@chatroom": "别的群"}
     k = object.__new__(kn.Knowledge)
     k.index = kn.Index(kn.chunk_file("docs/features/screenshot.md", FEATURE)
@@ -459,6 +460,41 @@ class AssistTest(unittest.TestCase):
         with mock.patch("fuxi_bridge.assist.random.random", return_value=0.0):
             b._assist("g@chatroom", p_img)
         self.assertFalse(p_img["at_me"])
+
+    def test_owner_notify_hours_defers_overnight_and_flushes_at_nine(self):
+        b = assist_bridge()
+        b.masters = ["wxid_owner"]
+        b.owner_notify_path = os.path.join(tempfile.mkdtemp(), "owner_notify.json")
+        b.cfg.set("owner_notify_hours", "09:00-24:00")
+        day = time.mktime((2026, 11, 27, 0, 0, 0, 0, 0, -1))
+
+        # 凌晨 02:30 和 04:15 的被动提醒暂存落盘，不立刻私聊
+        self.assertFalse(b.notify_owner("【浮屿群反馈】A：凌晨报错", now=day + 2 * 3600 + 30 * 60))
+        self.assertFalse(b.notify_owner("【插件市场新 PR】#8", now=day + 4 * 3600 + 15 * 60))
+        b.send.assert_not_called()
+
+        # 08:59 仍不发
+        self.assertEqual(b.flush_owner_notify(now=day + 8 * 3600 + 59 * 60), 0)
+        b.send.assert_not_called()
+
+        # 09:00 到点汇总成一条私聊发给主人
+        with mock.patch("threading.Thread") as th:
+            th.return_value.start = lambda: th.call_args.kwargs["target"]()
+            n = b.flush_owner_notify(now=day + 9 * 3600)
+        self.assertEqual(n, 2)
+        self.assertEqual(b.send.call_count, 1)
+        job = b.send.call_args.args[0]
+        self.assertEqual(job.chat, "wxid_owner")
+        self.assertIn("夜间暂存提醒汇总（共 2 条）", job.text)
+        self.assertIn("[02:30]", job.text)
+        self.assertIn("[04:15]", job.text)
+
+        # 白天/晚上（如 23:55）在 09:00-24:00 内立刻私发
+        b.send.reset_mock()
+        with mock.patch("threading.Thread") as th:
+            th.return_value.start = lambda: th.call_args.kwargs["target"]()
+            self.assertTrue(b.notify_owner("【浮屿群反馈】B：晚上反馈", now=day + 23 * 3600 + 55 * 60))
+        self.assertEqual(b.send.call_count, 1)
 
     def test_private_chat_attaches_fuyu_context(self):
         b = assist_bridge()

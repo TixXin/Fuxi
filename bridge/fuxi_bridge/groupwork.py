@@ -91,6 +91,11 @@ class GroupWorkMixin:
             self.outreach.tick(now)
         except Exception:
             log.exception("群营业定时任务出错")
+        if hasattr(self, "flush_owner_notify"):
+            try:
+                self.flush_owner_notify(now)
+            except Exception:
+                log.exception("主人夜间暂存提醒补发出错")
         try:
             self._agent_watch(now)
         except Exception:

@@ -23,6 +23,7 @@ def make_bridge():
     b.cfg.set("owners", "wxid_owner")
     b.cfg.set("announce_to", "g@chatroom")
     b.cfg.set("open_hours", "00:00-23:59")
+    b.cfg.set("owner_notify_hours", "")
     b.cfg.set("community_notify", True)
     b.cfg.set("plugins_repo", "TixXin/fuyu-plugins")
     b.names_cache = {"g@chatroom": "浮屿用户交流群", "wxid_owner": "煜哥"}

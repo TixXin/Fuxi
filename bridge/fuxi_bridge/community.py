@@ -154,6 +154,9 @@ class CommunityWatcher:
         return [c for c in chats if b._allowed_chat(c)]
 
     def _send_owner(self, text: str) -> None:
+        if hasattr(self.b, "notify_owner"):
+            self.b.notify_owner(text)
+            return
         to = self.b.owner_chat() if hasattr(self.b, "owner_chat") else "filehelper"
 
         def go():

@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import concurrent.futures as cf
+import json
 import logging
+import os
 import random
 import re
 import threading
@@ -500,7 +502,7 @@ class AssistMixin:
         return masters[0] if masters else "filehelper"
 
     def tell_owner(self, text: str) -> None:
-        """私聊主人，不等结果。"""
+        """立刻私聊主人，不等结果（用于主人主动指令的回报或紧急提醒）。"""
         to = self.owner_chat()
 
         def go():
@@ -509,8 +511,92 @@ class AssistMixin:
                 log.warning("给主人的通知没发出去（%s）：%s", to, job.error)
         threading.Thread(target=go, name="tell-owner", daemon=True).start()
 
+    def _owner_notify_lock(self) -> threading.Lock:
+        lk = getattr(self, "_owner_notify_lk", None)
+        if lk is None:
+            lk = threading.Lock()
+            self._owner_notify_lk = lk
+        return lk
+
+    def _load_owner_queue(self) -> list[dict]:
+        path = getattr(self, "owner_notify_path", "")
+        if path:
+            try:
+                with open(path, encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, list):
+                    return data
+            except (OSError, ValueError):
+                return []
+        return list(getattr(self, "_owner_notify_mem", []))
+
+    def _save_owner_queue(self, items: list[dict]) -> None:
+        items = items[-30:]
+        path = getattr(self, "owner_notify_path", "")
+        if path:
+            try:
+                os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+                tmp = path + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(items, f, ensure_ascii=False, indent=1)
+                os.replace(tmp, path)
+                return
+            except OSError as e:
+                log.warning("保存主人暂存提醒失败：%s", e)
+        self._owner_notify_mem = list(items)
+
+    def notify_owner(self, text: str, now: float | None = None) -> bool:
+        """被动提醒（群反馈、转人工、外部 PR、夜间换码等）：在 owner_notify_hours 内立刻私聊；
+        时段外（如凌晨 00:00-09:00）持久化暂存，到点由 flush_owner_notify 汇总发出。返回 True=已立即发。"""
+        from . import outreach
+
+        now = now or time.time()
+        window = (self.cfg.get("owner_notify_hours") or "").strip() if hasattr(self, "cfg") else ""
+        if not window or outreach.in_window(window, now):
+            self.tell_owner(text)
+            return True
+        with self._owner_notify_lock():
+            q = self._load_owner_queue()
+            if not any(x.get("text") == text for x in q):
+                q.append({"ts": now, "text": text})
+                self._save_owner_queue(q)
+            cnt = len(q)
+        log.info("非主人通知时段（%s），暂存 1 条私聊提醒（当前待发 %d 条）", window, cnt)
+        return False
+
+    def flush_owner_notify(self, now: float | None = None) -> int:
+        """进入主人通知时段后，把夜间暂存的私聊提醒汇总成一条发出。"""
+        from . import outreach
+
+        now = now or time.time()
+        if getattr(self, "paused", False):
+            return 0
+        window = (self.cfg.get("owner_notify_hours") or "").strip() if hasattr(self, "cfg") else ""
+        if window and not outreach.in_window(window, now):
+            return 0
+        with self._owner_notify_lock():
+            q = self._load_owner_queue()
+            if not q:
+                return 0
+            fresh = [x for x in q if now - float(x.get("ts") or 0) <= 3 * 86400 and x.get("text")]
+            self._save_owner_queue([])
+        if not fresh:
+            return 0
+        if len(fresh) == 1:
+            t = time.strftime("%H:%M", time.localtime(float(fresh[0]["ts"])))
+            msg = f"【夜间暂存提醒 {t}】\n{fresh[0]['text']}"
+        else:
+            parts = [f"【夜间暂存提醒汇总（共 {len(fresh)} 条）】"]
+            for it in fresh:
+                t = time.strftime("%H:%M", time.localtime(float(it["ts"])))
+                parts.append(f"[{t}] {it['text']}")
+            msg = "\n\n".join(parts)
+        self.tell_owner(msg)
+        log.info("已汇总补发 %d 条夜间暂存的主人私聊提醒", len(fresh))
+        return len(fresh)
+
     def _notify_feedback(self, chat: str, payload: dict, q: str) -> None:
-        """群反馈兜底接住后立刻通知主人，并在反馈群场景下补跑一次归类以带上编号与操作提示。"""
+        """群反馈兜底接住后通知主人（遵循 owner_notify_hours），并在反馈群场景下补跑一次归类以带上编号与操作提示。"""
         now = time.time()
         recent = [t for t, c in self.handoffs if now - t < 3600]
         if len(recent) >= 10 or any(c == chat and now - t < 180 for t, c in self.handoffs):
@@ -520,7 +606,6 @@ class AssistMixin:
         chat_name = self.name_of(chat)
         self.events.publish("handoff", {"chat": chat, "chat_name": chat_name,
                                         "sender": sender, "question": q[:300]})
-        to = self.owner_chat()
 
         def go():
             hint = "回复 /反馈 整理 可立刻归类，/反馈 看列表"
@@ -538,9 +623,7 @@ class AssistMixin:
                         hint = (f"已归类为反馈 FB-{iid}「{latest['title']}」\n"
                                 f"回复 /fb {iid} 看详情，/issue {iid} 开 issue，/fix {iid} [mac|win] [fg] 派修")
             text = f"【浮屿群反馈】{sender} 在「{chat_name}」反馈：\n{q[:300]}\n\n{hint}"
-            job = self.send(SendJob(chat=to, text=text, source="control"))
-            if not job.ok:
-                log.warning("群反馈通知没发出去（%s）：%s", to, job.error)
+            self.notify_owner(text)
         threading.Thread(target=go, name="fb-notify", daemon=True).start()
 
     def _handoff(self, chat: str, payload: dict, q: str) -> None:
@@ -554,11 +637,8 @@ class AssistMixin:
                                         "sender": payload.get("senderName") or "", "question": q[:300]})
         text = (f"【浮屿群求助】{payload.get('senderName') or '有人'} 在「{self.name_of(chat)}」问：\n{q[:300]}\n"
                 "资料里没找到相关内容，可能需要你来回。")
+        sent_now = self.notify_owner(text)
         to = self.owner_chat()
-
-        def go():
-            job = self.send(SendJob(chat=to, text=text, source="control"))
-            if not job.ok:
-                log.warning("转人工通知没发出去（%s）：%s", to, job.error)
-        threading.Thread(target=go, name="handoff", daemon=True).start()
-        log.info("产品助手 %s：资料里没找到，已转主人（%s）", self.name_of(chat), self.name_of(to) if to != "filehelper" else "filehelper")
+        log.info("产品助手 %s：资料里没找到，已%s（%s）", self.name_of(chat),
+                 "转主人" if sent_now else "暂存待主人通知时段转交",
+                 self.name_of(to) if to != "filehelper" else "filehelper")

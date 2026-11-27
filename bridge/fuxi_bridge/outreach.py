@@ -73,10 +73,11 @@ def parse_join(text: str) -> list[dict]:
 
 
 def parse_window(s: str) -> tuple[int, int] | None:
-    m = re.fullmatch(r"([01]?\d|2[0-3]):([0-5]\d)-([01]?\d|2[0-3]):([0-5]\d)", (s or "").strip())
+    m = re.fullmatch(r"([01]?\d|2[0-3]):([0-5]\d)-((?:[01]?\d|2[0-3]):[0-5]\d|24:00)", (s or "").strip())
     if not m:
         return None
-    a, b, c, d = map(int, m.groups())
+    a, b = int(m.group(1)), int(m.group(2))
+    c, d = (24, 0) if m.group(3) == "24:00" else map(int, m.group(3).split(":"))
     return a * 60 + b, c * 60 + d
 
 
